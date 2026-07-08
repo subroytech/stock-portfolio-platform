@@ -61,6 +61,16 @@ diagram, and all 6 phases in detail) lives in the source repo at:
 - Services ported from source repo: `parser.service.js`, `momentum.service.js`,
   `contrarianFinder.service.js`, `livePrices.service.js`, `marketData.service.js`
   — each has a matching test file in `backend/tests/`
+  - **Synced 2026-07-08** against the source repo's current state (they had drifted since
+    the initial ~June 23 port): `momentum.service.js`'s `calcKellySizing` now has the
+    score-gating fix (no entry <6, floor only ≥7); `marketData.service.js`'s `fmpGet`/
+    `getQuotes` now use the unified timeout + 401/402/403/429 handling; `contrarianFinder
+    .service.js`'s `assembleUniverse` is static-only (no more live constituent-fetch
+    attempts), `scanStock` takes a configurable `scanDays` instead of a hardcoded 5-day
+    window, its `change5d` field was renamed to `changePct`, and it now also runs the
+    "Strength List" enrichment screen. See `Incoming-Implementation/source-app-functions.md`
+    for the authoritative current behavior — **re-check that doc's own "Last updated" date
+    before assuming these services are still in sync**, since there's no automated sync.
 - Seed data ported: `cf_static_universe.js`, `empower_sector_map.js`, `header_aliases.js`,
   `ticker_sectors.js`
 
@@ -89,10 +99,15 @@ framework) are expensive to reverse once data is flowing — plan them first.
 # Cross-Repo Context
 
 The source app (`../CreateStockPortfolioViewWOSkill`) is still the live working tool.
-Features being actively developed there:
-- Contrarian Finder (scan window selector, 7–15 days)
-- Performance Widget (FMP-consistent price source, crypto exclusion)
-- Live Prices (FMP quote proxy — eventually moves to this backend's `GET /quotes`)
+As of 2026-07-08 it has: a standalone Momentum ticker input, Kelly score-gating, a
+Strength List tab (with hover-tooltip help text in `momentum-help.js`), a fully static
+Contrarian Finder universe with configurable batch/wait controls, a `tests/` directory
+(Node's built-in test runner), and a single shared `fmpGet()` fetch wrapper replacing
+what used to be four separate implementations. All of the above is now reflected in
+this backend's `momentum.service.js`/`contrarianFinder.service.js`/`marketData.service.js`
+as of the 2026-07-08 sync noted above — but this list, like that sync, will go stale the
+next time the source app changes meaningfully.
 
-When porting features here, check the source repo's `FEATURES.md` for the current
-implementation details before writing backend equivalents.
+When porting features here, check the source repo's `FEATURES.md` and
+`Incoming-Implementation/source-app-functions.md` for the current implementation
+details before writing backend equivalents — don't assume this file's summary is current.

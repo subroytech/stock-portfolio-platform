@@ -19,13 +19,13 @@ describe('buildBatches', () => {
 });
 
 describe('filterCandidates', () => {
-  test('keeps only stocks with change5d <= -threshold, excludes filterFail/noData, sorts worst-first', () => {
+  test('keeps only stocks with changePct <= -threshold, excludes filterFail/noData, sorts worst-first', () => {
     const results = [
-      { symbol: 'A', filterFail: false, noData: false, change5d: -10 },
-      { symbol: 'B', filterFail: false, noData: false, change5d: -30 },
+      { symbol: 'A', filterFail: false, noData: false, changePct: -10 },
+      { symbol: 'B', filterFail: false, noData: false, changePct: -30 },
       { symbol: 'C', filterFail: true },
       { symbol: 'D', filterFail: false, noData: true },
-      { symbol: 'E', filterFail: false, noData: false, change5d: -25 },
+      { symbol: 'E', filterFail: false, noData: false, changePct: -25 },
     ];
     const out = filterCandidates(results, 25);
     expect(out.map((r) => r.symbol)).toEqual(['B', 'E']);
@@ -43,12 +43,9 @@ describe('resolveQuality', () => {
 });
 
 describe('assembleUniverse', () => {
-  const originalFetch = global.fetch;
-  afterEach(() => { global.fetch = originalFetch; });
-
-  test('falls back to CF_STATIC lists and dedupes across tiers when FMP endpoints fail', async () => {
-    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 403 });
-    const universe = await assembleUniverse('fake-key');
+  // Static-only since 2026-07-08 - no fetch involved at all, so no mocking needed.
+  test('builds the universe from CF_STATIC lists and dedupes across tiers', () => {
+    const universe = assembleUniverse();
     expect(universe.length).toBeGreaterThan(0);
     const symbols = universe.map((u) => u.symbol);
     expect(new Set(symbols).size).toBe(symbols.length); // no duplicates
@@ -63,9 +60,9 @@ describe('scanStock', () => {
   function mockQuoteAndHistory(quote, historical) {
     global.fetch = jest.fn((url) => {
       if (url.includes('historical-price-eod')) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve(historical) });
+        return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(historical) });
       }
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(quote) });
+      return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(quote) });
     });
   }
 
@@ -75,13 +72,13 @@ describe('scanStock', () => {
     expect(r).toEqual({ symbol: 'PENNY', filterFail: true });
   });
 
-  test('flags noData when fewer than 6 days of history are available', async () => {
+  test('flags noData when fewer than scanDays+1 days of history are available', async () => {
     mockQuoteAndHistory({ price: 100, marketCap: 1e10 }, [{ date: '2026-06-20', close: 100 }]);
-    const r = await scanStock('THIN', 'key', { minPrice: 10, minMarketCap: 5e9 });
+    const r = await scanStock('THIN', 'key', { minPrice: 10, minMarketCap: 5e9 }, 7);
     expect(r).toEqual({ symbol: 'THIN', filterFail: false, noData: true });
   });
 
-  test('computes change5d as the % move from 5 trading days ago to the latest close', async () => {
+  test('computes changePct as the % move from scanDays trading days ago to the latest close', async () => {
     const hist = [
       { date: '2026-06-22', close: 80 },
       { date: '2026-06-19', close: 85 },
@@ -91,11 +88,54 @@ describe('scanStock', () => {
       { date: '2026-06-15', close: 100 },
     ];
     mockQuoteAndHistory({ price: 80, marketCap: 1e10, name: 'Test Co', sector: 'Technology', volume: 1000, avgVolume: 800 }, hist);
-    const r = await scanStock('DROP', 'key', { minPrice: 10, minMarketCap: 5e9 });
+    const r = await scanStock('DROP', 'key', { minPrice: 10, minMarketCap: 5e9 }, 5);
     expect(r.filterFail).toBe(false);
     expect(r.noData).toBe(false);
     // mktClosed false (hist[0].date != today) -> endPrice=price(80), startClose=hist[4].close(98)
-    expect(r.change5d).toBeCloseTo((80 - 98) / 98 * 100, 6);
+    expect(r.changePct).toBeCloseTo((80 - 98) / 98 * 100, 6);
+    expect(r.strength).toBeNull(); // only 6 closes available, well under the 50-close strength-screen minimum
+  });
+
+  test('strength is null when fewer than 50 closes are available, even with plenty of days for the decline scan', async () => {
+    const hist = Array.from({ length: 15 }, (_, i) => ({ date: `2026-06-${10 + i}`, close: 100 + i, low: 99 + i }));
+    mockQuoteAndHistory({ price: 114, marketCap: 1e10, name: 'Short Co', sector: 'Technology' }, hist.slice().reverse());
+    const r = await scanStock('SHORTHIST', 'key', { minPrice: 10, minMarketCap: 5e9 }, 7);
+    expect(r.noData).toBe(false);
+    expect(r.strength).toBeNull();
+  });
+
+  test('strength screen qualifies a stock with RSI in the ideal zone, above both SMAs, and no recent spike', async () => {
+    // Verified empirically (not hand-computed) against the real mwSMA/mwRSI: an
+    // oldest->newest series stepping +2/-1 alternately from 100 over 55 bars
+    // yields RSI ~65.09, price(127) > sma20(123) > sma50(115.5).
+    const oldestFirst = [100];
+    for (let i = 1; i < 55; i++) oldestFirst.push(oldestFirst[i - 1] + (i % 2 === 1 ? 2 : -1));
+    const newestFirstCloses = [...oldestFirst].reverse();
+    const hist = newestFirstCloses.map((close, i) => ({
+      date: `2026-0${1 + Math.floor(i / 28)}-${String(1 + (i % 28)).padStart(2, '0')}`,
+      close,
+      low: close - 1,
+    }));
+    const price = newestFirstCloses[0]; // 127
+
+    mockQuoteAndHistory(
+      { price, marketCap: 1e10, name: 'Strength Co', sector: 'Technology', volume: 1000, avgVolume: 800 },
+      hist,
+    );
+    const r = await scanStock('STRONG', 'key', { minPrice: 10, minMarketCap: 5e9 }, 7);
+
+    expect(r.filterFail).toBe(false);
+    expect(r.noData).toBe(false);
+    expect(r.changePct).toBeLessThan(10); // hasn't already spiked
+    expect(r.strength).not.toBeNull();
+    expect(r.strength.rsi).toBeGreaterThanOrEqual(55);
+    expect(r.strength.rsi).toBeLessThanOrEqual(68);
+    expect(r.strength.sma20).toBeLessThan(price);
+    expect(r.strength.sma50).toBeLessThan(price);
+    expect(r.strength.rr).toBeGreaterThanOrEqual(0);
+    expect(r.strength.kF).toBeGreaterThanOrEqual(0);
+    expect(r.strength.halfKelly).toBeGreaterThanOrEqual(0);
+    expect(r.strength.halfKelly).toBeLessThanOrEqual(0.20);
   });
 });
 
@@ -104,7 +144,7 @@ describe('runScan (integration, no real network/timers)', () => {
   afterEach(() => { global.fetch = originalFetch; });
 
   test('assembles a universe, scans it in batches, and returns results with waitSeconds=0', async () => {
-    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 403 }); // forces static fallback + filterFail for all (no quote data)
+    global.fetch = jest.fn().mockResolvedValue({ status: 403, ok: false }); // forces filterFail for all (no quote data)
     const out = await runScan({ key: 'fake-key', batchSize: 5, maxBatches: 1, waitSeconds: 0 });
     expect(out.universeSize).toBeGreaterThan(0);
     expect(out.scanned).toBe(5);

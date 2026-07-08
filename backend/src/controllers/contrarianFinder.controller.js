@@ -7,6 +7,7 @@ async function scan(req, res, next) {
     batchSize,
     maxBatches,
     qualityPreset,
+    scanDays,
   } = req.body || {};
 
   try {
@@ -16,6 +17,7 @@ async function scan(req, res, next) {
       batchSize: batchSize ? parseInt(batchSize, 10) : undefined,
       maxBatches: maxBatches ? parseInt(maxBatches, 10) : undefined,
       qualityPreset,
+      scanDays: scanDays ? parseInt(scanDays, 10) : undefined,
     });
     const candidates = cf.filterCandidates(results, parseInt(threshold, 10) || 25);
     res.json({ universeSize, scanned, threshold: parseInt(threshold, 10) || 25, candidates });

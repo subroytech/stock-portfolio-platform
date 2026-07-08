@@ -58,23 +58,60 @@ describe('mwBB', () => {
 });
 
 describe('calcKellySizing', () => {
+  // Gating matrix mirrors the source app's tests/momentum.test.js — score <6
+  // means no position regardless of R:R; the 10% floor only applies at
+  // score >=7; the 20% cap always applies at any qualifying score.
   test('returns zero position sizing for non-positive R:R', () => {
-    const s = calcKellySizing(0, 50000, 100);
+    const s = calcKellySizing(0, 50000, 100, 8);
     expect(s.kF).toBe(0);
     expect(s.hk).toBe(0);
     expect(s.pos).toBe(0);
     expect(s.sh).toBe(0);
   });
 
+  test('score below 6 => no position, regardless of R:R', () => {
+    const s = calcKellySizing(3, 50000, 100, 5);
+    expect(s.noEntry).toBe(true);
+    expect(s.hk).toBe(0);
+    expect(s.pos).toBe(0);
+    expect(s.sh).toBe(0);
+  });
+
+  test('score 6 => sized, but NO 10% floor applied', () => {
+    // rr=1.0 => kF=0.10 => kF/2=0.05, below the 10% floor
+    const s = calcKellySizing(1.0, 100000, 100, 6);
+    expect(s.noEntry).toBe(false);
+    expect(s.kF).toBeCloseTo(0.10, 6);
+    expect(s.hk).toBeCloseTo(0.05, 6);
+  });
+
+  test('score 7+ => 10% floor kicks in for the same R:R that scored 5% at score 6', () => {
+    const s = calcKellySizing(1.0, 100000, 100, 7);
+    expect(s.noEntry).toBe(false);
+    expect(s.hk).toBeCloseTo(0.10, 6);
+  });
+
   test('caps Half-Kelly between 10% and 20% of capital for a strong R:R', () => {
-    const s = calcKellySizing(5, 50000, 100); // high R:R -> kF large -> hk capped at 0.20
+    const s = calcKellySizing(5, 50000, 100, 8); // high R:R -> kF large -> hk capped at 0.20
     expect(s.hk).toBeCloseTo(0.20, 6);
     expect(s.pos).toBeCloseTo(10000, 6);
     expect(s.sh).toBe(100); // floor(10000 / 100)
   });
 
+  test('20% cap applies at score 6 too, same as score 7+', () => {
+    const s6 = calcKellySizing(5, 50000, 100, 6);
+    const s8 = calcKellySizing(5, 50000, 100, 8);
+    expect(s6.hk).toBeCloseTo(0.20, 6);
+    expect(s8.hk).toBeCloseTo(0.20, 6);
+  });
+
   test('computes shares as floor(position $ / entry price)', () => {
-    const s = calcKellySizing(3, 10000, 33);
+    const s = calcKellySizing(3, 10000, 33, 8);
     expect(s.sh).toBe(Math.floor(s.pos / 33));
+  });
+
+  test('entryMid of 0 yields 0 shares without throwing (division guard)', () => {
+    const s = calcKellySizing(1.0, 100000, 0, 7);
+    expect(s.sh).toBe(0);
   });
 });

@@ -53,13 +53,20 @@ function mwBB(a, n = 20) {
   return { upper: mid + 2 * sd, mid, lower: mid - 2 * sd, bw: mid > 0 ? 4 * sd / mid : 0 };
 }
 
-// Half-Kelly position sizing.
-function calcKellySizing(rr, capital, entryMid) {
+// Half-Kelly position sizing. Gated by momentum score: score <6 -> no entry
+// regardless of Kelly output; the 10% floor only applies when score >=7
+// (per momentum-trading skill spec).
+function calcKellySizing(rr, capital, entryMid, score) {
   const kF = rr > 0 ? Math.max((0.55 * rr - 0.45) / rr, 0) : 0;
-  const hk = kF > 0 ? Math.min(Math.max(kF / 2, 0.10), 0.20) : 0;
+  const noEntry = score < 6;
+  let hk = 0;
+  if (!noEntry && kF > 0) {
+    hk = score >= 7 ? Math.min(Math.max(kF / 2, 0.10), 0.20)
+      : Math.min(kF / 2, 0.20);
+  }
   const pos = capital * hk;
   const sh = entryMid > 0 ? Math.floor(pos / entryMid) : 0;
-  return { kF, hk, pos, sh };
+  return { kF, hk, pos, sh, noEntry };
 }
 
 module.exports = { mwSMA, mwEMA, mwRSI, mwMACD, mwBB, calcKellySizing };

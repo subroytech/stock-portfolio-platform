@@ -7,18 +7,30 @@ const env = require('../config/env');
 
 class MissingApiKeyError extends Error {}
 
-// Throws on HTTP errors and FMP error-message responses.
+// Single shared fetch wrapper for every FMP call in this service.
+// - Aborts after timeoutMs (default 20s) so a hung request can't block a request.
+// - HTTP 402 (plan-tier restriction) resolves to null - treated as "no data", not an error.
+// - 401/403/429 and any other non-OK status, plus an FMP { "Error Message": ... } body, throw.
 // Use Promise.allSettled at call sites to handle partial failures gracefully.
-async function fmpGet(url) {
-  const res = await fetch(url);
-  if (!res.ok) {
-    let body = '';
-    try { body = await res.text(); } catch (_) { /* ignore */ }
-    throw new Error(`HTTP ${res.status}${body ? ': ' + body.slice(0, 120) : ''}`);
+async function fmpGet(url, { timeoutMs = 20000 } = {}) {
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (res.status === 402) return null;
+    if (res.status === 401 || res.status === 403) throw new Error('Invalid or expired FMP API key.');
+    if (res.status === 429) throw new Error('FMP rate limit reached. Please wait a moment before retrying.');
+    if (!res.ok) {
+      let body = '';
+      try { body = await res.text(); } catch (_) { /* ignore */ }
+      throw new Error(`HTTP ${res.status}${body ? ': ' + body.slice(0, 120) : ''}`);
+    }
+    const data = await res.json();
+    if (data?.['Error Message']) throw new Error('Invalid or expired FMP API key.');
+    return data;
+  } finally {
+    clearTimeout(tid);
   }
-  const data = await res.json();
-  if (data?.['Error Message']) throw new Error('KEY_INVALID: ' + data['Error Message']);
-  return data;
 }
 
 function requireFmpKey() {
@@ -31,23 +43,20 @@ function requireFmpKey() {
 async function getQuotes(symbols) {
   const key = requireFmpKey();
   const results = await Promise.allSettled(
-    symbols.map(async (sym) => {
-      const res = await fetch(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${key}`);
-      if (res.status === 402) return null;
-      if (!res.ok) throw new Error(`HTTP ${res.status} for ${sym}`);
-      const data = await res.json();
-      if (!data) return null;
-      if (data['Error Message']) throw new Error('KEY_INVALID');
-      const q = Array.isArray(data) ? data[0] : data;
-      if (!q || !q.price) return null;
-      const livePx = parseFloat(q.price);
-      const chgDol = parseFloat(q.change ?? q.priceChange) || 0;
-      const prevPx = livePx - chgDol;
-      const chgPct = prevPx > 0.01
-        ? (chgDol / prevPx) * 100
-        : parseFloat(q.changesPercentage ?? q.changePercent) || 0;
-      return { sym, price: livePx, changeDollar: chgDol, changePercent: chgPct, name: q.name || '' };
-    })
+    symbols.map((sym) =>
+      fmpGet(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${key}`, { timeoutMs: 15000 }).then((data) => {
+        if (!data) return null;
+        const q = Array.isArray(data) ? data[0] : data;
+        if (!q || !q.price) return null;
+        const livePx = parseFloat(q.price);
+        const chgDol = parseFloat(q.change ?? q.priceChange) || 0;
+        const prevPx = livePx - chgDol;
+        const chgPct = prevPx > 0.01
+          ? (chgDol / prevPx) * 100
+          : parseFloat(q.changesPercentage ?? q.changePercent) || 0;
+        return { sym, price: livePx, changeDollar: chgDol, changePercent: chgPct, name: q.name || '' };
+      })
+    )
   );
 
   const map = {};
@@ -59,8 +68,8 @@ async function getQuotes(symbols) {
   }
 
   const errors = results.filter((r) => r.status === 'rejected');
-  if (errors.length && errors[0].reason?.message?.includes('KEY_INVALID')) {
-    throw new Error('Invalid or expired FMP API key.');
+  if (errors.length && errors[0].reason?.message?.includes('Invalid or expired FMP API key')) {
+    throw new Error('Invalid or expired FMP API key. Please update your key.');
   }
   return map;
 }

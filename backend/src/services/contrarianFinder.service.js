@@ -4,28 +4,29 @@
 // the browser fetch + localStorage key, and all UI orchestration (progress
 // bars, cfRun's DOM wiring) is dropped — the backend now rate-limits itself
 // against FMP server-side instead of driving a visual countdown.
+//
+// Synced 2026-07-08 against the source app's post-fix state: universe
+// assembly is static-only (the live FMP constituent/etf-holder endpoints all
+// require a paid plan tier beyond what's active — confirmed 402/403 on every
+// call, and they always fell through to CF_STATIC anyway), the scan window is
+// configurable instead of a hardcoded 5 trading days, and each scanned stock
+// is additionally screened for "Strength List" candidacy.
 
 const env = require('../config/env');
 const { CF_ETF_LIST, CF_STATIC } = require('../db/seed/cf_static_universe');
+const { fmpGet } = require('./marketData.service');
+const { mwSMA, mwRSI, mwBB } = require('./momentum.service');
 
-const CF_BATCH = 150;
-const CF_WAIT_SECONDS = 60;
+const CF_BATCH = 125;
+const CF_WAIT_SECONDS = 62; // real wait between batches - small buffer to avoid overlap
 const CF_MAX = 450;
 const CF_MAX_BATCHES = 3;
+const CF_STRENGTH_LOOKBACK = 60; // bars needed for SMA50/RSI14 strength screen
 
-async function cfFetchJson(url) {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return { ok: false, status: res.status };
-    const data = await res.json();
-    if (data?.['Error Message']) return { ok: false, status: 401 };
-    return { ok: true, data };
-  } catch (_e) {
-    return { ok: false, status: 0 };
-  }
-}
-
-async function assembleUniverse(key) {
+// Built entirely from the static CF_STATIC lists - see header note above for
+// why the live constituent-fetch path was removed rather than kept as a
+// primary attempt with a fallback.
+function assembleUniverse() {
   const seen = new Set();
   const universe = [];
   const add = (sym, tier, source) => {
@@ -35,47 +36,26 @@ async function assembleUniverse(key) {
     universe.push({ symbol: s, tier, source });
   };
 
-  // Tier 1: DJ30
-  const dj30 = await cfFetchJson(`${env.fmpBaseUrl}/dowjones-constituent?apikey=${key}`);
-  if (dj30.ok) (Array.isArray(dj30.data) ? dj30.data : []).forEach((s) => add(s.symbol, 1, 'DJ30'));
-  else CF_STATIC.dj30.forEach((s) => add(s, 1, 'DJ30'));
-
-  // Tier 2: NDX100
-  const ndx = await cfFetchJson(`${env.fmpBaseUrl}/nasdaq-constituent?apikey=${key}`);
-  if (ndx.ok) (Array.isArray(ndx.data) ? ndx.data : []).forEach((s) => add(s.symbol, 2, 'NDX100'));
-  else CF_STATIC.ndx100.forEach((s) => add(s, 2, 'NDX100'));
-
-  // Tier 3: S&P 500 Top 200
-  const sp5 = await cfFetchJson(`${env.fmpBaseUrl}/sp500-constituent?apikey=${key}`);
-  if (sp5.ok) {
-    let n = 0;
-    for (const s of Array.isArray(sp5.data) ? sp5.data : []) {
-      if (n >= 200) break;
-      const before = universe.length;
-      add(s.symbol, 3, 'S&P 500');
-      if (universe.length > before) n++;
-    }
-  } else CF_STATIC.sp500.forEach((s) => add(s, 3, 'S&P 500'));
-
-  // Tier 4: Sector ETF constituents
+  CF_STATIC.dj30.forEach((s) => add(s, 1, 'DJ30'));
+  CF_STATIC.ndx100.forEach((s) => add(s, 2, 'NDX100'));
+  CF_STATIC.sp500.forEach((s) => add(s, 3, 'S&P 500'));
   for (const etf of CF_ETF_LIST) {
     if (universe.length >= CF_MAX) break;
-    const res = await cfFetchJson(`${env.fmp3BaseUrl}/etf-holder/${etf}?apikey=${key}`);
-    if (res.ok) (Array.isArray(res.data) ? res.data : []).forEach((h) => add(h.asset || h.symbol, 4, etf));
-    else (CF_STATIC.etf[etf] || []).forEach((s) => add(s, 4, etf));
+    (CF_STATIC.etf[etf] || []).forEach((s) => add(s, 4, etf));
   }
 
   return universe;
 }
 
-async function scanStock(sym, key, quality) {
+async function scanStock(sym, key, quality, scanDays = 7) {
+  const limit = Math.max(scanDays + 2, CF_STRENGTH_LOOKBACK);
   const [qr, hr] = await Promise.allSettled([
-    cfFetchJson(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${key}`),
-    cfFetchJson(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${sym}&limit=7&apikey=${key}`),
+    fmpGet(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${key}`),
+    fmpGet(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${sym}&limit=${limit}&apikey=${key}`),
   ]);
 
-  const q = (qr.status === 'fulfilled' && qr.value.ok) ? (Array.isArray(qr.value.data) ? qr.value.data[0] : qr.value.data) : null;
-  const hist = (hr.status === 'fulfilled' && hr.value.ok) ? (Array.isArray(hr.value.data) ? hr.value.data : (hr.value.data?.historical || [])) : [];
+  const q = (qr.status === 'fulfilled' && qr.value) ? (Array.isArray(qr.value) ? qr.value[0] : qr.value) : null;
+  const hist = (hr.status === 'fulfilled' && hr.value) ? (Array.isArray(hr.value) ? hr.value : (hr.value?.historical || [])) : [];
 
   const price = q?.price ?? null;
   const mktCap = q?.marketCap ?? null;
@@ -83,14 +63,46 @@ async function scanStock(sym, key, quality) {
   const filterFail = (!price || price < quality.minPrice) || (!mktCap || mktCap < quality.minMarketCap);
   if (filterFail) return { symbol: sym, filterFail: true };
 
-  if (hist.length < 6) return { symbol: sym, filterFail: false, noData: true };
+  if (hist.length < scanDays + 1) return { symbol: sym, filterFail: false, noData: true };
 
   const today = new Date().toISOString().slice(0, 10);
   const mktClosed = hist[0]?.date === today;
   const endPrice = mktClosed ? hist[0].close : price;
-  const startClose = mktClosed ? hist[5].close : hist[4]?.close;
+  const startClose = mktClosed ? hist[scanDays].close : hist[scanDays - 1]?.close;
 
   if (!endPrice || !startClose || startClose === 0) return { symbol: sym, filterFail: false, noData: true };
+
+  const changePct = (endPrice - startClose) / startClose * 100;
+
+  // Bullish "strength" screen - RSI ideal zone + above both SMAs + hasn't already spiked.
+  let strength = null;
+  const closes = hist.map((h) => parseFloat(h.close)).filter((v) => !Number.isNaN(v));
+  const lows = hist.map((h) => parseFloat(h.low)).filter((v) => !Number.isNaN(v));
+  if (closes.length >= 50) {
+    const sma20 = mwSMA(closes, 20);
+    const sma50 = mwSMA(closes, 50);
+    const rsi = mwRSI(closes, 14);
+    if (rsi >= 55 && rsi <= 68 && price > sma20 && price > sma50 && changePct < 10) {
+      // Estimated R:R/Kelly% - entry/target formulas match the Momentum service.
+      // Stop-loss prefers the TIGHTEST of the three candidates (Math.max, not
+      // Math.min like the real per-ticker analysis) so R:R stays meaningful
+      // for mild "hasn't spiked yet" pullbacks instead of reading 0% across
+      // the board, floored relative to entryMid to avoid a near-zero-
+      // denominator blowup (root-caused on real VLO/TMO data in the source app).
+      const bb = mwBB(closes, 20);
+      const swingLow = lows.length >= 5 ? Math.min(...lows.slice(0, 5)) : price * 0.97;
+      const entryLow = price > sma20 ? sma20 : price * 0.99;
+      const entryMid = (entryLow + price) / 2;
+      const tightStop = Math.max(bb.lower * 0.99, swingLow * 0.99, price * 0.97);
+      const minRiskFloor = entryMid * 0.98;
+      const stopLoss = Math.min(tightStop, minRiskFloor);
+      const target = bb.upper;
+      const rr = (entryMid - stopLoss) > 0.01 ? (target - entryMid) / (entryMid - stopLoss) : 0;
+      const kF = rr > 0 ? Math.max((0.55 * rr - 0.45) / rr, 0) : 0;
+      const halfKelly = kF > 0 ? Math.min(kF / 2, 0.20) : 0;
+      strength = { rsi, sma20, sma50, rr, kF, halfKelly };
+    }
+  }
 
   return {
     symbol: sym,
@@ -100,10 +112,11 @@ async function scanStock(sym, key, quality) {
     mktCap,
     volume: q?.volume ?? null,
     avgVol: q?.avgVolume ?? null,
-    change5d: (endPrice - startClose) / startClose * 100,
+    changePct,
     mktClosed,
     filterFail: false,
     noData: false,
+    strength,
   };
 }
 
@@ -117,9 +130,9 @@ function buildBatches(universe, batchSize, maxBatches) {
   return batches;
 }
 
-async function scanBatch(stocks, key, quality) {
+async function scanBatch(stocks, key, quality, scanDays) {
   const settled = await Promise.allSettled(stocks.map(async (stock) => {
-    const r = await scanStock(stock.symbol, key, quality);
+    const r = await scanStock(stock.symbol, key, quality, scanDays);
     r.source = stock.source;
     return r;
   }));
@@ -134,16 +147,19 @@ function resolveQuality(qualityPreset) {
   return qualityPreset === 'relaxed' ? { minPrice: 5, minMarketCap: 2.5e9 } : { minPrice: 10, minMarketCap: 5e9 };
 }
 
-// No UI countdown — waits CF_WAIT_SECONDS between batches server-side as a
+// No UI countdown — waits waitSeconds between batches server-side as a
 // rate-limit buffer against FMP. waitSeconds is overridable for tests.
-async function runScan({ key, batchSize = CF_BATCH, maxBatches = CF_MAX_BATCHES, qualityPreset = 'standard', waitSeconds = CF_WAIT_SECONDS } = {}) {
+async function runScan({
+  key, batchSize = CF_BATCH, maxBatches = CF_MAX_BATCHES, qualityPreset = 'standard',
+  waitSeconds = CF_WAIT_SECONDS, scanDays = 7,
+} = {}) {
   const quality = resolveQuality(qualityPreset);
-  const universe = await assembleUniverse(key);
+  const universe = assembleUniverse();
   const batches = buildBatches(universe, batchSize, maxBatches);
 
   const allResults = [];
   for (let i = 0; i < batches.length; i++) {
-    const r = await scanBatch(batches[i], key, quality);
+    const r = await scanBatch(batches[i], key, quality, scanDays);
     allResults.push(...r);
     if (i < batches.length - 1 && waitSeconds > 0) await sleep(waitSeconds * 1000);
   }
@@ -153,11 +169,11 @@ async function runScan({ key, batchSize = CF_BATCH, maxBatches = CF_MAX_BATCHES,
 
 function filterCandidates(results, threshold) {
   return results
-    .filter((r) => !r.filterFail && !r.noData && r.change5d !== undefined && r.change5d <= -threshold)
-    .sort((a, b) => a.change5d - b.change5d);
+    .filter((r) => !r.filterFail && !r.noData && r.changePct !== undefined && r.changePct <= -threshold)
+    .sort((a, b) => a.changePct - b.changePct);
 }
 
 module.exports = {
-  CF_BATCH, CF_MAX, CF_MAX_BATCHES, CF_ETF_LIST,
+  CF_BATCH, CF_MAX, CF_MAX_BATCHES, CF_ETF_LIST, CF_STRENGTH_LOOKBACK,
   assembleUniverse, scanStock, buildBatches, scanBatch, runScan, filterCandidates, resolveQuality,
 };
