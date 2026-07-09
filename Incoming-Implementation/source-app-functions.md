@@ -1,7 +1,7 @@
 # Source App — Complete Function Reference
 > Source: `../CreateStockPortfolioViewWOSkill`
 > Purpose: Implementation guide for porting each module to the backend platform.
-> Last updated: 2026-07-07 (regenerated from scratch — supersedes the 2026-07-03 version)
+> Last updated: 2026-07-08 (patched §3/§4/§5 + API summary for the "Today's $ Performance" feature — full regeneration was 2026-07-07, superseding the 2026-07-03 version)
 
 ---
 
@@ -203,7 +203,7 @@ FINNHUB = 'https://finnhub.io/api/v1'
 
 ## 3. `portfolio.js` — State, Parsers, Metrics, Charts, Table
 
-**Role:** The core module. Wrapped in an IIFE. Owns the global state object `S`, all file parsers, dashboard rendering, the holdings table, chart rendering, export/print functions, and localStorage persistence. Unchanged since the last porting pass.
+**Role:** The core module. Wrapped in an IIFE. Owns the global state object `S`, all file parsers, dashboard rendering, the holdings table, chart rendering, export/print functions, and localStorage persistence. **Chart rendering extended 2026-07-08** — see `getTodayDollarChanges()`/`renderTodayPerformancePies()`/`renderAllocationView()`/`renderBarChart()` below; parsers/table/metrics are unchanged.
 
 ---
 
@@ -218,7 +218,7 @@ S = {
   sortDir: 'asc',
   page: 1,
   query: '',         // search query string
-  pieMode: 'sector', // 'sector' | 'stock'
+  pieMode: 'sector', // 'sector' | 'stock' | 'today' (added 2026-07-08 — Allocation widget's dual-pie $ view)
   barMode: 'outlier',// 'outlier' | 'all'
   theme: '...',
   xDayOverride: null,    // Map<ticker, returnPct> | null — performance bar data
@@ -377,26 +377,53 @@ Each holding object in `S.raw` has:
   - **Stock mode:** Sorts holdings by `currentValue`, top 19 + `'Other'`
   - Destroys existing chart instance before recreating
   - Tooltip shows dollar value and percentage of total
+- Only rendered when `S.pieMode` is `'sector'`/`'stock'` — see `renderAllocationView()` below for the third `'today'` mode.
 
 ---
 
-### `renderBarChart(data, overrideReturns)`
-- **Input:** `holding[]`, `Map<ticker, returnPct> | undefined`
+### `getTodayDollarChanges()` (new 2026-07-08, exposed as `window.getTodayDollarChanges`)
+- **Output:** `Array<{ symbol, name, dollarChange }>`
+- **Action:** Merges Live Prices' two price maps (`window.lastLivePriceMap` + `window.lastLiveAllOthersPriceMap` — see §5) and, for every holding with an entry in either, computes `dollarChange = quantity × changeDollar`. Empty array means Live Prices hasn't been refreshed yet.
+- **Used by:** `renderTodayPerformancePies()` (this file) and `portfolio-performance.js`'s `renderTodayDollarTab()` (§4) — the single shared computation both new "Today's $" UI surfaces consume.
+- **Porting note:** `changeDollar` already reflects "today's change if market open, previous session's if closed" (an FMP `/quote` field), so no separate open/closed detection logic exists or is needed here.
+
+---
+
+### `renderTodayPerformancePies()` (new 2026-07-08)
+- **Action:** Renders two Chart.js doughnuts side by side into `#pieChartUp`/`#pieChartDown` — Gainers (positive `dollarChange`, sorted descending) and Losers (negative `dollarChange`, sorted ascending, sliced by `Math.abs()`). Every stock still gets its own slice and tooltip (ticker + signed `$` amount via `fmt$`).
+- **Legend:** capped to the top 8 entries by magnitude via a `generateLabels` override (`Chart.overrides.doughnut.plugins.legend.labels.generateLabels(chart).slice(0,8)`) — this only shortens the legend list, it does **not** bucket or drop any underlying slice/data.
+- Shows/hides `#allocTodayRow` (the two-canvas wrapper) and `#allocTodayPlaceholder` (idle prompt) based on whether `getTodayDollarChanges()` returned anything.
+- Two new module-level Chart.js instances: `pieChartUp`, `pieChartDown` (alongside the existing `pieChart`/`barChart`).
+
+---
+
+### `renderAllocationView()` (new 2026-07-08)
+- **Action:** Dispatches the Allocation card's rendering based on `S.pieMode`:
+  - `'today'` → hides the single `#pieChart` canvas, calls `renderTodayPerformancePies()`
+  - `'sector'`/`'stock'` → hides the dual-pie wrapper/placeholder, shows `#pieChart`, calls `renderPieChart(S.raw)`
+- Called by `renderCharts()` (below) and by all three Allocation toggle button click handlers (`#toggleSector`/`#toggleStock`/`#toggleTodayPerf`), via a shared `setPieToggleActive(activeId)` helper that keeps the 3 toggle buttons mutually exclusive.
+- **Because this is part of the existing `renderAll()` → `renderCharts()` chain, the `'today'` pie view auto-refreshes on every Live Prices refresh for free** — no new cross-file hook was needed (contrast with `portfolio-performance.js`'s new tab in §4, which is *not* part of that chain and only updates lazily on click).
+
+---
+
+### `renderBarChart(data, overrideReturns, valueMode = 'pct')` (extended 2026-07-08 — new 3rd param)
+- **Input:** `holding[]`, `Map<ticker, returnPct|dollarChange> | undefined`, `valueMode: 'pct' | 'dollar'`
 - **Action:** Renders the Performance horizontal bar chart.
-  - If `overrideReturns` provided: uses the map's returnPct values (performance widget data)
-  - If not provided: uses each holding's all-time `returnPct`
+  - If `overrideReturns` provided: uses the map's values (performance widget data, in whichever unit `valueMode` implies)
+  - If not provided: uses each holding's all-time `returnPct` (always percent — `valueMode` is only meaningful when `overrideReturns` is passed)
   - Tickers absent from `overrideReturns` map return `null` and are filtered out (not shown)
   - **Outlier mode:** Top 13 advances + top 12 declines from full set, merged best→worst
   - **All mode:** All holdings sorted best→worst
   - Bar colors: green for positive, red for negative
+  - **`valueMode==='dollar'`:** y-axis ticks and tooltip use `fmt$()` instead of `fmtPct()`/`%`; `#perfChartTitle` reads `"Today's $ Gain/Loss"` instead of the period label. This is the only behavioral difference — sorting, Outlier/All mode, and bar coloring are shared code paths, not duplicated.
   - Updates the `#perfChartTitle` element
-- **Exposed as:** `window.renderBarChart` for `portfolio-performance.js`
+- **Exposed as:** `window.renderBarChart` for `portfolio-performance.js` — now called with a 3rd `'dollar'` argument from the new `renderTodayDollarTab()` (§4)
 
 ---
 
 ### `renderCharts()`
 - **Action:** Orchestrates chart rendering.
-  - Always calls `renderPieChart()`
+  - Calls `renderAllocationView()` (was a direct `renderPieChart()` call before 2026-07-08 — now dispatches per `S.pieMode`, see above)
   - If `S.xDayOverride` exists: hides placeholder, calls `renderBarChart()` with the override
   - If not: destroys bar chart, shows placeholder
 
@@ -597,6 +624,18 @@ Each holding object in `S.raw` has:
 | 90D | 90 | calendar | Nearest date match |
 | 120D | 120 | calendar | Nearest date match |
 | Custom | user input | ≤10 → trading, >10 → calendar | Per-run fetch |
+| Today ($) | — | — | Live-Prices-driven, not EOD history (added 2026-07-08, see below) |
+
+---
+
+### `renderTodayDollarTab()` (new 2026-07-08)
+- **Action:** Renders the "Today ($)" tab — a bar chart of $ gain/loss per stock, driven entirely by Live Prices data, not `S.perfHistoryMap`/EOD history like every other tab in this widget.
+  1. Calls `window.getTodayDollarChanges()` (§3, `portfolio.js`)
+  2. If empty (Live Prices never refreshed): hides `#barChart`, shows the `#perfDollarPlaceholder` idle prompt
+  3. Otherwise: builds a `Map<symbol, dollarChange>` and calls `window.renderBarChart(window.S.raw, thatMap, 'dollar')`
+- **Rendered lazily on tab click only** — deliberately does *not* auto-refresh when Live Prices refreshes (unlike the Allocation widget's equivalent "Today's $" pies in `portfolio.js`, §3, which auto-refresh for free via the existing `renderAll()` chain). This was an explicit simplicity choice for the first version; flagged in `FEATURES.md` as an easy follow-up if live-push behavior is wanted later.
+- **Tab-strip click handler** (`#perfTabStrip` listener) now special-cases `data-tab="TodayDollar"` before the existing `Custom`/`perfHistoryMap`-gated branches, and resets `#barChart`'s visibility + hides `#perfDollarPlaceholder` whenever a *different* tab is clicked (so leftover state from this tab doesn't bleed into the normal % tabs).
+- **Porting note:** this tab has no dependency on `S.perfHistoryMap` at all — a backend port only needs whatever endpoint already backs "Live Prices" (see §5's `getQuotes`-equivalent), not a new EOD-history endpoint.
 
 ---
 
@@ -729,6 +768,13 @@ lastLiveAllOthersPriceMap = {}
 
 ### `renderAllOthersList(priceMap)`
 - **Action:** Same as `renderTickerList()` but renders into `#liveAllOthersList` using holdings ranked 16+.
+
+---
+
+### `window.lastLiveAllOthersPriceMap` getter (added 2026-07-08)
+- **Type:** `Object.defineProperty(window, 'lastLiveAllOthersPriceMap', { get: () => lastLiveAllOthersPriceMap })`
+- **Gap found and fixed:** this module-level map (holdings ranked 16+) was only ever exposed internally — `window.lastLivePriceMap` (Top-15) already had a getter, but its All-Others counterpart didn't, making it invisible to other files. Added alongside the existing `lastLivePriceMap` getter.
+- **Used by:** `portfolio.js`'s `getTodayDollarChanges()` (§3), which merges both maps.
 
 ---
 
@@ -1174,7 +1220,9 @@ _charts = {}  // keyed by containerId — Chart.js instances
 | `window.resetLiveSection` | `live-prices.js` | `portfolio.js` (clearDashboard) |
 | `window.renderTickerList` | `live-prices.js` | `momentum.js` (after analysis, to update badge) |
 | `window.getPortfolioCountry` | `live-prices.js` | `app.js`, `contrarian-finder.js` |
-| `window.lastLivePriceMap` | `live-prices.js` (getter) | `portfolio.js` (theme re-render), `momentum.js` |
+| `window.lastLivePriceMap` | `live-prices.js` (getter) | `portfolio.js` (theme re-render, `getTodayDollarChanges`), `momentum.js` |
+| `window.lastLiveAllOthersPriceMap` | `live-prices.js` (getter) | `portfolio.js`'s `getTodayDollarChanges` *(new 2026-07-08 — gap fix, see §5)* |
+| `window.getTodayDollarChanges` | `portfolio.js` | `portfolio-performance.js`'s `renderTodayDollarTab()` *(new 2026-07-08)* |
 | `window.mwLastTicker` | `momentum.js` (getter) | `live-prices.js` (badge highlight) |
 | `window.mwLastData` | `momentum.js` (getter) | `live-prices.js` (badge data) |
 | `window.analyzeMomentum` | `momentum.js` | `live-prices.js` (row click handler) |
