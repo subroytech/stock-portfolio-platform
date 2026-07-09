@@ -1,7 +1,7 @@
 # Source App — Complete Function Reference
 > Source: `../CreateStockPortfolioViewWOSkill`
 > Purpose: Implementation guide for porting each module to the backend platform.
-> Last updated: 2026-07-08 (patched §3/§4/§5 + API summary for the "Today's $ Performance" feature — full regeneration was 2026-07-07, superseding the 2026-07-03 version)
+> Last updated: 2026-07-08 (2 patches: §3/§4/§5 + API summary for "Today's $ Performance", then §3's `renderTodayPerformancePies()` again for the Gainers/Losers header totals — full regeneration was 2026-07-07, superseding the 2026-07-03 version)
 
 ---
 
@@ -389,8 +389,9 @@ Each holding object in `S.raw` has:
 
 ---
 
-### `renderTodayPerformancePies()` (new 2026-07-08)
+### `renderTodayPerformancePies()` (new 2026-07-08, extended same day — see header-totals note below)
 - **Action:** Renders two Chart.js doughnuts side by side into `#pieChartUp`/`#pieChartDown` — Gainers (positive `dollarChange`, sorted descending) and Losers (negative `dollarChange`, sorted ascending, sliced by `Math.abs()`). Every stock still gets its own slice and tooltip (ticker + signed `$` amount via `fmt$`).
+- **Header totals (added same day, commit `bfdb23c`):** `#allocGainersLbl`/`#allocLosersLbl` are updated each render to `"Gainers ($1,234.56)"` / `"Losers ($-567.89)"` — the sum of `dollarChange` across **all** gainers/losers respectively (not just the top-8 legend subset), formatted with the same app-wide `fmt$()` used everywhere else (negatives render dollar-sign-first, e.g. `$-567.89`, not `-$567.89`).
 - **Legend:** capped to the top 8 entries by magnitude via a `generateLabels` override (`Chart.overrides.doughnut.plugins.legend.labels.generateLabels(chart).slice(0,8)`) — this only shortens the legend list, it does **not** bucket or drop any underlying slice/data.
 - Shows/hides `#allocTodayRow` (the two-canvas wrapper) and `#allocTodayPlaceholder` (idle prompt) based on whether `getTodayDollarChanges()` returned anything.
 - Two new module-level Chart.js instances: `pieChartUp`, `pieChartDown` (alongside the existing `pieChart`/`barChart`).
