@@ -1,6 +1,36 @@
+jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn() } }));
+const { pool } = require('../src/db/pool');
 const {
   buildBatches, filterCandidates, resolveQuality, assembleUniverse, scanStock, runScan,
 } = require('../src/services/contrarianFinder.service');
+
+// Small fixture standing in for the seeded index_constituent table - enough
+// symbols per index to exercise dedup across tiers (AAPL in both DJ30/XLK)
+// without needing a real DB connection.
+const MOCK_CONSTITUENTS = {
+  DJ30: ['AAPL', 'MSFT', 'JPM'],
+  NDX100: ['NVDA', 'AMD'],
+  SP500: ['AAPL', 'TSLA', 'META'],
+  XLK: ['AAPL', 'MSFT'],
+  XLV: ['UNH'],
+  XLF: ['JPM'],
+  XLY: ['AMZN'],
+  XLI: ['GE'],
+  XLC: ['META'],
+  XLP: ['WMT'],
+  XLE: ['XOM'],
+  XLB: ['LIN'],
+  XLU: ['NEE'],
+  XLRE: ['AMT'],
+};
+
+beforeEach(() => {
+  pool.query.mockImplementation((text, params) => {
+    const indexId = params[0];
+    const rows = (MOCK_CONSTITUENTS[indexId] || []).map((symbol) => ({ symbol }));
+    return Promise.resolve({ rows });
+  });
+});
 
 describe('buildBatches', () => {
   test('slices the universe into batches of batchSize, capped at maxBatches', () => {
@@ -43,13 +73,14 @@ describe('resolveQuality', () => {
 });
 
 describe('assembleUniverse', () => {
-  // Static-only since 2026-07-08 - no fetch involved at all, so no mocking needed.
-  test('builds the universe from CF_STATIC lists and dedupes across tiers', () => {
-    const universe = assembleUniverse();
+  // Queries index_master/index_constituent since 2026-07-10 - pool.query is
+  // mocked (see MOCK_CONSTITUENTS above), no real DB connection needed.
+  test('builds the universe from index_constituent rows and dedupes across tiers', async () => {
+    const universe = await assembleUniverse();
     expect(universe.length).toBeGreaterThan(0);
     const symbols = universe.map((u) => u.symbol);
     expect(new Set(symbols).size).toBe(symbols.length); // no duplicates
-    expect(symbols).toContain('AAPL'); // present in dj30/ndx100/sp500 static lists, added once
+    expect(symbols).toContain('AAPL'); // present in DJ30/SP500/XLK fixtures, added once
   });
 });
 

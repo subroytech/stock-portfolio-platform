@@ -19,9 +19,24 @@ users (1) ──< portfolios (many)
                   ├──< holdings (many)
                   ├──< cash_positions (1, unique per portfolio)
                   └──< uploads (many)
+
+m_index_master (1) ──< m_index_constituent (many)
+
+m_tickers  — standalone reference table, not FK'd from anywhere
 ```
 
 All child tables cascade-delete when their parent is deleted (`ON DELETE CASCADE`).
+
+`m_tickers` and `m_index_constituent.symbol` are intentionally **not** foreign-keyed to
+each other or to `holdings.symbol` — they're reference/lookup data, and a symbol appearing
+in a portfolio or an index shouldn't be blocked by missing metadata coverage.
+
+The `m_` prefix marks reference/master-data tables, distinguishing them from transactional
+tables (`users`, `portfolios`, `holdings`, ...). Renamed from bare `tickers`/`index_master`/
+`index_constituent` on 2026-07-10 (migration `009_rename_master_tables.sql`) — internal
+constraint/index names (e.g. `index_constituent_pkey`) were **not** renamed by CockroachDB's
+`ALTER TABLE ... RENAME TO`, so they still carry the old, unprefixed table name. That's
+expected — only the table names themselves changed.
 
 ## Tables
 
@@ -92,6 +107,52 @@ Indexes: `cash_positions_pkey` (PK), `cash_positions_portfolio_id_key` (unique).
 | `uploaded_at` | `TIMESTAMPTZ` | default `now()` |
 
 Indexes: `uploads_pkey` (PK), `idx_uploads_portfolio_id`.
+
+### `m_tickers`
+Stock/ETF metadata reference table. Seeded 2026-07-10 from
+`backend/src/db/seed/ticker_sectors.js` (218 rows) via `npm run seed:tickers`
+(`backend/src/db/seedTickerData.js`). Not yet queried by any service — `parser.service.js`
+still reads `ticker_sectors.js` directly for CSV-import sector fallback; only
+`contrarianFinder.service.js`'s index-composition path was switched over (see
+`m_index_constituent` below).
+
+| Column | Type | Notes |
+|---|---|---|
+| `symbol` | `VARCHAR(15)` | PK |
+| `name` | `VARCHAR(200)` | nullable, currently unpopulated by the seed script |
+| `sector` | `VARCHAR(50)` | nullable |
+| `is_etf` | `BOOLEAN` | default `false`, currently unpopulated (no rows flagged `true` yet) |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+### `m_index_master`
+One row per tracked index/sector ETF. Seeded 2026-07-10 (14 rows: `DJ30`, `NDX100`,
+`SP500`, and the 11 SPDR sector ETFs `XLK`...`XLRE`) via the same seed script.
+
+| Column | Type | Notes |
+|---|---|---|
+| `index_id` | `VARCHAR(10)` | PK |
+| `index_description` | `VARCHAR(200)` | `NOT NULL` — e.g. "Dow Jones Industrial Average" |
+
+### `m_index_constituent`
+Index/ETF membership, one row per `(index, symbol)` pair. Seeded 2026-07-10 from
+`backend/src/db/seed/cf_static_universe.js`'s `CF_STATIC` object (538 unique rows) via the
+same seed script. **Live source of truth for `contrarianFinder.service.js`'s
+`assembleUniverse()`** as of 2026-07-10 — the service queries this table directly instead
+of importing `cf_static_universe.js` (that JS file is now only read by the one-time seed
+script, not by the live request path).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `index_id` | `VARCHAR(10)` | FK → `m_index_master(index_id)`, `ON DELETE CASCADE` |
+| `symbol` | `VARCHAR(15)` | `NOT NULL`, not FK'd |
+
+Indexes: `index_constituent_pkey` (PK), `index_constituent_index_id_symbol_key` (unique on
+`index_id, symbol`), `idx_index_constituent_symbol`. (Constraint/index names retain the
+pre-rename table name — see note above.)
+
+**Re-seeding:** `npm run seed:tickers` is idempotent (`ON CONFLICT` upserts) — safe to
+re-run after `cf_static_universe.js`/`ticker_sectors.js` change, to push updates into the DB.
 
 ### `schema_migrations`
 Internal bookkeeping table created by `migrate.js` (not part of the app schema) —

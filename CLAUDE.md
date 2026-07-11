@@ -75,6 +75,15 @@ diagram, and all 6 phases in detail) lives in the source repo at:
     before assuming these services are still in sync**, since there's no automated sync.
 - Seed data ported: `cf_static_universe.js`, `empower_sector_map.js`, `header_aliases.js`,
   `ticker_sectors.js`
+- **2026-07-10 — new DB tables `m_tickers`, `m_index_master`, `m_index_constituent`**
+  (`m_` prefix marks reference/master-data tables, distinct from transactional tables —
+  see `backend/src/db/SCHEMA.md`), seeded from the JS files above via
+  `npm run seed:tickers` (idempotent). `contrarianFinder.service.js`'s `assembleUniverse()`
+  now queries `m_index_constituent` live instead of importing `cf_static_universe.js` — this
+  is a platform-specific enhancement with **no equivalent in the source app**, so don't
+  expect to find it when diffing against `source-app-functions.md`. `parser.service.js`
+  still reads `ticker_sectors.js` directly (untouched) — the `m_tickers` table exists but
+  isn't queried by any service yet.
 
 **Not yet built in Phase 1:**
 - `POST /auth/signup` and `POST /auth/login`

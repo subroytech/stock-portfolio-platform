@@ -11,22 +11,33 @@
 // call, and they always fell through to CF_STATIC anyway), the scan window is
 // configurable instead of a hardcoded 5 trading days, and each scanned stock
 // is additionally screened for "Strength List" candidacy.
+//
+// Universe assembly moved off the CF_STATIC JS module onto the
+// index_master/index_constituent DB tables on 2026-07-10 (seeded one-time
+// from db/seed/cf_static_universe.js via seedTickerData.js) — same static
+// data, now queryable/editable without a code deploy.
 
 const env = require('../config/env');
-const { CF_ETF_LIST, CF_STATIC } = require('../db/seed/cf_static_universe');
+const { pool } = require('../db/pool');
 const { fmpGet } = require('./marketData.service');
 const { mwSMA, mwRSI, mwBB } = require('./momentum.service');
 
+const CF_ETF_LIST = ['XLK', 'XLV', 'XLF', 'XLY', 'XLI', 'XLC', 'XLP', 'XLE', 'XLB', 'XLU', 'XLRE'];
 const CF_BATCH = 125;
 const CF_WAIT_SECONDS = 62; // real wait between batches - small buffer to avoid overlap
 const CF_MAX = 450;
 const CF_MAX_BATCHES = 3;
 const CF_STRENGTH_LOOKBACK = 60; // bars needed for SMA50/RSI14 strength screen
 
-// Built entirely from the static CF_STATIC lists - see header note above for
-// why the live constituent-fetch path was removed rather than kept as a
+async function fetchConstituents(indexId) {
+  const { rows } = await pool.query('SELECT symbol FROM m_index_constituent WHERE index_id = $1', [indexId]);
+  return rows.map((r) => r.symbol);
+}
+
+// Built from index_master/index_constituent — see header note above for why
+// the live FMP constituent-fetch path was removed rather than kept as a
 // primary attempt with a fallback.
-function assembleUniverse() {
+async function assembleUniverse() {
   const seen = new Set();
   const universe = [];
   const add = (sym, tier, source) => {
@@ -36,12 +47,12 @@ function assembleUniverse() {
     universe.push({ symbol: s, tier, source });
   };
 
-  CF_STATIC.dj30.forEach((s) => add(s, 1, 'DJ30'));
-  CF_STATIC.ndx100.forEach((s) => add(s, 2, 'NDX100'));
-  CF_STATIC.sp500.forEach((s) => add(s, 3, 'S&P 500'));
+  (await fetchConstituents('DJ30')).forEach((s) => add(s, 1, 'DJ30'));
+  (await fetchConstituents('NDX100')).forEach((s) => add(s, 2, 'NDX100'));
+  (await fetchConstituents('SP500')).forEach((s) => add(s, 3, 'S&P 500'));
   for (const etf of CF_ETF_LIST) {
     if (universe.length >= CF_MAX) break;
-    (CF_STATIC.etf[etf] || []).forEach((s) => add(s, 4, etf));
+    (await fetchConstituents(etf)).forEach((s) => add(s, 4, etf));
   }
 
   return universe;
@@ -154,7 +165,7 @@ async function runScan({
   waitSeconds = CF_WAIT_SECONDS, scanDays = 7,
 } = {}) {
   const quality = resolveQuality(qualityPreset);
-  const universe = assembleUniverse();
+  const universe = await assembleUniverse();
   const batches = buildBatches(universe, batchSize, maxBatches);
 
   const allResults = [];
