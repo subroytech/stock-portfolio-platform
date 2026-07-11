@@ -9,10 +9,10 @@ Rebuild plan: see `Architecture.md` in the original `CreateStockPortfolioViewWOS
 ```
 cd backend
 npm install
-cp .env.example .env   # fill in FMP/Finnhub keys; DATABASE_URL can stay blank until Aiven is provisioned
+cp .env.example .env   # fill in FMP/Finnhub keys and DATABASE_URL (CockroachDB Cloud connection string)
 npm run dev
 ```
 
 ## Status
 
-- Phase 0/1 in progress — DB-dependent endpoints (`/portfolios`, `/health`) are blocked until an Aiven Postgres instance exists. See migration files in `backend/src/db/migrations/`.
+- Phase 0/1 in progress — DB schema is provisioned and migrated on CockroachDB Cloud (`npm run migrate` in `backend/`, see `backend/src/db/migrations/`). `/portfolios` and `/health` endpoints themselves aren't built yet.

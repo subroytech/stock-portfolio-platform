@@ -5,9 +5,9 @@ function num(value, fallback) {
   return Number.isNaN(n) ? fallback : n;
 }
 
-// DATABASE_URL is intentionally allowed to be blank until the Aiven Postgres
-// instance exists (Track B of the Phase 0/1 rebuild plan) — db.js/health checks
-// are what actually require it, not boot.
+// DATABASE_URL is intentionally allowed to be blank here — it's a CockroachDB
+// Cloud connection string set per-environment in .env (never committed).
+// pool.js is what actually requires it, not boot.
 module.exports = {
   port: num(process.env.PORT, 4000),
   databaseUrl: process.env.DATABASE_URL || '',

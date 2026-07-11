@@ -20,7 +20,7 @@ database, and auth.
   API keys stored in browser `localStorage` (visible in DevTools).
 
 **This repo:** `stock-portfolio-platform`
-→ Node.js/Express backend + PostgreSQL (Aiven) + auth + REST API.
+→ Node.js/Express backend + CockroachDB Cloud + auth + REST API.
   Frontend is a placeholder — not started yet.
 
 The full Architecture document (problem statement, shortcomings table, target architecture
@@ -34,7 +34,7 @@ diagram, and all 6 phases in detail) lives in the source repo at:
 | Decision | Choice | Notes |
 |---|---|---|
 | Backend language | Node.js / Express | Already scaffolded |
-| Database | Aiven PostgreSQL ($5/mo) | Migrations written, instance not yet provisioned |
+| Database | CockroachDB Cloud | Instance created at cockroachlabs.cloud; migrations written and applied |
 | Backend host | Render / Railway / Fly.io | TBD — confirm with user before provisioning |
 | Auth approach | TBD | Choices: roll-your-own (bcrypt + JWT) vs. managed (Clerk / Auth0). Decide before Phase 2 |
 | Frontend framework | TBD | Vanilla JS (lower effort) vs. React/Vue/Svelte (recommended once auth/routing enter the picture) — decide in Phase 3 |
@@ -54,7 +54,9 @@ diagram, and all 6 phases in detail) lives in the source repo at:
 
 **Done:**
 - DB schema migrations in `backend/src/db/migrations/` (001–005): `users`, `portfolios`,
-  `holdings`, `cash_positions`, `uploads` — written but **not yet applied** (no Aiven instance)
+  `holdings`, `cash_positions`, `uploads` — written and **applied** to the CockroachDB Cloud
+  `stockPortfolioAnalysis` database via `backend/src/db/migrate.js` (`npm run migrate`),
+  2026-07-10. Connection pool: `backend/src/db/pool.js`.
 - REST endpoints built: `GET /quotes` and `POST /contrarian-finder/scan`
 - FMP/Finnhub keys moved to `backend/.env.example` + `src/config/env.js`
 - Rate limiting middleware: `src/middleware/rateLimit.js` (wraps `/quotes` and `/contrarian-finder`)
@@ -77,7 +79,7 @@ diagram, and all 6 phases in detail) lives in the source repo at:
 **Not yet built in Phase 1:**
 - `POST /auth/signup` and `POST /auth/login`
 - `GET / POST / PUT /portfolios` CRUD endpoints
-- Aiven PostgreSQL instance not provisioned — DB-dependent endpoints are blocked
+- (DB is provisioned and migrated — these are no longer blocked, just not written yet)
 
 ## Phases 2–6 — Not Started
 - Phase 2: Auth & multi-tenancy
