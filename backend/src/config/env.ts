@@ -27,6 +27,8 @@ export interface Env {
   jwtExpiresInMs: number;
   frontendOrigin: string;
   nodeEnv: string;
+
+  apiKeyEncryptionKey: string;
 }
 
 // DATABASE_URL is intentionally allowed to be blank here — it's a CockroachDB
@@ -55,6 +57,8 @@ const env: Readonly<Env> = {
   jwtExpiresInMs: ms((process.env.JWT_EXPIRES_IN || '7d') as ms.StringValue),
   frontendOrigin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000',
   nodeEnv: process.env.NODE_ENV || 'development',
+
+  apiKeyEncryptionKey: process.env.API_KEY_ENCRYPTION_KEY || '',
 };
 
 export default env;

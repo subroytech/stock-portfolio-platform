@@ -18,8 +18,11 @@ Tables are prefixed by category (settled 2026-07-10):
 - **`tx_`** — transactional, portfolio-scoped data (`tx_portfolios`, `tx_holdings`,
   `tx_cash_positions`, `tx_uploads`).
 - **`sys_`** — internal bookkeeping, not app data (`sys_schema_migrations`).
-- **unprefixed** — `users`. Deliberately left out of the `tx_` bucket (it's the account
-  root, not portfolio-scoped transactional data) and doesn't fit `m_`/`sys_` either.
+- **unprefixed** — `users`, `users_subscriptions`. Deliberately left out of the `tx_`
+  bucket (they're account-level, not portfolio-scoped transactional data) and don't fit
+  `m_`/`sys_` either. `users_subscriptions` (added 2026-07-12) is grouped with `users`
+  rather than given its own prefix, at the user's explicit request, since it's a child of
+  the account itself.
 
 Tables were originally created unprefixed (migrations 001–008) and renamed in two follow-up
 migrations: `009_rename_master_tables.sql` (the 3 `m_` tables) and
@@ -34,11 +37,13 @@ expected — only the table names themselves changed.
 
 ```
 users (1) ──< tx_portfolios (many)
-                  │
-                  ├──< tx_holdings (many)
-                  ├──< tx_cash_positions (1, unique per portfolio)
-                  ├──< tx_uploads (many)
-                  └──< tx_portfolio_action_hist (many)
+     │            │
+     │            ├──< tx_holdings (many)
+     │            ├──< tx_cash_positions (1, unique per portfolio)
+     │            ├──< tx_uploads (many)
+     │            └──< tx_portfolio_action_hist (many)
+     │
+     └──< users_subscriptions (many, one per provider e.g. fmp/finnhub)
 
 m_index_master (1) ──< m_index_constituent (many)
 
@@ -63,6 +68,43 @@ appearing in a portfolio or an index shouldn't be blocked by missing metadata co
 | `updated_at` | `TIMESTAMPTZ` | default `now()` |
 
 Indexes: `users_pkey` (PK), `users_email_key` (unique).
+
+### `users_subscriptions`
+Added by migration `013`, 2026-07-12. Per-user, per-provider API key + subscription
+metadata — one row per `(user_id, provider)`, so adding a future provider beyond
+FMP/Finnhub needs zero schema changes (just a new value in
+`userSubscription.controller.ts`'s `ALLOWED_PROVIDERS` allowlist, not a DB constraint).
+Built for the "bring-your-own API key" model (Option A) the user chose over a shared
+pooled backend key.
+
+**`api_key_encrypted` is always ciphertext** — AES-256-GCM via `backend/src/utils
+/encryption.ts` (Node's built-in `crypto`, no external dependency), storing
+`iv:authTag:ciphertext` (hex, colon-delimited) as one string. The raw key is decrypted
+server-side only to compute a masked display value (`••••••••` + last 4 chars) —
+`userSubscription.service.ts`'s `listSubscriptions()`/`upsertSubscription()` never return
+the plaintext key in their result. Requires `API_KEY_ENCRYPTION_KEY` (32-byte hex, separate
+from `JWT_SECRET`) in the environment — validated eagerly at module load, same as
+`pool.ts`'s fail-fast pattern for `DATABASE_URL`.
+
+**Not yet wired into any FMP call site** — `quotes.controller.ts`/
+`contrarianFinder.controller.ts`/`portfolio.controller.ts`'s refresh-prices all still call
+FMP with the global `env.fmpApiKey`, not a per-user key from this table. That's a separate,
+not-yet-started follow-up (Architecture.md Section 2).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` |
+| `provider` | `VARCHAR(50)` | `NOT NULL` — e.g. `'fmp'`, `'finnhub'`; validated against an app-level allowlist, not a DB constraint |
+| `api_key_encrypted` | `TEXT`/`STRING` | `NOT NULL` — always ciphertext, never plaintext |
+| `plan_tier` | `VARCHAR(50)` | nullable, free text (no DB-level enum — deliberate, per the user's own call) |
+| `status` | `VARCHAR(20)` | `NOT NULL`, default `'active'` — free text, not constrained to a fixed set |
+| `renewal_date` | `DATE` | nullable, **informational/self-reported only** — no automatic enforcement based on this date. Note: `node-pg` returns `DATE` columns as JS `Date` objects with a local-midnight quirk (observed live: `2027-01-01` round-tripped through the API as `2027-01-01T05:00:00.000Z`) — cosmetic, but worth knowing before a frontend renders this naively |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `users_subscriptions_pkey` (PK), `users_subscriptions_user_id_provider_key`
+(unique on `user_id, provider` — this is what makes `upsertSubscription()`'s
+`ON CONFLICT (user_id, provider) DO UPDATE` update-in-place instead of erroring/duplicating).
 
 ### `tx_portfolios`
 | Column | Type | Notes |

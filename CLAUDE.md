@@ -41,11 +41,11 @@ is **not** kept in sync with this one.
 | Auth approach | Roll-your-own (bcrypt + JWT, httpOnly cookie) | Decided + built 2026-07-12 — see Architecture.md Section 1 |
 | Frontend framework | TBD | Vanilla JS (lower effort) vs. React/Vue/Svelte (recommended once auth/routing enter the picture) — decide in Phase 3 |
 | API key strategy | Keys server-side only | FMP/Finnhub keys in backend `.env` — frontend never sees them |
-| User key model | TBD | Each user brings own FMP/Finnhub key (stored encrypted) vs. shared pooled key with per-user quota. Decide in Phase 2 |
+| User key model | Bring-your-own (Option A), stored encrypted | Decided + storage built 2026-07-12 (`users_subscriptions` table) — see Architecture.md Section 1. Not yet *used* by FMP call sites — see Section 2 |
 
 ---
 
-# Current Build State (as of 07-12 16:08)
+# Current Build State (as of 07-12 17:14)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -57,7 +57,7 @@ is **not** kept in sync with this one.
 - Backend fully migrated to TypeScript (`strict: true`) 2026-07-11 — see `Architecture.md`
   Section 1 for detail.
 
-## Phase 2 — Auth & Multi-Tenancy ⚠ Partially Done
+## Phase 2 — Auth & Multi-Tenancy ✅ Done
 - **Auth built 2026-07-12**: roll-your-own bcrypt + JWT in an httpOnly cookie —
   `POST /auth/signup|login|logout`, `requireAuth` middleware, wired into `app.ts` with
   `cookie-parser` + CORS credentials.
@@ -68,7 +68,16 @@ is **not** kept in sync with this one.
   `livePrices.service.ts`), plus a new buy/sell `tx_portfolio_action_hist` table populated
   by diffing holdings on every import. 113 tests passing (34 new this round). Verified live
   against the real DB via the actual dev server. Full detail in `Architecture.md` Section 1.
-- Still open: the user API-key model decision — see `Architecture.md` Section 2.
+- **User API keys built 2026-07-12**: Option A (bring-your-own) chosen; new unprefixed
+  `users_subscriptions` table (one row per `user`+`provider`, extensible to future
+  providers), `GET/PUT/DELETE /subscriptions`, keys AES-256-GCM encrypted via new
+  `src/utils/encryption.ts` (Node's built-in `crypto`, no new dependency) — raw key never
+  returned in any API response, only a masked `••••••••wxyz` value. 126 tests total (13
+  new). Verified live, including confirming the DB column holds genuine ciphertext.
+- Still open (new follow-up, not yet started): actually **using** a per-user key in the FMP
+  call sites (`quotes.controller.ts`/`contrarianFinder.controller.ts`/`portfolio
+  .controller.ts`'s refresh-prices all still call FMP with the global `env.fmpApiKey`) —
+  see `Architecture.md` Section 2.
 
 ## Phase 1 — Backend API & Data Model ✅ Done
 

@@ -53,7 +53,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 07-12 16:08
+## Section 1 — Accomplished Till 07-12 17:14
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -156,10 +156,37 @@ per-portfolio — see below), `012` creates `tx_portfolio_action_hist`. New
   this reason), deleted the portfolio and confirmed cascade cleanup across all 4 child
   tables directly in the DB.
 
-### Phase 2 — Auth & Multi-Tenancy ⚠ Partial
-Auth (signup/login/logout) and per-request `user_id` scoping (portfolio CRUD, above) both
-built. Still open: the user API-key model decision (Section 2 below) — the only Phase 2
-item from the original plan not yet resolved.
+**User-owned API keys: `users_subscriptions` table — 2026-07-12.** User picked **Option
+A** for the API-key model (bring-your-own key, not a shared pooled key) — see below.
+Unprefixed table (grouped with `users`, not `tx_`, since it's account-level not portfolio-
+scoped), one row per `(user, provider)` so adding a future provider beyond FMP/Finnhub is a
+zero-schema-change allowlist edit. Migration `013`. New
+`src/utils/encryption.ts` — AES-256-GCM via Node's built-in `crypto`, **no new npm
+dependency** — encrypts every key before it touches the DB; `api_key_encrypted` stores
+`iv:authTag:ciphertext` (hex, colon-delimited). New env var `API_KEY_ENCRYPTION_KEY`
+(32-byte, separate from `JWT_SECRET` — a secret shouldn't do double duty), validated
+eagerly at module load matching `pool.ts`'s fail-fast pattern for `DATABASE_URL`.
+`userSubscription.service.ts`/`.controller.ts`/`.routes.ts` — `GET/PUT/DELETE
+/subscriptions`, behind `requireAuth`. **The raw key is never returned in any response** —
+`GET`/`PUT` responses only ever include a masked value (`••••••••` + last 4 chars); `list
+Subscriptions()` decrypts server-side only long enough to compute that mask. 13 new tests
+(126 total). Verified live: added a real key, confirmed the DB column holds genuine
+ciphertext (not plaintext, decrypts back correctly), confirmed masked-only responses,
+updated the same provider in place (row count stayed at 1 — the `UNIQUE (user_id,
+provider)` upsert works), deleted it, confirmed a second delete correctly 404s.
+**Scope boundary, explicit:** this only builds key *storage* — `quotes.controller.ts`/
+`contrarianFinder.controller.ts`/`portfolio.controller.ts`'s refresh-prices still call FMP
+using the global `env.fmpApiKey`, not a per-user key yet. That rewiring is now Section 2's
+next step, kept separate since it touches multiple existing services' call signatures.
+Also noticed live: `node-pg` returns `DATE` columns as JS `Date` objects with a
+local-midnight timezone quirk (`renewal_date` of `2027-01-01` round-tripped as
+`2027-01-01T05:00:00.000Z`) — cosmetic only since this field is informational/unenforced,
+but worth knowing if a future frontend renders it naively.
+
+### Phase 2 — Auth & Multi-Tenancy ✅ Done
+Auth (signup/login/logout), per-request `user_id` scoping (portfolio CRUD), and the user
+API-key model decision (Option A, bring-your-own, storage built above) are all resolved.
+Actually *using* per-user keys in FMP calls is a new, separate follow-up — see Section 2.
 
 ### Phases 3–6 — Not started
 Frontend framework decided (React, for Phase 3 — porting behavior/UX, not the old `innerHTML` markup), but no code written; formal planning deliberately deferred until Phase 2 is further along.
@@ -168,11 +195,16 @@ Frontend framework decided (React, for Phase 3 — porting behavior/UX, not the 
 
 ## Section 2 — Next Step
 
-**User API-key model decision.** Each user brings their own FMP/Finnhub key (stored
-encrypted) vs. a shared pooled backend key with per-user quota — determines whether "Live
-Prices" (i.e. `POST /portfolios/:id/refresh-prices`, now built) stays a paid-tier-gated
-feature per user or becomes a shared platform cost. This is the last open item from Phase
-2's original scope.
+**Wire per-user FMP/Finnhub keys into the actual call sites.** `users_subscriptions`
+storage exists (Section 1) but nothing reads from it yet — `quotes.controller.ts`,
+`contrarianFinder.controller.ts`, and `portfolio.controller.ts`'s refresh-prices all still
+call FMP with the global `env.fmpApiKey`. Needs: each call site threading a `userId`
+through to look up + decrypt that user's own key (falling back to... what, if the user
+hasn't added one yet? worth deciding explicitly rather than assuming) before calling
+`marketData.service.ts`.
+
+- **Test gate:** integration tests confirming a request actually uses the calling user's
+  own key (not the global one), plus a defined, tested behavior for the no-key-yet case.
 
 ---
 
