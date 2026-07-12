@@ -38,26 +38,39 @@ is **not** kept in sync with this one.
 | Backend language | Node.js / Express | Already scaffolded |
 | Database | CockroachDB Cloud | Instance created at cockroachlabs.cloud; migrations written and applied |
 | Backend host | Render / Railway / Fly.io | TBD — confirm with user before provisioning |
-| Auth approach | TBD | Choices: roll-your-own (bcrypt + JWT) vs. managed (Clerk / Auth0). Decide before Phase 2 |
+| Auth approach | Roll-your-own (bcrypt + JWT, httpOnly cookie) | Decided + built 2026-07-12 — see Architecture.md Section 1 |
 | Frontend framework | TBD | Vanilla JS (lower effort) vs. React/Vue/Svelte (recommended once auth/routing enter the picture) — decide in Phase 3 |
 | API key strategy | Keys server-side only | FMP/Finnhub keys in backend `.env` — frontend never sees them |
 | User key model | TBD | Each user brings own FMP/Finnhub key (stored encrypted) vs. shared pooled key with per-user quota. Decide in Phase 2 |
 
 ---
 
-# Current Build State (as of 07-11 20:47)
+# Current Build State (as of 07-12 16:08)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
 - `.github/workflows/ci.yml` — typecheck + lint + test on push/PR to `master`, Node 20.
-  Triggers said `main` until 2026-07-11 — this repo's actual default branch is `master`,
-  so the workflow had never once fired on any push. Fixed; not yet verified live on GitHub
-  (no push done since the fix).
+  Triggers said `main` until 2026-07-11 (this repo's actual default branch is `master`, so
+  the workflow had never once fired before then). Fixed, and **confirmed live** on the next
+  push — GitHub Actions run #1, `success`.
 - `frontend/index.html` is a placeholder only
 - Backend fully migrated to TypeScript (`strict: true`) 2026-07-11 — see `Architecture.md`
   Section 1 for detail.
 
-## Phase 1 — Backend API & Data Model ⚠ Partially Done
+## Phase 2 — Auth & Multi-Tenancy ⚠ Partially Done
+- **Auth built 2026-07-12**: roll-your-own bcrypt + JWT in an httpOnly cookie —
+  `POST /auth/signup|login|logout`, `requireAuth` middleware, wired into `app.ts` with
+  `cookie-parser` + CORS credentials.
+- **Portfolio CRUD built 2026-07-12** (first real use of `requireAuth` through HTTP,
+  and per-`user_id` scoping): `GET/POST/PUT/DELETE /portfolios`,
+  `POST /portfolios/:id/import` (CSV/TXT, reuses `parser.service.ts`), and
+  `POST /portfolios/:id/refresh-prices` (reuses `marketData.service.ts`/
+  `livePrices.service.ts`), plus a new buy/sell `tx_portfolio_action_hist` table populated
+  by diffing holdings on every import. 113 tests passing (34 new this round). Verified live
+  against the real DB via the actual dev server. Full detail in `Architecture.md` Section 1.
+- Still open: the user API-key model decision — see `Architecture.md` Section 2.
+
+## Phase 1 — Backend API & Data Model ✅ Done
 
 **Done:**
 - DB schema migrations in `backend/src/db/migrations/` (001–005): `users`, `tx_portfolios`,
@@ -93,13 +106,7 @@ is **not** kept in sync with this one.
   still reads `ticker_sectors.js` directly (untouched) — the `m_tickers` table exists but
   isn't queried by any service yet.
 
-**Not yet built in Phase 1:**
-- `POST /auth/signup` and `POST /auth/login`
-- `GET / POST / PUT /portfolios` CRUD endpoints
-- (DB is provisioned and migrated — these are no longer blocked, just not written yet)
-
-## Phases 2–6 — Not Started
-- Phase 2: Auth & multi-tenancy
+## Phases 3–6 — Not Started
 - Phase 3: Frontend refactor + responsive design
 - Phase 4: Shared quote cache (Redis / Postgres TTL table)
 - Phase 5: Production hardening (Docker, Sentry, staging/prod split)

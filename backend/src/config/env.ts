@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import ms from 'ms';
 
 function num(value: string | undefined, fallback: number): number {
   const n = parseInt(value ?? '', 10);
@@ -22,6 +23,10 @@ export interface Env {
   rateLimitMaxPerIp: number;
 
   jwtSecret: string;
+  jwtExpiresIn: string;
+  jwtExpiresInMs: number;
+  frontendOrigin: string;
+  nodeEnv: string;
 }
 
 // DATABASE_URL is intentionally allowed to be blank here — it's a CockroachDB
@@ -43,7 +48,13 @@ const env: Readonly<Env> = {
   rateLimitMaxPerUser: num(process.env.RATE_LIMIT_MAX_PER_USER, 30),
   rateLimitMaxPerIp: num(process.env.RATE_LIMIT_MAX_PER_IP, 60),
 
-  jwtSecret: process.env.JWT_SECRET || '', // unused until Phase 2
+  jwtSecret: process.env.JWT_SECRET || '',
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
+  // Derived from jwtExpiresIn (not a separate env var) so the JWT lifetime and
+  // the cookie's maxAge can't drift out of sync with each other.
+  jwtExpiresInMs: ms((process.env.JWT_EXPIRES_IN || '7d') as ms.StringValue),
+  frontendOrigin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000',
+  nodeEnv: process.env.NODE_ENV || 'development',
 };
 
 export default env;

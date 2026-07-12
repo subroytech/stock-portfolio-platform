@@ -53,13 +53,13 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 07-11 20:47
+## Section 1 — Accomplished Till 07-12 16:08
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
 - `.github/workflows/ci.yml` — lint + test on push/PR, Node 20.
 
-### Phase 1 — Backend API & Data Model ⚠ Partial
+### Phase 1 — Backend API & Data Model ✅ Done
 
 **Database platform & schema:**
 - CockroachDB Cloud provisioned (superseded an earlier Aiven PostgreSQL decision — no Aiven references remain anywhere in this repo).
@@ -95,35 +95,96 @@ array-valued `?symbols=` query param.
 **CI pipeline fixed — 2026-07-11.** `.github/workflows/ci.yml` triggered on `branches: [main]`
 since Phase 0, but this repo's actual default branch is `master` — the workflow had never
 once fired on any push or PR. Fixed to `branches: [master]`, and a `npm run typecheck` step
-(`tsc --noEmit`) was added alongside the existing lint/test steps. Not yet verified live on
-GitHub Actions (no push made since the fix).
+(`tsc --noEmit`) was added alongside the existing lint/test steps. **Confirmed live** on the
+very next push — GitHub Actions run #1, `success`, ~30s (typecheck + lint + test all passed
+in a clean environment with no local `.env`, which is exactly what the `app.test.ts` pool-
+mock fix above was protecting against).
 
-**Not yet built in Phase 1:** `POST /auth/signup`/`login`, portfolio CRUD endpoints. Both are unblocked (DB is ready) — they're just not written yet. See Section 2.
+**Auth: signup/login/logout built — 2026-07-12.** Roll-your-own bcrypt + JWT in an httpOnly
+cookie (both confirmed with the user; see the auth-decision plan). No new migration needed —
+`users.password_hash` already existed from Phase 1 schema design. New: `auth.service.ts`
+(`hashPassword`/`verifyPassword`/`signToken`/`verifyToken`/`createUser`/`findUserByEmail`/
+`login`, plus `EmailAlreadyExistsError`/`InvalidCredentialsError`), `requireAuth.ts`
+middleware (populates `req.user`, now properly typed via a new `src/types/express.d.ts`
+global augmentation — replacing the inline cast `rateLimit.ts` used to need), `auth
+.controller.ts` + `auth.routes.ts` (`POST /auth/signup|login|logout`), wired into `app.ts`
+with `cookie-parser` and `cors({ credentials: true, origin: env.frontendOrigin })` (new env
+vars: `JWT_EXPIRES_IN`, `FRONTEND_ORIGIN`, `NODE_ENV`; `JWT_EXPIRES_IN_MS` is derived from
+`JWT_EXPIRES_IN` via the `ms` package rather than configured separately, so the JWT
+lifetime and the cookie's `maxAge` can't drift apart). Login returns the identical error
+message for "unknown email" and "wrong password" (no user-enumeration leak) — deliberately
+centralized in `auth.service.ts`'s `login()`, not left to the controller. 21 new tests (79
+total). Verified live against the real CockroachDB instance via the actual dev server
+(`npm run dev` + `curl`): signup → duplicate-email 409 → wrong-password 401 → login sets a
+real HttpOnly JWT cookie → logout clears it with an expired date — then the smoke-test
+accounts were deleted from the real `users` table. `requireAuth.ts` itself was also
+exercised directly (valid/missing/garbage token) since no protected route exists yet to
+test it through HTTP — that's the next item.
 
-### Phases 2–6 — Not started
+**Portfolio CRUD + CSV import + live-price refresh + buy/sell history — 2026-07-12.**
+`GET/POST/PUT/DELETE /portfolios`, `POST /portfolios/:id/import`,
+`POST /portfolios/:id/refresh-prices` — all behind `requireAuth`, all scoped by `user_id`
+(a `null`/not-owned lookup 404s either way, same user-enumeration-safety principle as
+login). 2 new migrations: `011` adds `tx_holdings.price_updated_at` (per-holding, not
+per-portfolio — see below), `012` creates `tx_portfolio_action_hist`. New
+`portfolio.service.ts`/`portfolio.controller.ts`/`portfolio.routes.ts`.
+- **Import reuses `parser.service.ts` as-is** (JSON body `{ filename, content }`, not
+  multipart — no `multer` dependency needed before a frontend exists to actually send a
+  real file upload). Re-import **replaces all holdings** inside a DB transaction
+  (`pool.connect()`/`BEGIN`/`COMMIT`/`ROLLBACK` — new pattern for this codebase, everywhere
+  else used single independent `pool.query` calls) — this is the backend endpoint's
+  unconditional contract; a future UI is expected to confirm with the user before ever
+  calling it (see Section 3 item 2's frontend note).
+- **Buy/sell diffing**: every import diffs old vs. new holdings per symbol
+  (`delta = newQty − oldQty`; `delta > 0` → `BUY` row in `tx_portfolio_action_hist`,
+  `delta < 0` → `SELL`, `delta === 0` → no row) — not just brand-new/fully-closed positions,
+  partial quantity changes too. A symbol dropped entirely still gets logged, falling back
+  to its last-known price since the new import has no price for it anymore.
+- **`price_updated_at` is per-holding, not per-portfolio** (caught during plan review,
+  before any code was written): `marketData.getQuotes()` tolerates partial per-symbol
+  failures, and `livePrices.service.ts`'s `applyLivePrices()` only updates holdings that
+  got a match — a single portfolio-level timestamp would falsely claim every holding was
+  fresh even when some weren't.
+- 34 new tests (113 total) — heaviest coverage on the diff logic (new/closed/partial-
+  increase/partial-decrease/unchanged, each independently verified). Verified live against
+  the real DB via the actual dev server, reusing the `demo-user@example.test` account:
+  created a portfolio, imported a CSV (AAPL 10 + MSFT 5 → 2 `BUY` rows), imported a second
+  CSV (AAPL 15, GOOGL 3, no MSFT) and confirmed the exact 3 resulting action-hist rows
+  directly in the DB (`AAPL BUY +5`, `GOOGL BUY +3`, `MSFT SELL -5 @ its last price`),
+  confirmed `refresh-prices` correctly 503s without a configured `FMP_API_KEY` (this repo
+  has never had a real key set — all FMP-touching tests already mock `fetch` for exactly
+  this reason), deleted the portfolio and confirmed cascade cleanup across all 4 child
+  tables directly in the DB.
+
+### Phase 2 — Auth & Multi-Tenancy ⚠ Partial
+Auth (signup/login/logout) and per-request `user_id` scoping (portfolio CRUD, above) both
+built. Still open: the user API-key model decision (Section 2 below) — the only Phase 2
+item from the original plan not yet resolved.
+
+### Phases 3–6 — Not started
 Frontend framework decided (React, for Phase 3 — porting behavior/UX, not the old `innerHTML` markup), but no code written; formal planning deliberately deferred until Phase 2 is further along.
 
 ---
 
 ## Section 2 — Next Step
 
-**Auth approach decision + `POST /auth/signup`/`login`.** Roll-your-own (bcrypt + JWT) vs. managed provider (Clerk/Auth0/Supabase Auth) — decide first, then build TS-native.
-
-- **Test gate:** unit tests for hashing/token logic + `supertest` integration tests (pattern already used in `tests/app.test.ts`).
+**User API-key model decision.** Each user brings their own FMP/Finnhub key (stored
+encrypted) vs. a shared pooled backend key with per-user quota — determines whether "Live
+Prices" (i.e. `POST /portfolios/:id/refresh-prices`, now built) stays a paid-tier-gated
+feature per user or becomes a shared platform cost. This is the last open item from Phase
+2's original scope.
 
 ---
 
 ## Section 3 — Backlog (serial, in order)
 
-1. **Portfolio CRUD endpoints** (`GET/POST/PUT /portfolios` against `tx_portfolios`/`tx_holdings`/`tx_cash_positions`/`tx_uploads`). Test gate: integration tests per endpoint, plus an explicit check that every write is scoped by `user_id`.
-2. **User API-key model decision.** Each user brings their own FMP/Finnhub key (stored encrypted) vs. a shared pooled backend key with per-user quota — determines whether "Live Prices" stays a paid-tier-gated feature per user or becomes a shared platform cost.
-3. **Phase 3 — React frontend.** Port behavior/UX (widget layout, KPI cards, signal/color conventions, chart configs), not the old `innerHTML`-string rendering code. Mobile-first per component (the 10-column holdings table and the fixed 2-column widget grids are the biggest desktop-only offenders to fix). Replace every direct `fetch(FMP/...)` call and all `localStorage` portfolio persistence with calls to the backend API. Test gate: component tests + a real browser walkthrough of the golden path before calling it done.
-4. **Python service scaffolding.** New `analysis-service/` running FastAPI (Pydantic request/response validation, auto-generated OpenAPI docs), Dockerized from day one, `pytest` wired up. Test gate: a trivial health-check endpoint round-trips through the Node gateway before any real analysis logic goes in.
-5. **Long-Term Analysis — built greenfield in Python.** No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this is new logic, not an extraction — lowest-risk place to prove the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself is the correctness bar, since there's no legacy JS output to diff against.
-6. **Momentum Analysis — extracted from `momentum.service.ts`.** Port the RSI/SMA/Bollinger Band/Kelly-sizing math to Python (`pandas`/`numpy`/`ta`). Test gate: shadow-test the Python port against the existing Jest fixtures value-for-value before the gateway cuts over; keep the TS version in place as a rollback path until confidence is high. (This service has a documented history of a subtle bug — the Kelly-sizing score-gate — slipping through silently, so the shadow-test discipline matters more here than it might elsewhere.)
-7. **Contrarian Analysis — extracted from `contrarianFinder.service.ts`**, once a data-ownership call is made: Node stays the sole DB owner and passes the pre-fetched universe + price data into Python as a request payload (recommended, keeps Python purely computational), vs. giving the Python service its own CockroachDB connection. Test gate: same shadow-test discipline as step 6.
-8. **Phase 4 — Shared quote cache.** Redis or a TTL table, behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30–60 seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history tracking into the DB.
-9. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from step 4), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
-10. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.
+1. **Phase 3 — React frontend.** Port behavior/UX (widget layout, KPI cards, signal/color conventions, chart configs), not the old `innerHTML`-string rendering code. Mobile-first per component (the 10-column holdings table and the fixed 2-column widget grids are the biggest desktop-only offenders to fix). Replace every direct `fetch(FMP/...)` call and all `localStorage` portfolio persistence with calls to the backend API. **Must show an explicit "replace existing holdings with this upload?" confirmation before ever calling `POST /portfolios/:id/import`** — that endpoint unconditionally replaces when called; the confirmation is a UI responsibility, not something the backend enforces (noted during the portfolio-CRUD plan, 2026-07-12). Test gate: component tests + a real browser walkthrough of the golden path before calling it done.
+2. **Python service scaffolding.** New `analysis-service/` running FastAPI (Pydantic request/response validation, auto-generated OpenAPI docs), Dockerized from day one, `pytest` wired up. Test gate: a trivial health-check endpoint round-trips through the Node gateway before any real analysis logic goes in.
+3. **Long-Term Analysis — built greenfield in Python.** No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this is new logic, not an extraction — lowest-risk place to prove the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself is the correctness bar, since there's no legacy JS output to diff against.
+4. **Momentum Analysis — extracted from `momentum.service.ts`.** Port the RSI/SMA/Bollinger Band/Kelly-sizing math to Python (`pandas`/`numpy`/`ta`). Test gate: shadow-test the Python port against the existing Jest fixtures value-for-value before the gateway cuts over; keep the TS version in place as a rollback path until confidence is high. (This service has a documented history of a subtle bug — the Kelly-sizing score-gate — slipping through silently, so the shadow-test discipline matters more here than it might elsewhere.)
+5. **Contrarian Analysis — extracted from `contrarianFinder.service.ts`**, once a data-ownership call is made: Node stays the sole DB owner and passes the pre-fetched universe + price data into Python as a request payload (recommended, keeps Python purely computational), vs. giving the Python service its own CockroachDB connection. Test gate: same shadow-test discipline as step 4.
+6. **Phase 4 — Shared quote cache.** Redis or a TTL table, behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30–60 seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history tracking into the DB.
+7. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from step 2), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
+8. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.
 
-**How to apply:** before starting any item above, open with `/plan` mode to walk through that item's decisions with the user first — this is especially true for Section 2 (auth provider) and item 2 (API-key model), which are expensive to reverse once real user data is flowing.
+**How to apply:** before starting any item above, open with `/plan` mode to walk through that item's decisions with the user first — this is especially true for Section 2 (API-key model) and Section 3 item 1 (frontend framework/UX decisions), which are expensive to reverse once real user data is flowing.

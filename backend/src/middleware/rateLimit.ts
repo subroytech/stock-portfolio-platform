@@ -1,7 +1,9 @@
 // Two stacked limiters per Architecture.md Phase 1 step 7. Per-user limiting
-// falls back to per-IP until Phase 2's auth middleware populates req.user —
-// the key function is written now so Phase 2 activates real per-user limits
-// for free, with no change to this file.
+// falls back to per-IP until requireAuth.ts populates req.user (Phase 2,
+// 2026-07-11) — the key function was written ahead of time so real per-user
+// limits activated for free the moment auth landed, with the only change
+// being req.user's cast (now covered by src/types/express.d.ts's global
+// augmentation instead of an inline cast here).
 
 import rateLimit from 'express-rate-limit';
 import { Request } from 'express';
@@ -20,10 +22,7 @@ const perUserLimiter = rateLimit({
   max: env.rateLimitMaxPerUser,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req: Request) => {
-    const userId = (req as Request & { user?: { id?: string } }).user?.id;
-    return userId ? `user:${userId}` : `ip:${req.ip}`;
-  },
+  keyGenerator: (req: Request) => (req.user?.id ? `user:${req.user.id}` : `ip:${req.ip}`),
   message: { error: 'Too many requests from this account, please try again shortly.' },
 });
 

@@ -37,7 +37,8 @@ users (1) ──< tx_portfolios (many)
                   │
                   ├──< tx_holdings (many)
                   ├──< tx_cash_positions (1, unique per portfolio)
-                  └──< tx_uploads (many)
+                  ├──< tx_uploads (many)
+                  └──< tx_portfolio_action_hist (many)
 
 m_index_master (1) ──< m_index_constituent (many)
 
@@ -57,7 +58,7 @@ appearing in a portfolio or an index shouldn't be blocked by missing metadata co
 |---|---|---|
 | `id` | `INT8` | PK, default `unique_rowid()` |
 | `email` | `VARCHAR(255)` | `NOT NULL`, unique |
-| `password_hash` | `VARCHAR(255)` | nullable (not yet consumed — Phase 2) |
+| `password_hash` | `VARCHAR(255)` | nullable; bcrypt hash, set/read by `auth.service.ts` since 2026-07-12 |
 | `created_at` | `TIMESTAMPTZ` | default `now()` |
 | `updated_at` | `TIMESTAMPTZ` | default `now()` |
 
@@ -93,6 +94,7 @@ one portfolio name per user, e.g. can't have two "Fidelity" portfolios for the s
 | `return_pct` | `DECIMAL(10,4)` | `NOT NULL` |
 | `allocation_pct` | `DECIMAL(7,4)` | nullable |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+| `price_updated_at` | `TIMESTAMPTZ` | nullable; added by migration `011`, 2026-07-12. Stamped by `POST /portfolios/:id/refresh-prices` **per holding**, only for holdings that actually got a fresh quote — see `tx_portfolio_action_hist` section below for why this is per-holding, not per-portfolio |
 
 Indexes: `holdings_pkey` (PK), `idx_holdings_portfolio_id`, `idx_holdings_symbol`.
 
@@ -119,6 +121,28 @@ Indexes: `cash_positions_pkey` (PK), `cash_positions_portfolio_id_key` (unique).
 | `uploaded_at` | `TIMESTAMPTZ` | default `now()` |
 
 Indexes: `uploads_pkey` (PK), `idx_uploads_portfolio_id`.
+
+### `tx_portfolio_action_hist`
+Added by migration `012`, 2026-07-12. Buy/sell history — one row per symbol whose quantity
+changed on a given `POST /portfolios/:id/import`, populated by diffing the old holdings
+snapshot against the newly parsed one (`delta = newQty − oldQty`; `delta > 0` → `BUY`,
+`delta < 0` → `SELL`, `delta === 0` → no row — this covers partial quantity changes, not
+just brand-new/fully-closed positions). A symbol dropped entirely still gets a `SELL` row,
+using its last-known price (the new import has no price for a symbol it doesn't contain).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `portfolio_id` | `INT8` | FK → `tx_portfolios(id)`, `ON DELETE CASCADE` |
+| `symbol` | `VARCHAR(15)` | `NOT NULL` |
+| `action_type` | `VARCHAR(4)` | `NOT NULL` — `'BUY'` or `'SELL'` |
+| `quantity_delta` | `DECIMAL(18,6)` | `NOT NULL`, always positive — direction comes from `action_type` |
+| `price` | `DECIMAL(18,4)` | `NOT NULL` — the imported price, or the last-known price for a fully-sold symbol |
+| `action_date_time` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `tx_portfolio_action_hist_pkey` (PK — this table was created post-rename, so
+unlike the other `tx_`/`m_` tables its constraint name actually matches the live table
+name), `idx_portfolio_action_hist_portfolio_id`.
 
 ### `m_tickers`
 Stock/ETF metadata reference table. Seeded 2026-07-10 from
