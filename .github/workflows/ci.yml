@@ -23,3 +23,12 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
+        env:
+          # Test-only dummy values, not real secrets - protect nothing in
+          # production. Needed because some tests deliberately exercise real
+          # crypto (jwt.sign, AES-256-GCM) rather than mocking it, and both
+          # env.ts/encryption.ts validate these eagerly at module load. A
+          # clean checkout (no .env, e.g. this CI runner) has neither set,
+          # which is what silently broke `npm test` here until this fix.
+          JWT_SECRET: cd858a5648181a67da0fb7f9fedb68dcff34230803dfd47e44f2e65d4b44f6b5
+          API_KEY_ENCRYPTION_KEY: a91bb2a80230af61e10e3ac0a44cc322629b854f8712eabc07cc308ab0c53c12
