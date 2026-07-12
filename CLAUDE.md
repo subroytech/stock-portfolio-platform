@@ -23,9 +23,11 @@ database, and auth.
 → Node.js/Express backend + CockroachDB Cloud + auth + REST API.
   Frontend is a placeholder — not started yet.
 
-The full Architecture document (problem statement, shortcomings table, target architecture
-diagram, and all 6 phases in detail) lives in the source repo at:
-`../CreateStockPortfolioViewWOSkill/Architecture.md`
+**This repo's own `Architecture.md`** (problem statement, shortcomings table, target
+architecture diagram, and the full accomplished/next-step/backlog plan) is the authoritative,
+actively-maintained rebuild plan — check it before starting any new work. The source repo
+has its own separate `Architecture.md` describing the plan from that app's perspective; it
+is **not** kept in sync with this one.
 
 ---
 
@@ -43,20 +45,26 @@ diagram, and all 6 phases in detail) lives in the source repo at:
 
 ---
 
-# Current Build State
+# Current Build State (as of 07-11 20:47)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
-- `.github/workflows/ci.yml` — lint + test on push/PR to `main`, Node 20
+- `.github/workflows/ci.yml` — typecheck + lint + test on push/PR to `master`, Node 20.
+  Triggers said `main` until 2026-07-11 — this repo's actual default branch is `master`,
+  so the workflow had never once fired on any push. Fixed; not yet verified live on GitHub
+  (no push done since the fix).
 - `frontend/index.html` is a placeholder only
+- Backend fully migrated to TypeScript (`strict: true`) 2026-07-11 — see `Architecture.md`
+  Section 1 for detail.
 
 ## Phase 1 — Backend API & Data Model ⚠ Partially Done
 
 **Done:**
-- DB schema migrations in `backend/src/db/migrations/` (001–005): `users`, `portfolios`,
-  `holdings`, `cash_positions`, `uploads` — written and **applied** to the CockroachDB Cloud
-  `stockPortfolioAnalysis` database via `backend/src/db/migrate.js` (`npm run migrate`),
-  2026-07-10. Connection pool: `backend/src/db/pool.js`.
+- DB schema migrations in `backend/src/db/migrations/` (001–005): `users`, `tx_portfolios`,
+  `tx_holdings`, `tx_cash_positions`, `tx_uploads` — written and **applied** to the
+  CockroachDB Cloud `stockPortfolioAnalysis` database via `backend/src/db/migrate.js`
+  (`npm run migrate`), 2026-07-10. Connection pool: `backend/src/db/pool.js`. Table-naming
+  convention (`m_`/`tx_`/`sys_`/unprefixed) documented in `backend/src/db/SCHEMA.md`.
 - REST endpoints built: `GET /quotes` and `POST /contrarian-finder/scan`
 - FMP/Finnhub keys moved to `backend/.env.example` + `src/config/env.js`
 - Rate limiting middleware: `src/middleware/rateLimit.js` (wraps `/quotes` and `/contrarian-finder`)

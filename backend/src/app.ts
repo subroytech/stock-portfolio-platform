@@ -1,11 +1,11 @@
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
 
-const quotesRoutes = require('./routes/quotes.routes');
-const contrarianFinderRoutes = require('./routes/contrarianFinder.routes');
-const errorHandler = require('./middleware/errorHandler');
-const rateLimiters = require('./middleware/rateLimit');
+import quotesRoutes from './routes/quotes.routes';
+import contrarianFinderRoutes from './routes/contrarianFinder.routes';
+import errorHandler from './middleware/errorHandler';
+import rateLimiters from './middleware/rateLimit';
 
 const app = express();
 
@@ -19,4 +19,4 @@ app.use('/contrarian-finder', rateLimiters, contrarianFinderRoutes);
 
 app.use(errorHandler);
 
-module.exports = app;
+export default app;

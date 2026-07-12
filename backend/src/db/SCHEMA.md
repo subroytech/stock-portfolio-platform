@@ -11,14 +11,33 @@ in the CockroachDB console's SQL Shell, or `SHOW TABLES FROM "stockPortfolioAnal
 to list all tables. Don't trust the console's Databases *overview* page — it caches table
 counts and can show 0 even when tables exist (see `SHOW TABLES`/SQL Shell instead).
 
+## Naming convention
+
+Tables are prefixed by category (settled 2026-07-10):
+- **`m_`** — master/reference data (`m_tickers`, `m_index_master`, `m_index_constituent`).
+- **`tx_`** — transactional, portfolio-scoped data (`tx_portfolios`, `tx_holdings`,
+  `tx_cash_positions`, `tx_uploads`).
+- **`sys_`** — internal bookkeeping, not app data (`sys_schema_migrations`).
+- **unprefixed** — `users`. Deliberately left out of the `tx_` bucket (it's the account
+  root, not portfolio-scoped transactional data) and doesn't fit `m_`/`sys_` either.
+
+Tables were originally created unprefixed (migrations 001–008) and renamed in two follow-up
+migrations: `009_rename_master_tables.sql` (the 3 `m_` tables) and
+`010_rename_transactional_tables.sql` (the 4 `tx_` tables). `sys_schema_migrations` was
+renamed via a one-off manual `ALTER TABLE` (see its section below for why that one couldn't
+go through a normal migration file). Internal constraint/index names (e.g.
+`holdings_pkey`, `index_constituent_pkey`) were **not** renamed by CockroachDB's
+`ALTER TABLE ... RENAME TO` — they still carry the original, unprefixed table name. That's
+expected — only the table names themselves changed.
+
 ## Entity relationships
 
 ```
-users (1) ──< portfolios (many)
+users (1) ──< tx_portfolios (many)
                   │
-                  ├──< holdings (many)
-                  ├──< cash_positions (1, unique per portfolio)
-                  └──< uploads (many)
+                  ├──< tx_holdings (many)
+                  ├──< tx_cash_positions (1, unique per portfolio)
+                  └──< tx_uploads (many)
 
 m_index_master (1) ──< m_index_constituent (many)
 
@@ -28,15 +47,8 @@ m_tickers  — standalone reference table, not FK'd from anywhere
 All child tables cascade-delete when their parent is deleted (`ON DELETE CASCADE`).
 
 `m_tickers` and `m_index_constituent.symbol` are intentionally **not** foreign-keyed to
-each other or to `holdings.symbol` — they're reference/lookup data, and a symbol appearing
-in a portfolio or an index shouldn't be blocked by missing metadata coverage.
-
-The `m_` prefix marks reference/master-data tables, distinguishing them from transactional
-tables (`users`, `portfolios`, `holdings`, ...). Renamed from bare `tickers`/`index_master`/
-`index_constituent` on 2026-07-10 (migration `009_rename_master_tables.sql`) — internal
-constraint/index names (e.g. `index_constituent_pkey`) were **not** renamed by CockroachDB's
-`ALTER TABLE ... RENAME TO`, so they still carry the old, unprefixed table name. That's
-expected — only the table names themselves changed.
+each other or to `tx_holdings.symbol` — they're reference/lookup data, and a symbol
+appearing in a portfolio or an index shouldn't be blocked by missing metadata coverage.
 
 ## Tables
 
@@ -51,7 +63,7 @@ expected — only the table names themselves changed.
 
 Indexes: `users_pkey` (PK), `users_email_key` (unique).
 
-### `portfolios`
+### `tx_portfolios`
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `INT8` | PK |
@@ -63,11 +75,11 @@ Indexes: `users_pkey` (PK), `users_email_key` (unique).
 Indexes: `portfolios_pkey` (PK), `portfolios_user_id_name_key` (unique on `user_id, name` —
 one portfolio name per user, e.g. can't have two "Fidelity" portfolios for the same user).
 
-### `holdings`
+### `tx_holdings`
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `INT8` | PK |
-| `portfolio_id` | `INT8` | FK → `portfolios(id)`, `ON DELETE CASCADE` |
+| `portfolio_id` | `INT8` | FK → `tx_portfolios(id)`, `ON DELETE CASCADE` |
 | `symbol` | `VARCHAR(15)` | `NOT NULL` |
 | `name` | `VARCHAR(200)` | nullable |
 | `quantity` | `DECIMAL(18,6)` | `NOT NULL` |
@@ -84,21 +96,21 @@ one portfolio name per user, e.g. can't have two "Fidelity" portfolios for the s
 
 Indexes: `holdings_pkey` (PK), `idx_holdings_portfolio_id`, `idx_holdings_symbol`.
 
-### `cash_positions`
+### `tx_cash_positions`
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `INT8` | PK |
-| `portfolio_id` | `INT8` | FK → `portfolios(id)`, `ON DELETE CASCADE`, unique (one row per portfolio) |
+| `portfolio_id` | `INT8` | FK → `tx_portfolios(id)`, `ON DELETE CASCADE`, unique (one row per portfolio) |
 | `amount` | `DECIMAL(18,4)` | `NOT NULL`, default `0` |
 | `updated_at` | `TIMESTAMPTZ` | default `now()` |
 
 Indexes: `cash_positions_pkey` (PK), `cash_positions_portfolio_id_key` (unique).
 
-### `uploads`
+### `tx_uploads`
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `INT8` | PK |
-| `portfolio_id` | `INT8` | FK → `portfolios(id)`, `ON DELETE CASCADE` |
+| `portfolio_id` | `INT8` | FK → `tx_portfolios(id)`, `ON DELETE CASCADE` |
 | `filename` | `VARCHAR(255)` | nullable |
 | `source_format` | `VARCHAR(30)` | nullable |
 | `rows_parsed` | `INT8` | `NOT NULL`, default `0` |
@@ -149,15 +161,23 @@ script, not by the live request path).
 
 Indexes: `index_constituent_pkey` (PK), `index_constituent_index_id_symbol_key` (unique on
 `index_id, symbol`), `idx_index_constituent_symbol`. (Constraint/index names retain the
-pre-rename table name — see note above.)
+pre-rename table name — see the naming-convention note above.)
 
 **Re-seeding:** `npm run seed:tickers` is idempotent (`ON CONFLICT` upserts) — safe to
 re-run after `cf_static_universe.js`/`ticker_sectors.js` change, to push updates into the DB.
 
-### `schema_migrations`
-Internal bookkeeping table created by `migrate.js` (not part of the app schema) —
-tracks which files in `migrations/` have been applied, so re-running `npm run migrate`
+### `sys_schema_migrations`
+Internal bookkeeping table created/maintained by `migrate.js` (not part of the app schema)
+— tracks which files in `migrations/` have been applied, so re-running `npm run migrate`
 is a no-op for files already applied.
+
+Renamed from `schema_migrations` on 2026-07-10 via a **manual, one-off `ALTER TABLE`** —
+not a numbered migration file. This table is what the migration loop itself depends on for
+bookkeeping: replaying the rename through the normal apply-then-record flow would have the
+loop try to write its own tracking row to a table it had just renamed out from under itself,
+crashing. `migrate.js` was updated in the same commit to reference the new name. A brand-new
+environment never needs this manual step — `migrate.js`'s `CREATE TABLE IF NOT EXISTS` just
+creates `sys_schema_migrations` directly from the start.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -172,3 +192,5 @@ is a no-op for files already applied.
 - `idx_holdings_portfolio_id`, `idx_uploads_portfolio_id` etc. were created explicitly by
   the migration files; CockroachDB also auto-indexes FK columns, so in practice these are
   effectively redundant with the FK's own backing index. Harmless either way.
+- `ALTER TABLE ... RENAME TO` does not rename dependent constraint/index names — see the
+  naming-convention note above.

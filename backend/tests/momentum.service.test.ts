@@ -1,4 +1,4 @@
-const { mwSMA, mwRSI, mwMACD, mwBB, calcKellySizing } = require('../src/services/momentum.service');
+import { mwSMA, mwRSI, mwMACD, mwBB, calcKellySizing } from '../src/services/momentum.service';
 
 describe('mwSMA', () => {
   test('averages the first n elements (newest-first array)', () => {

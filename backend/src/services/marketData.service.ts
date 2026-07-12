@@ -3,16 +3,20 @@
 // localStorage key to Node's built-in fetch + backend-only env vars.
 // The FMP key never leaves this module; the frontend never sees it.
 
-const env = require('../config/env');
+import env from '../config/env';
 
-class MissingApiKeyError extends Error {}
+export class MissingApiKeyError extends Error {}
+
+export interface FmpGetOptions {
+  timeoutMs?: number;
+}
 
 // Single shared fetch wrapper for every FMP call in this service.
 // - Aborts after timeoutMs (default 20s) so a hung request can't block a request.
 // - HTTP 402 (plan-tier restriction) resolves to null - treated as "no data", not an error.
 // - 401/403/429 and any other non-OK status, plus an FMP { "Error Message": ... } body, throw.
 // Use Promise.allSettled at call sites to handle partial failures gracefully.
-async function fmpGet(url, { timeoutMs = 20000 } = {}) {
+export async function fmpGet<T = any>(url: string, { timeoutMs = 20000 }: FmpGetOptions = {}): Promise<T | null> {
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -26,25 +30,32 @@ async function fmpGet(url, { timeoutMs = 20000 } = {}) {
       throw new Error(`HTTP ${res.status}${body ? ': ' + body.slice(0, 120) : ''}`);
     }
     const data = await res.json();
-    if (data?.['Error Message']) throw new Error('Invalid or expired FMP API key.');
-    return data;
+    if ((data as { 'Error Message'?: string })?.['Error Message']) throw new Error('Invalid or expired FMP API key.');
+    return data as T;
   } finally {
     clearTimeout(tid);
   }
 }
 
-function requireFmpKey() {
+export function requireFmpKey(): string {
   if (!env.fmpApiKey) throw new MissingApiKeyError('FMP_API_KEY is not set in backend environment.');
   return env.fmpApiKey;
 }
 
+export interface Quote {
+  price: number;
+  changeDollar: number;
+  changePercent: number;
+  name: string;
+}
+
 // One call per symbol, all parallel — mirrors fetchQuotesFMP's shape exactly
-// so livePrices.service.js / parser.service.js consumers don't need to change.
-async function getQuotes(symbols) {
+// so livePrices.service.ts / parser.service.ts consumers don't need to change.
+export async function getQuotes(symbols: string[]): Promise<Record<string, Quote>> {
   const key = requireFmpKey();
   const results = await Promise.allSettled(
     symbols.map((sym) =>
-      fmpGet(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${key}`, { timeoutMs: 15000 }).then((data) => {
+      fmpGet<any>(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${key}`, { timeoutMs: 15000 }).then((data) => {
         if (!data) return null;
         const q = Array.isArray(data) ? data[0] : data;
         if (!q || !q.price) return null;
@@ -59,7 +70,7 @@ async function getQuotes(symbols) {
     )
   );
 
-  const map = {};
+  const map: Record<string, Quote> = {};
   for (const r of results) {
     if (r.status === 'fulfilled' && r.value) {
       const { sym, price, changeDollar, changePercent, name } = r.value;
@@ -67,18 +78,23 @@ async function getQuotes(symbols) {
     }
   }
 
-  const errors = results.filter((r) => r.status === 'rejected');
+  const errors = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
   if (errors.length && errors[0].reason?.message?.includes('Invalid or expired FMP API key')) {
     throw new Error('Invalid or expired FMP API key. Please update your key.');
   }
   return map;
 }
 
-// Used by momentum.service.js / contrarianFinder.service.js for historical closes.
-async function getHistorical(symbol, limit = 60) {
-  const key = requireFmpKey();
-  const raw = await fmpGet(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${symbol}&limit=${limit}&apikey=${key}`);
-  return Array.isArray(raw) ? raw : (raw?.historical ?? []);
+export interface HistoricalBar {
+  date?: string;
+  close: number | string;
+  low?: number | string;
+  [key: string]: unknown;
 }
 
-module.exports = { fmpGet, getQuotes, getHistorical, requireFmpKey, MissingApiKeyError };
+// Used by momentum.service.ts / contrarianFinder.service.ts for historical closes.
+export async function getHistorical(symbol: string, limit = 60): Promise<HistoricalBar[]> {
+  const key = requireFmpKey();
+  const raw = await fmpGet<any>(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${symbol}&limit=${limit}&apikey=${key}`);
+  return Array.isArray(raw) ? raw : (raw?.historical ?? []);
+}

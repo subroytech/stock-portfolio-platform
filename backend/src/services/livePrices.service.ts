@@ -3,12 +3,33 @@
 // change from the original is the signature: these took the global S.raw/
 // S.query implicitly, here they take an explicit holdings array + query
 // string argument. fetchQuotesFMP() itself is superseded by
-// marketData.service.js's getQuotes() + the GET /quotes endpoint.
+// marketData.service.ts's getQuotes() + the GET /quotes endpoint.
+
+import { Quote } from './marketData.service';
+
+export interface HoldingLike {
+  symbol: string;
+  name: string;
+  sector: string;
+  quantity: number;
+  purchasePrice: number;
+  costBasis: number;
+  currentPrice: number;
+  currentValue: number;
+  gainLoss: number;
+  returnPct: number;
+  allocation?: number;
+}
+
+export interface ApplyLivePricesResult {
+  updated: number;
+  filtered: HoldingLike[];
+}
 
 // Mutates each holding's currentPrice/currentValue/gainLoss/returnPct/allocation
 // in place from a { SYMBOL: { price, changeDollar, changePercent, name } } map,
 // then returns a query-filtered view alongside the count of holdings updated.
-function applyLivePrices(holdings, priceMap, query = '') {
+export function applyLivePrices(holdings: HoldingLike[], priceMap: Record<string, Quote>, query = ''): ApplyLivePricesResult {
   let updated = 0;
   holdings.forEach((stock) => {
     const q = priceMap[stock.symbol];
@@ -31,8 +52,13 @@ function applyLivePrices(holdings, priceMap, query = '') {
   return { updated, filtered };
 }
 
+export interface GroupGainResult {
+  gainDollars: number;
+  covered: HoldingLike[];
+}
+
 // Today's $ gain for a single price-map group (e.g. Top-15 or All-Others).
-function computeGroupGain(holdings, priceMap) {
+export function computeGroupGain(holdings: HoldingLike[], priceMap: Record<string, Quote>): GroupGainResult {
   const covered = holdings.filter((d) => priceMap[d.symbol] && priceMap[d.symbol].price > 0);
   const gainDollars = covered.reduce((sum, d) => {
     const q = priceMap[d.symbol];
@@ -41,5 +67,3 @@ function computeGroupGain(holdings, priceMap) {
   }, 0);
   return { gainDollars, covered };
 }
-
-module.exports = { applyLivePrices, computeGroupGain };

@@ -1,9 +1,9 @@
 // Ported from CreateStockPortfolioViewWOSkill/js/config.js — unchanged.
 // Applied when a CSV has no sector column (e.g. Fidelity exports).
-// NOTE: stays a hardcoded JS module for Phase 1 by design — moving this into a
+// NOTE: stays a hardcoded module for Phase 1 by design — moving this into a
 // DB table (index_constituents) is deferred to Phase 4 per Architecture.md step 16.
 
-const TICKER_SECTORS = {
+export const TICKER_SECTORS: Record<string, string> = {
   // Technology
   AAPL: 'Technology', MSFT: 'Technology', NVDA: 'Technology', AMD: 'Technology', INTC: 'Technology',
   QCOM: 'Technology', TXN: 'Technology', AVGO: 'Technology', CRM: 'Technology', ORCL: 'Technology',
@@ -74,5 +74,3 @@ const TICKER_SECTORS = {
   ARKQ: 'ETFs', ARKK: 'ETFs', MAGY: 'ETFs', GPIX: 'ETFs', IVES: 'ETFs',
   NAIL: 'ETFs', NVDX: 'ETFs', PLTZ: 'ETFs', SSPC: 'ETFs',
 };
-
-module.exports = { TICKER_SECTORS };

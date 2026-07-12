@@ -1,5 +1,11 @@
-const request = require('supertest');
-const app = require('../src/app');
+// app.ts transitively requires ../src/db/pool (via contrarianFinder routes),
+// and pool.ts throws at import time if DATABASE_URL is unset — mock it so this
+// suite doesn't depend on a real .env/DB connection being present (matters in
+// CI, which has no DATABASE_URL configured).
+jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), end: jest.fn() } }));
+
+import request from 'supertest';
+import app from '../src/app';
 
 describe('app routing (no DB, no real FMP key required)', () => {
   test('GET /quotes without symbols returns 400', async () => {

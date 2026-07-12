@@ -1,7 +1,8 @@
-const marketData = require('../services/marketData.service');
-const cf = require('../services/contrarianFinder.service');
+import { Request, Response, NextFunction } from 'express';
+import * as marketData from '../services/marketData.service';
+import * as cf from '../services/contrarianFinder.service';
 
-async function scan(req, res, next) {
+export async function scan(req: Request, res: Response, next: NextFunction): Promise<void> {
   const {
     threshold = 25,
     batchSize,
@@ -23,10 +24,9 @@ async function scan(req, res, next) {
     res.json({ universeSize, scanned, threshold: parseInt(threshold, 10) || 25, candidates });
   } catch (err) {
     if (err instanceof marketData.MissingApiKeyError) {
-      return res.status(503).json({ error: err.message });
+      res.status(503).json({ error: err.message });
+      return;
     }
     next(err);
   }
 }
-
-module.exports = { scan };

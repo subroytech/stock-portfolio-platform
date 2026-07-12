@@ -1,14 +1,33 @@
-require('dotenv').config();
+import 'dotenv/config';
 
-function num(value, fallback) {
-  const n = parseInt(value, 10);
+function num(value: string | undefined, fallback: number): number {
+  const n = parseInt(value ?? '', 10);
   return Number.isNaN(n) ? fallback : n;
+}
+
+export interface Env {
+  port: number;
+  databaseUrl: string;
+
+  fmpApiKey: string;
+  fmpBaseUrl: string;
+  fmp3BaseUrl: string;
+  fmp4BaseUrl: string;
+
+  finnhubApiKey: string;
+  finnhubBaseUrl: string;
+
+  rateLimitWindowMs: number;
+  rateLimitMaxPerUser: number;
+  rateLimitMaxPerIp: number;
+
+  jwtSecret: string;
 }
 
 // DATABASE_URL is intentionally allowed to be blank here — it's a CockroachDB
 // Cloud connection string set per-environment in .env (never committed).
-// pool.js is what actually requires it, not boot.
-module.exports = {
+// pool.ts is what actually requires it, not boot.
+const env: Readonly<Env> = {
   port: num(process.env.PORT, 4000),
   databaseUrl: process.env.DATABASE_URL || '',
 
@@ -26,3 +45,5 @@ module.exports = {
 
   jwtSecret: process.env.JWT_SECRET || '', // unused until Phase 2
 };
+
+export default env;

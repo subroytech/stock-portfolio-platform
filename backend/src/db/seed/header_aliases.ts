@@ -1,6 +1,6 @@
 // Ported from CreateStockPortfolioViewWOSkill/js/config.js — unchanged.
 
-const HEADER_ALIASES = {
+export const HEADER_ALIASES: Record<string, string[]> = {
   symbol: ['symbol', 'ticker', 'stock', 'sym', 'security id'],
   name: ['company name', 'company', 'name', 'description', 'stock name'],
   quantity: ['quantity', 'shares', 'qty', 'units'],
@@ -11,5 +11,3 @@ const HEADER_ALIASES = {
   sector: ['sector', 'industry', 'category', 'sub-asset classification', 'sub asset classification'],
   purchaseDate: ['purchase date', 'date', 'buy date', 'date purchased'],
 };
-
-module.exports = { HEADER_ALIASES };

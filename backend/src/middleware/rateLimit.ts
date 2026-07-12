@@ -3,8 +3,9 @@
 // the key function is written now so Phase 2 activates real per-user limits
 // for free, with no change to this file.
 
-const rateLimit = require('express-rate-limit');
-const env = require('../config/env');
+import rateLimit from 'express-rate-limit';
+import { Request } from 'express';
+import env from '../config/env';
 
 const perIpLimiter = rateLimit({
   windowMs: env.rateLimitWindowMs,
@@ -19,8 +20,11 @@ const perUserLimiter = rateLimit({
   max: env.rateLimitMaxPerUser,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => (req.user?.id ? `user:${req.user.id}` : `ip:${req.ip}`),
+  keyGenerator: (req: Request) => {
+    const userId = (req as Request & { user?: { id?: string } }).user?.id;
+    return userId ? `user:${userId}` : `ip:${req.ip}`;
+  },
   message: { error: 'Too many requests from this account, please try again shortly.' },
 });
 
-module.exports = [perIpLimiter, perUserLimiter];
+export default [perIpLimiter, perUserLimiter];

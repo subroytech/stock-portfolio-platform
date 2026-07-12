@@ -1,12 +1,23 @@
 // Ported from CreateStockPortfolioViewWOSkill/js/contrarian-finder.js (CF_STATIC) —
 // fallback constituent lists used when the FMP plan doesn't cover the
-// index-constituent endpoints. Stays a hardcoded JS module for Phase 1 by
+// index-constituent endpoints. Stays a hardcoded module for Phase 1 by
 // design — moving this into a DB table (index_constituents) is deferred to
 // Phase 4 per Architecture.md step 16.
+//
+// As of 2026-07-10 this is only read by seedTickerData.ts (the one-time seed
+// script for m_index_master/m_index_constituent) — contrarianFinder.service.ts
+// queries the DB directly instead of importing this module for live scans.
 
-const CF_ETF_LIST = ['XLK', 'XLV', 'XLF', 'XLY', 'XLI', 'XLC', 'XLP', 'XLE', 'XLB', 'XLU', 'XLRE'];
+export const CF_ETF_LIST: string[] = ['XLK', 'XLV', 'XLF', 'XLY', 'XLI', 'XLC', 'XLP', 'XLE', 'XLB', 'XLU', 'XLRE'];
 
-const CF_STATIC = {
+interface CfStatic {
+  dj30: string[];
+  ndx100: string[];
+  sp500: string[];
+  etf: Record<string, string[]>;
+}
+
+export const CF_STATIC: CfStatic = {
   dj30: ['AAPL', 'AMGN', 'AXP', 'BA', 'CAT', 'CRM', 'CSCO', 'CVX', 'DIS', 'DOW',
     'GS', 'HD', 'HON', 'IBM', 'JNJ', 'JPM', 'KO', 'MCD', 'MMM', 'MRK',
     'MSFT', 'NKE', 'NVDA', 'PG', 'SHW', 'TRV', 'UNH', 'V', 'VZ', 'WMT'],
@@ -53,5 +64,3 @@ const CF_STATIC = {
     XLRE: ['AMT', 'PLD', 'EQIX', 'CCI', 'PSA', 'O', 'WELL', 'DLR', 'SPG', 'AVB', 'EQR', 'VICI', 'WY', 'ARE', 'MAA', 'CPT', 'UDR', 'HST', 'REG', 'KIM'],
   },
 };
-
-module.exports = { CF_ETF_LIST, CF_STATIC };

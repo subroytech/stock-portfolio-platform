@@ -3,17 +3,18 @@
 // Cloud certs are signed by a publicly-trusted CA, so no separate CA file
 // is needed here.
 
-const { Pool } = require('pg');
-const env = require('../config/env');
+import { Pool, QueryResult, QueryResultRow } from 'pg';
+import env from '../config/env';
 
 if (!env.databaseUrl) {
   throw new Error('DATABASE_URL is not set in backend environment.');
 }
 
-const pool = new Pool({ connectionString: env.databaseUrl });
+export const pool = new Pool({ connectionString: env.databaseUrl });
 
-async function query(text, params) {
-  return pool.query(text, params);
+export async function query<T extends QueryResultRow = QueryResultRow>(
+  text: string,
+  params?: unknown[],
+): Promise<QueryResult<T>> {
+  return pool.query<T>(text, params);
 }
-
-module.exports = { pool, query };

@@ -1,4 +1,4 @@
-const { parseGenericCsv, isRobinhoodTxt, parseRobinhoodTxt, parseFile } = require('../src/services/parser.service');
+import { parseGenericCsv, isRobinhoodTxt, parseRobinhoodTxt, parseFile } from '../src/services/parser.service';
 
 describe('parseGenericCsv', () => {
   test('parses a standard CSV with purchase price + sector columns', () => {

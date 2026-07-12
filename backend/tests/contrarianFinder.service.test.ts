@@ -1,13 +1,15 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn() } }));
-const { pool } = require('../src/db/pool');
-const {
+import { pool } from '../src/db/pool';
+import {
   buildBatches, filterCandidates, resolveQuality, assembleUniverse, scanStock, runScan,
-} = require('../src/services/contrarianFinder.service');
+} from '../src/services/contrarianFinder.service';
+
+const mockQuery = pool.query as unknown as jest.Mock;
 
 // Small fixture standing in for the seeded index_constituent table - enough
 // symbols per index to exercise dedup across tiers (AAPL in both DJ30/XLK)
 // without needing a real DB connection.
-const MOCK_CONSTITUENTS = {
+const MOCK_CONSTITUENTS: Record<string, string[]> = {
   DJ30: ['AAPL', 'MSFT', 'JPM'],
   NDX100: ['NVDA', 'AMD'],
   SP500: ['AAPL', 'TSLA', 'META'],
@@ -25,7 +27,7 @@ const MOCK_CONSTITUENTS = {
 };
 
 beforeEach(() => {
-  pool.query.mockImplementation((text, params) => {
+  mockQuery.mockImplementation((_text: string, params: string[]) => {
     const indexId = params[0];
     const rows = (MOCK_CONSTITUENTS[indexId] || []).map((symbol) => ({ symbol }));
     return Promise.resolve({ rows });
@@ -34,7 +36,7 @@ beforeEach(() => {
 
 describe('buildBatches', () => {
   test('slices the universe into batches of batchSize, capped at maxBatches', () => {
-    const universe = Array.from({ length: 10 }, (_, i) => ({ symbol: `S${i}` }));
+    const universe = Array.from({ length: 10 }, (_, i) => ({ symbol: `S${i}`, tier: 1, source: 'TEST' }));
     const batches = buildBatches(universe, 4, 2);
     expect(batches).toHaveLength(2);
     expect(batches[0]).toHaveLength(4);
@@ -42,7 +44,7 @@ describe('buildBatches', () => {
   });
 
   test('drops a trailing empty batch when universe is smaller than batchSize * maxBatches', () => {
-    const universe = Array.from({ length: 10 }, (_, i) => ({ symbol: `S${i}` }));
+    const universe = Array.from({ length: 10 }, (_, i) => ({ symbol: `S${i}`, tier: 1, source: 'TEST' }));
     const batches = buildBatches(universe, 4, 3); // would be 4,4,2
     expect(batches.map((b) => b.length)).toEqual([4, 4, 2]);
   });
@@ -88,13 +90,13 @@ describe('scanStock', () => {
   const originalFetch = global.fetch;
   afterEach(() => { global.fetch = originalFetch; });
 
-  function mockQuoteAndHistory(quote, historical) {
-    global.fetch = jest.fn((url) => {
+  function mockQuoteAndHistory(quote: unknown, historical: unknown) {
+    global.fetch = jest.fn((url: string) => {
       if (url.includes('historical-price-eod')) {
         return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(historical) });
       }
       return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(quote) });
-    });
+    }) as unknown as typeof fetch;
   }
 
   test('flags filterFail when price or market cap is below the quality thresholds', async () => {
@@ -159,14 +161,14 @@ describe('scanStock', () => {
     expect(r.noData).toBe(false);
     expect(r.changePct).toBeLessThan(10); // hasn't already spiked
     expect(r.strength).not.toBeNull();
-    expect(r.strength.rsi).toBeGreaterThanOrEqual(55);
-    expect(r.strength.rsi).toBeLessThanOrEqual(68);
-    expect(r.strength.sma20).toBeLessThan(price);
-    expect(r.strength.sma50).toBeLessThan(price);
-    expect(r.strength.rr).toBeGreaterThanOrEqual(0);
-    expect(r.strength.kF).toBeGreaterThanOrEqual(0);
-    expect(r.strength.halfKelly).toBeGreaterThanOrEqual(0);
-    expect(r.strength.halfKelly).toBeLessThanOrEqual(0.20);
+    expect(r.strength!.rsi).toBeGreaterThanOrEqual(55);
+    expect(r.strength!.rsi).toBeLessThanOrEqual(68);
+    expect(r.strength!.sma20).toBeLessThan(price);
+    expect(r.strength!.sma50).toBeLessThan(price);
+    expect(r.strength!.rr).toBeGreaterThanOrEqual(0);
+    expect(r.strength!.kF).toBeGreaterThanOrEqual(0);
+    expect(r.strength!.halfKelly).toBeGreaterThanOrEqual(0);
+    expect(r.strength!.halfKelly).toBeLessThanOrEqual(0.20);
   });
 });
 
@@ -175,7 +177,7 @@ describe('runScan (integration, no real network/timers)', () => {
   afterEach(() => { global.fetch = originalFetch; });
 
   test('assembles a universe, scans it in batches, and returns results with waitSeconds=0', async () => {
-    global.fetch = jest.fn().mockResolvedValue({ status: 403, ok: false }); // forces filterFail for all (no quote data)
+    global.fetch = jest.fn().mockResolvedValue({ status: 403, ok: false }) as unknown as typeof fetch; // forces filterFail for all (no quote data)
     const out = await runScan({ key: 'fake-key', batchSize: 5, maxBatches: 1, waitSeconds: 0 });
     expect(out.universeSize).toBeGreaterThan(0);
     expect(out.scanned).toBe(5);

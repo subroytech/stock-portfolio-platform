@@ -14,33 +14,39 @@
 //
 // Universe assembly moved off the CF_STATIC JS module onto the
 // index_master/index_constituent DB tables on 2026-07-10 (seeded one-time
-// from db/seed/cf_static_universe.js via seedTickerData.js) — same static
+// from db/seed/cf_static_universe.ts via seedTickerData.ts) — same static
 // data, now queryable/editable without a code deploy.
 
-const env = require('../config/env');
-const { pool } = require('../db/pool');
-const { fmpGet } = require('./marketData.service');
-const { mwSMA, mwRSI, mwBB } = require('./momentum.service');
+import env from '../config/env';
+import { pool } from '../db/pool';
+import { fmpGet, HistoricalBar } from './marketData.service';
+import { mwSMA, mwRSI, mwBB } from './momentum.service';
 
-const CF_ETF_LIST = ['XLK', 'XLV', 'XLF', 'XLY', 'XLI', 'XLC', 'XLP', 'XLE', 'XLB', 'XLU', 'XLRE'];
-const CF_BATCH = 125;
+export const CF_ETF_LIST: string[] = ['XLK', 'XLV', 'XLF', 'XLY', 'XLI', 'XLC', 'XLP', 'XLE', 'XLB', 'XLU', 'XLRE'];
+export const CF_BATCH = 125;
 const CF_WAIT_SECONDS = 62; // real wait between batches - small buffer to avoid overlap
-const CF_MAX = 450;
-const CF_MAX_BATCHES = 3;
-const CF_STRENGTH_LOOKBACK = 60; // bars needed for SMA50/RSI14 strength screen
+export const CF_MAX = 450;
+export const CF_MAX_BATCHES = 3;
+export const CF_STRENGTH_LOOKBACK = 60; // bars needed for SMA50/RSI14 strength screen
 
-async function fetchConstituents(indexId) {
-  const { rows } = await pool.query('SELECT symbol FROM m_index_constituent WHERE index_id = $1', [indexId]);
+export interface UniverseEntry {
+  symbol: string;
+  tier: number;
+  source: string;
+}
+
+async function fetchConstituents(indexId: string): Promise<string[]> {
+  const { rows } = await pool.query<{ symbol: string }>('SELECT symbol FROM m_index_constituent WHERE index_id = $1', [indexId]);
   return rows.map((r) => r.symbol);
 }
 
 // Built from index_master/index_constituent — see header note above for why
 // the live FMP constituent-fetch path was removed rather than kept as a
 // primary attempt with a fallback.
-async function assembleUniverse() {
-  const seen = new Set();
-  const universe = [];
-  const add = (sym, tier, source) => {
+export async function assembleUniverse(): Promise<UniverseEntry[]> {
+  const seen = new Set<string>();
+  const universe: UniverseEntry[] = [];
+  const add = (sym: string, tier: number, source: string) => {
     const s = sym?.toString().toUpperCase().trim();
     if (!s || s.length > 7 || seen.has(s) || universe.length >= CF_MAX) return;
     seen.add(s);
@@ -58,15 +64,46 @@ async function assembleUniverse() {
   return universe;
 }
 
-async function scanStock(sym, key, quality, scanDays = 7) {
+export interface ScanQuality {
+  minPrice: number;
+  minMarketCap: number;
+}
+
+export interface StrengthSignal {
+  rsi: number;
+  sma20: number;
+  sma50: number;
+  rr: number;
+  kF: number;
+  halfKelly: number;
+}
+
+export interface ScanResult {
+  symbol: string;
+  filterFail: boolean;
+  noData?: boolean;
+  error?: boolean;
+  name?: string;
+  sector?: string;
+  price?: number | null;
+  mktCap?: number | null;
+  volume?: number | null;
+  avgVol?: number | null;
+  changePct?: number;
+  mktClosed?: boolean;
+  strength?: StrengthSignal | null;
+  source?: string;
+}
+
+export async function scanStock(sym: string, key: string, quality: ScanQuality, scanDays = 7): Promise<ScanResult> {
   const limit = Math.max(scanDays + 2, CF_STRENGTH_LOOKBACK);
   const [qr, hr] = await Promise.allSettled([
-    fmpGet(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${key}`),
-    fmpGet(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${sym}&limit=${limit}&apikey=${key}`),
+    fmpGet<any>(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${key}`),
+    fmpGet<any>(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${sym}&limit=${limit}&apikey=${key}`),
   ]);
 
   const q = (qr.status === 'fulfilled' && qr.value) ? (Array.isArray(qr.value) ? qr.value[0] : qr.value) : null;
-  const hist = (hr.status === 'fulfilled' && hr.value) ? (Array.isArray(hr.value) ? hr.value : (hr.value?.historical || [])) : [];
+  const hist: HistoricalBar[] = (hr.status === 'fulfilled' && hr.value) ? (Array.isArray(hr.value) ? hr.value : (hr.value?.historical || [])) : [];
 
   const price = q?.price ?? null;
   const mktCap = q?.marketCap ?? null;
@@ -83,12 +120,12 @@ async function scanStock(sym, key, quality, scanDays = 7) {
 
   if (!endPrice || !startClose || startClose === 0) return { symbol: sym, filterFail: false, noData: true };
 
-  const changePct = (endPrice - startClose) / startClose * 100;
+  const changePct = (Number(endPrice) - Number(startClose)) / Number(startClose) * 100;
 
   // Bullish "strength" screen - RSI ideal zone + above both SMAs + hasn't already spiked.
-  let strength = null;
-  const closes = hist.map((h) => parseFloat(h.close)).filter((v) => !Number.isNaN(v));
-  const lows = hist.map((h) => parseFloat(h.low)).filter((v) => !Number.isNaN(v));
+  let strength: StrengthSignal | null = null;
+  const closes = hist.map((h) => parseFloat(String(h.close))).filter((v) => !Number.isNaN(v));
+  const lows = hist.map((h) => parseFloat(String(h.low))).filter((v) => !Number.isNaN(v));
   if (closes.length >= 50) {
     const sma20 = mwSMA(closes, 20);
     const sma50 = mwSMA(closes, 50);
@@ -131,9 +168,9 @@ async function scanStock(sym, key, quality, scanDays = 7) {
   };
 }
 
-function buildBatches(universe, batchSize, maxBatches) {
+export function buildBatches(universe: UniverseEntry[], batchSize: number, maxBatches: number): UniverseEntry[][] {
   const toScan = universe.slice(0, batchSize * maxBatches);
-  const batches = [];
+  const batches: UniverseEntry[][] = [];
   for (let i = 0; i < maxBatches; i++) {
     const slice = toScan.slice(i * batchSize, (i + 1) * batchSize);
     if (slice.length > 0) batches.push(slice);
@@ -141,7 +178,7 @@ function buildBatches(universe, batchSize, maxBatches) {
   return batches;
 }
 
-async function scanBatch(stocks, key, quality, scanDays) {
+export async function scanBatch(stocks: UniverseEntry[], key: string, quality: ScanQuality, scanDays?: number): Promise<ScanResult[]> {
   const settled = await Promise.allSettled(stocks.map(async (stock) => {
     const r = await scanStock(stock.symbol, key, quality, scanDays);
     r.source = stock.source;
@@ -150,25 +187,40 @@ async function scanBatch(stocks, key, quality, scanDays) {
   return settled.map((r, i) => (r.status === 'fulfilled' ? r.value : { symbol: stocks[i].symbol, filterFail: true, error: true }));
 }
 
-function sleep(ms) {
+function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function resolveQuality(qualityPreset) {
+export function resolveQuality(qualityPreset?: string): ScanQuality {
   return qualityPreset === 'relaxed' ? { minPrice: 5, minMarketCap: 2.5e9 } : { minPrice: 10, minMarketCap: 5e9 };
+}
+
+export interface RunScanOptions {
+  key: string;
+  batchSize?: number;
+  maxBatches?: number;
+  qualityPreset?: string;
+  waitSeconds?: number;
+  scanDays?: number;
+}
+
+export interface RunScanResult {
+  universeSize: number;
+  scanned: number;
+  results: ScanResult[];
 }
 
 // No UI countdown — waits waitSeconds between batches server-side as a
 // rate-limit buffer against FMP. waitSeconds is overridable for tests.
-async function runScan({
+export async function runScan({
   key, batchSize = CF_BATCH, maxBatches = CF_MAX_BATCHES, qualityPreset = 'standard',
   waitSeconds = CF_WAIT_SECONDS, scanDays = 7,
-} = {}) {
+}: RunScanOptions): Promise<RunScanResult> {
   const quality = resolveQuality(qualityPreset);
   const universe = await assembleUniverse();
   const batches = buildBatches(universe, batchSize, maxBatches);
 
-  const allResults = [];
+  const allResults: ScanResult[] = [];
   for (let i = 0; i < batches.length; i++) {
     const r = await scanBatch(batches[i], key, quality, scanDays);
     allResults.push(...r);
@@ -178,13 +230,8 @@ async function runScan({
   return { universeSize: universe.length, scanned: allResults.length, results: allResults };
 }
 
-function filterCandidates(results, threshold) {
+export function filterCandidates(results: ScanResult[], threshold: number): ScanResult[] {
   return results
     .filter((r) => !r.filterFail && !r.noData && r.changePct !== undefined && r.changePct <= -threshold)
-    .sort((a, b) => a.changePct - b.changePct);
+    .sort((a, b) => (a.changePct as number) - (b.changePct as number));
 }
-
-module.exports = {
-  CF_BATCH, CF_MAX, CF_MAX_BATCHES, CF_ETF_LIST, CF_STRENGTH_LOOKBACK,
-  assembleUniverse, scanStock, buildBatches, scanBatch, runScan, filterCandidates, resolveQuality,
-};

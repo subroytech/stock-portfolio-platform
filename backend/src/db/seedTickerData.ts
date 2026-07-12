@@ -1,12 +1,12 @@
-// One-time port of the hardcoded reference data in db/seed/*.js into their
-// DB-table equivalents (index_master, index_constituent, tickers). Idempotent
-// via ON CONFLICT upserts - safe to re-run after the source JS files change.
+// One-time port of the hardcoded reference data in db/seed/*.ts into their
+// DB-table equivalents (m_index_master, m_index_constituent, m_tickers).
+// Idempotent via ON CONFLICT upserts - safe to re-run after the source files change.
 
-const { pool } = require('./pool');
-const { CF_ETF_LIST, CF_STATIC } = require('./seed/cf_static_universe');
-const { TICKER_SECTORS } = require('./seed/ticker_sectors');
+import { pool } from './pool';
+import { CF_ETF_LIST, CF_STATIC } from './seed/cf_static_universe';
+import { TICKER_SECTORS } from './seed/ticker_sectors';
 
-const INDEX_DESCRIPTIONS = {
+const INDEX_DESCRIPTIONS: Record<string, string> = {
   DJ30: 'Dow Jones Industrial Average',
   NDX100: 'Nasdaq-100 Index',
   SP500: 'S&P 500 Index',
@@ -23,7 +23,7 @@ const INDEX_DESCRIPTIONS = {
   XLRE: 'Real Estate Select Sector SPDR Fund',
 };
 
-async function seedIndexMaster() {
+export async function seedIndexMaster(): Promise<void> {
   const entries = Object.entries(INDEX_DESCRIPTIONS);
   const values = entries.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(', ');
   const params = entries.flat();
@@ -35,7 +35,7 @@ async function seedIndexMaster() {
   console.log(`m_index_master: seeded ${entries.length} rows`);
 }
 
-async function upsertConstituents(indexId, symbols) {
+async function upsertConstituents(indexId: string, symbols: string[]): Promise<number> {
   const unique = [...new Set(symbols.map((s) => s.toString().toUpperCase().trim()))];
   if (unique.length === 0) return 0;
   const values = unique.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(', ');
@@ -48,8 +48,8 @@ async function upsertConstituents(indexId, symbols) {
   return unique.length;
 }
 
-async function seedIndexConstituents() {
-  const groups = {
+export async function seedIndexConstituents(): Promise<void> {
+  const groups: Record<string, string[]> = {
     DJ30: CF_STATIC.dj30,
     NDX100: CF_STATIC.ndx100,
     SP500: CF_STATIC.sp500,
@@ -62,7 +62,7 @@ async function seedIndexConstituents() {
   console.log(`m_index_constituent: seeded ${total} unique (index, symbol) rows`);
 }
 
-async function seedTickers() {
+export async function seedTickers(): Promise<void> {
   const entries = Object.entries(TICKER_SECTORS);
   const values = entries.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(', ');
   const params = entries.flat();
@@ -74,7 +74,7 @@ async function seedTickers() {
   console.log(`m_tickers: seeded ${entries.length} rows`);
 }
 
-async function seedAll() {
+export async function seedAll(): Promise<void> {
   await seedIndexMaster();
   await seedIndexConstituents();
   await seedTickers();
@@ -91,5 +91,3 @@ if (require.main === module) {
       return pool.end().finally(() => process.exit(1));
     });
 }
-
-module.exports = { seedAll, seedIndexMaster, seedIndexConstituents, seedTickers };

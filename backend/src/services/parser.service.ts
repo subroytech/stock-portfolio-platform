@@ -1,22 +1,42 @@
 // Ported from CreateStockPortfolioViewWOSkill/js/portfolio.js
 // (mapHeaders, parseGenericCsv, isRobinhoodTxt, parseRobinhoodTxt, parseFile) —
 // pure parsing logic, no DOM/localStorage dependency in the original, so this
-// is a near-direct copy. Papa.parse browser global -> require('papaparse').
+// is a near-direct copy. Papa.parse browser global -> import Papa from 'papaparse'.
 //
 // Note: allocation% is intentionally NOT computed here, matching the original
 // split (parseGenericCsv/parseRobinhoodTxt never set it either — loadData()
 // computed it afterwards from the full holdings set). The /portfolios
 // controller does that once Track B exists.
 
-const Papa = require('papaparse');
-const { parseNum } = require('../utils/formatters');
-const { HEADER_ALIASES } = require('../db/seed/header_aliases');
-const { EMPOWER_SECTOR_MAP } = require('../db/seed/empower_sector_map');
-const { TICKER_SECTORS } = require('../db/seed/ticker_sectors');
+import Papa from 'papaparse';
+import { parseNum } from '../utils/formatters';
+import { HEADER_ALIASES } from '../db/seed/header_aliases';
+import { EMPOWER_SECTOR_MAP } from '../db/seed/empower_sector_map';
+import { TICKER_SECTORS } from '../db/seed/ticker_sectors';
 
-function mapHeaders(headers) {
+export interface HoldingEntry {
+  symbol: string;
+  name: string;
+  quantity: number;
+  purchasePrice: number;
+  currentPrice: number;
+  sector: string;
+  purchaseDate: string;
+  costBasis: number;
+  currentValue: number;
+  gainLoss: number;
+  returnPct: number;
+}
+
+export interface ParseResult {
+  data: HoldingEntry[];
+  errors: string[];
+  cashAmount: number;
+}
+
+export function mapHeaders(headers: string[]): Record<string, number> {
   const norm = headers.map((h) => h.toLowerCase().trim().replace(/[_-]/g, ' '));
-  const map = {};
+  const map: Record<string, number> = {};
   for (const [field, aliases] of Object.entries(HEADER_ALIASES)) {
     for (const alias of aliases) {
       const i = norm.indexOf(alias);
@@ -26,11 +46,11 @@ function mapHeaders(headers) {
   return map;
 }
 
-function parseGenericCsv(text) {
-  const result = Papa.parse(text, { header: true, skipEmptyLines: true });
+export function parseGenericCsv(text: string): ParseResult {
+  const result = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: true });
   if (!result.data.length) throw new Error('CSV appears to be empty or could not be parsed.');
 
-  const headers = result.meta.fields;
+  const headers = result.meta.fields ?? [];
   const map = mapHeaders(headers);
 
   const hasPurchasePrice = 'purchasePrice' in map;
@@ -39,12 +59,12 @@ function parseGenericCsv(text) {
   const missing = ['symbol', 'quantity', 'currentPrice'].filter((f) => !(f in map));
   if (missing.length) throw new Error(`Missing required columns: ${missing.join(', ')}. Headers found: ${headers.join(', ')}`);
 
-  const data = [];
-  const errors = [];
+  const data: HoldingEntry[] = [];
+  const errors: string[] = [];
   let cashTotal = 0;
 
   // handles "(123.45)" as -123.45 — Pending Activity can be net negative
-  function parseCashAmt(v) {
+  function parseCashAmt(v: unknown): number | null {
     if (v == null) return null;
     let s = String(v).trim();
     let neg = false;
@@ -62,7 +82,7 @@ function parseGenericCsv(text) {
 
     // Cash-like rows (Empower placeholders, Fidelity sweep fund / Pending Activity) —
     // redirect their dollar value into cashTotal instead of discarding them.
-    const isCashRow = (sym && (sym === 'USD999997' || sym === 'DIDA' || sym.includes('**')))
+    const isCashRow = (!!sym && (sym === 'USD999997' || sym === 'DIDA' || sym.includes('**')))
       || nameVal.includes('PENDING ACTIVITY')
       || sym === 'PENDING ACTIVITY';
     if (isCashRow) {
@@ -91,7 +111,9 @@ function parseGenericCsv(text) {
       ? (TICKER_SECTORS[sym] || mappedSector)
       : mappedSector;
 
-    const entry = {
+    const costBasis = qty * pp;
+    const currentValue = qty * cp;
+    const entry: HoldingEntry = {
       symbol: sym,
       name: map.name !== undefined ? (String(vals[map.name] || '').trim() || sym) : sym,
       quantity: qty,
@@ -99,11 +121,11 @@ function parseGenericCsv(text) {
       currentPrice: cp,
       sector: finalSector,
       purchaseDate: map.purchaseDate !== undefined ? String(vals[map.purchaseDate] || '').trim() : '',
+      costBasis,
+      currentValue,
+      gainLoss: currentValue - costBasis,
+      returnPct: pp > 0 ? ((cp - pp) / pp) * 100 : 0,
     };
-    entry.costBasis = qty * pp;
-    entry.currentValue = qty * cp;
-    entry.gainLoss = entry.currentValue - entry.costBasis;
-    entry.returnPct = pp > 0 ? ((cp - pp) / pp) * 100 : 0;
     data.push(entry);
   });
 
@@ -111,7 +133,7 @@ function parseGenericCsv(text) {
   return { data, errors, cashAmount: cashTotal };
 }
 
-function isRobinhoodTxt(text) {
+export function isRobinhoodTxt(text: string): boolean {
   const lines = text.split('\n').map((l) => l.trim()).filter((l) => l);
   const sig = ['Name', 'Symbol', 'Shares', 'Price', 'Average cost', 'Total return', 'Equity'];
   for (let i = 0; i <= Math.min(lines.length - 7, 15); i++) {
@@ -120,22 +142,22 @@ function isRobinhoodTxt(text) {
   return false;
 }
 
-function parseRobinhoodTxt(text) {
+export function parseRobinhoodTxt(text: string): ParseResult {
   const lines = text.split('\n').map((l) => l.trim()).filter((l) => l);
-  const data = [];
-  const errors = [];
+  const data: HoldingEntry[] = [];
+  const errors: string[] = [];
 
   const STOCK_HDR = ['Name', 'Symbol', 'Shares', 'Price', 'Average cost', 'Total return', 'Equity'];
   const CRYPTO_HDR = ['Name', 'Symbol', 'Quantity', 'Price', 'Average cost', 'Total return', 'Equity'];
 
-  function findSectionStart(fromIdx, headers) {
+  function findSectionStart(fromIdx: number, headers: string[]): number {
     for (let i = fromIdx; i <= lines.length - 7; i++) {
       if (headers.every((h, j) => lines[i + j] === h)) return i + 7;
     }
     return -1;
   }
 
-  function parseGroup(pos, isCrypto) {
+  function parseGroup(pos: number, isCrypto: boolean): HoldingEntry | null {
     if (pos + 6 >= lines.length) return null;
     const name = lines[pos];
     const sym = lines[pos + 1].toUpperCase();
@@ -192,9 +214,7 @@ function parseRobinhoodTxt(text) {
   return { data, errors, cashAmount: 0 };
 }
 
-function parseFile(text) {
+export function parseFile(text: string): ParseResult {
   if (isRobinhoodTxt(text)) return parseRobinhoodTxt(text);
   return parseGenericCsv(text);
 }
-
-module.exports = { mapHeaders, parseGenericCsv, isRobinhoodTxt, parseRobinhoodTxt, parseFile };
