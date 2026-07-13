@@ -41,11 +41,11 @@ is **not** kept in sync with this one.
 | Auth approach | Roll-your-own (bcrypt + JWT, httpOnly cookie) | Decided + built 2026-07-12 — see Architecture.md Section 1 |
 | Frontend framework | TBD | Vanilla JS (lower effort) vs. React/Vue/Svelte (recommended once auth/routing enter the picture) — decide in Phase 3 |
 | API key strategy | Keys server-side only | FMP/Finnhub keys in backend `.env` — frontend never sees them |
-| User key model | Bring-your-own (Option A), stored encrypted | Decided + storage built 2026-07-12 (`users_subscriptions` table) — see Architecture.md Section 1. Not yet *used* by FMP call sites — see Section 2 |
+| User key model | Bring-your-own (Option A), stored encrypted | Decided + storage built 2026-07-12; wired into every FMP call site the same day — see Architecture.md Section 1 |
 
 ---
 
-# Current Build State (as of 07-12 17:14)
+# Current Build State (as of 07-12 23:21)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -74,10 +74,15 @@ is **not** kept in sync with this one.
   `src/utils/encryption.ts` (Node's built-in `crypto`, no new dependency) — raw key never
   returned in any API response, only a masked `••••••••wxyz` value. 126 tests total (13
   new). Verified live, including confirming the DB column holds genuine ciphertext.
-- Still open (new follow-up, not yet started): actually **using** a per-user key in the FMP
-  call sites (`quotes.controller.ts`/`contrarianFinder.controller.ts`/`portfolio
-  .controller.ts`'s refresh-prices all still call FMP with the global `env.fmpApiKey`) —
-  see `Architecture.md` Section 2.
+- **Per-user FMP keys wired into every call site — 2026-07-12**: `quotes.controller.ts`,
+  `contrarianFinder.controller.ts`, and `portfolio.service.ts`'s `refreshPrices` now all
+  resolve + decrypt the calling user's own key via a new `userSubscription.service
+  .getDecryptedKey()`, instead of the global `env.fmpApiKey`. **Breaking change**:
+  `GET /quotes` and `POST /contrarian-finder/scan` are now `requireAuth`-gated (previously
+  public); a user with no key on file gets a clear 503, never a silent fallback. 130 tests
+  total (4 new), `tsc`/lint clean, verified live end-to-end (401 → 503 → past-503 after
+  adding a key) against the real DB. Full detail in `Architecture.md` Section 1. Finnhub
+  confirmed to still have zero real implementation — this pass is FMP-only in practice.
 
 ## Phase 1 — Backend API & Data Model ✅ Done
 

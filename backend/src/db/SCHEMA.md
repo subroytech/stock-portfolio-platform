@@ -86,10 +86,12 @@ the plaintext key in their result. Requires `API_KEY_ENCRYPTION_KEY` (32-byte he
 from `JWT_SECRET`) in the environment — validated eagerly at module load, same as
 `pool.ts`'s fail-fast pattern for `DATABASE_URL`.
 
-**Not yet wired into any FMP call site** — `quotes.controller.ts`/
-`contrarianFinder.controller.ts`/`portfolio.controller.ts`'s refresh-prices all still call
-FMP with the global `env.fmpApiKey`, not a per-user key from this table. That's a separate,
-not-yet-started follow-up (Architecture.md Section 2).
+**Wired into every FMP call site as of 2026-07-12** — `quotes.controller.ts`,
+`contrarianFinder.controller.ts`, and `portfolio.service.ts`'s `refreshPrices` all resolve
++ decrypt the calling user's own key from this table via `userSubscription.service
+.getDecryptedKey()`, instead of the global `env.fmpApiKey`. A user with no row here for a
+given provider gets a `MissingUserApiKeyError` → `503` from all three surfaces (no silent
+fallback). See Architecture.md Section 1.
 
 | Column | Type | Notes |
 |---|---|---|

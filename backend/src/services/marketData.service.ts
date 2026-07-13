@@ -2,10 +2,15 @@
 // js/live-prices.js (fetchQuotesFMP) — refactored from browser fetch +
 // localStorage key to Node's built-in fetch + backend-only env vars.
 // The FMP key never leaves this module; the frontend never sees it.
+//
+// getQuotes()/getHistorical() take the FMP key as an explicit parameter
+// (2026-07-12) rather than reading a global env.fmpApiKey internally —
+// callers resolve the calling user's own key via
+// userSubscription.service.ts's getDecryptedKey() first. The old
+// requireFmpKey()/MissingApiKeyError were removed once that left them with
+// zero callers.
 
 import env from '../config/env';
-
-export class MissingApiKeyError extends Error {}
 
 export interface FmpGetOptions {
   timeoutMs?: number;
@@ -37,11 +42,6 @@ export async function fmpGet<T = any>(url: string, { timeoutMs = 20000 }: FmpGet
   }
 }
 
-export function requireFmpKey(): string {
-  if (!env.fmpApiKey) throw new MissingApiKeyError('FMP_API_KEY is not set in backend environment.');
-  return env.fmpApiKey;
-}
-
 export interface Quote {
   price: number;
   changeDollar: number;
@@ -51,11 +51,10 @@ export interface Quote {
 
 // One call per symbol, all parallel — mirrors fetchQuotesFMP's shape exactly
 // so livePrices.service.ts / parser.service.ts consumers don't need to change.
-export async function getQuotes(symbols: string[]): Promise<Record<string, Quote>> {
-  const key = requireFmpKey();
+export async function getQuotes(symbols: string[], apiKey: string): Promise<Record<string, Quote>> {
   const results = await Promise.allSettled(
     symbols.map((sym) =>
-      fmpGet<any>(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${key}`, { timeoutMs: 15000 }).then((data) => {
+      fmpGet<any>(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${apiKey}`, { timeoutMs: 15000 }).then((data) => {
         if (!data) return null;
         const q = Array.isArray(data) ? data[0] : data;
         if (!q || !q.price) return null;
@@ -92,9 +91,11 @@ export interface HistoricalBar {
   [key: string]: unknown;
 }
 
-// Used by momentum.service.ts / contrarianFinder.service.ts for historical closes.
-export async function getHistorical(symbol: string, limit = 60): Promise<HistoricalBar[]> {
-  const key = requireFmpKey();
-  const raw = await fmpGet<any>(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${symbol}&limit=${limit}&apikey=${key}`);
+// Not currently called anywhere in src/ — contrarianFinder.service.ts builds
+// its own historical-price-eod fmpGet call inline rather than using this.
+// Kept for momentum-analysis work that hasn't landed yet; apiKey is explicit
+// (not read from env) for the same reason as getQuotes above.
+export async function getHistorical(symbol: string, apiKey: string, limit = 60): Promise<HistoricalBar[]> {
+  const raw = await fmpGet<any>(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${symbol}&limit=${limit}&apikey=${apiKey}`);
   return Array.isArray(raw) ? raw : (raw?.historical ?? []);
 }

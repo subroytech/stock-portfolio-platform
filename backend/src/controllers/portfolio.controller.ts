@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import * as portfolioService from '../services/portfolio.service';
 import { parseFile, isRobinhoodTxt } from '../services/parser.service';
-import * as marketData from '../services/marketData.service';
+import * as userSubscription from '../services/userSubscription.service';
 
 // Every route this controller serves sits behind requireAuth (see app.ts), so
 // req.user is always populated by the time a handler runs.
@@ -138,7 +138,7 @@ export async function refreshPrices(req: Request, res: Response, next: NextFunct
       res.status(404).json({ error: err.message });
       return;
     }
-    if (err instanceof marketData.MissingApiKeyError) {
+    if (err instanceof userSubscription.MissingUserApiKeyError) {
       res.status(503).json({ error: err.message });
       return;
     }

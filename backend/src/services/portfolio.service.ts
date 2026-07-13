@@ -4,6 +4,7 @@
 
 import { pool } from '../db/pool';
 import * as marketData from './marketData.service';
+import * as userSubscription from './userSubscription.service';
 import { applyLivePrices, HoldingLike } from './livePrices.service';
 import { ParseResult } from './parser.service';
 
@@ -357,8 +358,9 @@ export async function refreshPrices(userId: string, portfolioId: string): Promis
   );
   if (holdingRows.length === 0) return [];
 
+  const apiKey = await userSubscription.getDecryptedKey(userId, 'fmp');
   const holdings = holdingRows.map(toHoldingLike);
-  const priceMap = await marketData.getQuotes(holdings.map((h) => h.symbol));
+  const priceMap = await marketData.getQuotes(holdings.map((h) => h.symbol), apiKey);
   applyLivePrices(holdings, priceMap);
 
   const results: RefreshedHolding[] = [];

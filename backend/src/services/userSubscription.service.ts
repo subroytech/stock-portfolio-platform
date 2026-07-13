@@ -1,13 +1,16 @@
 // Per-user, per-provider API key + subscription metadata. Decided 2026-07-12
 // (Architecture.md Section 2 / the user-API-key-model plan) — user picked
-// bringing their own FMP/Finnhub key over a shared pooled key. This service
-// only manages the credential/metadata storage; it does NOT yet wire these
-// keys into the actual FMP call sites (quotes/contrarianFinder/portfolio
-// refresh-prices still use the global env.fmpApiKey) — that's a separate,
-// larger follow-up noted in Architecture.md Section 3.
+// bringing their own FMP/Finnhub key over a shared pooled key.
+//
+// getDecryptedKey() (2026-07-12) is what quotes.controller.ts/
+// contrarianFinder.controller.ts/portfolio.service.ts's refreshPrices call to
+// resolve the calling user's own key — the global env.fmpApiKey is no longer
+// used by any of them.
 
 import { pool } from '../db/pool';
 import { encrypt, decrypt } from '../utils/encryption';
+
+export class MissingUserApiKeyError extends Error {}
 
 export interface SubscriptionInput {
   apiKey: string;
@@ -91,4 +94,18 @@ export async function deleteSubscription(userId: string, provider: string): Prom
     [userId, provider],
   );
   return rows.length > 0;
+}
+
+// Resolves the calling user's own key for a provider — throws
+// MissingUserApiKeyError (not a silent fallback to any shared/global key) if
+// they haven't added one yet.
+export async function getDecryptedKey(userId: string, provider: string): Promise<string> {
+  const { rows } = await pool.query<{ api_key_encrypted: string }>(
+    'SELECT api_key_encrypted FROM users_subscriptions WHERE user_id = $1 AND provider = $2',
+    [userId, provider],
+  );
+  if (!rows[0]) {
+    throw new MissingUserApiKeyError(`No ${provider} API key on file. Add one via PUT /subscriptions/${provider}.`);
+  }
+  return decrypt(rows[0].api_key_encrypted);
 }

@@ -1,8 +1,16 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
 jest.mock('../src/services/marketData.service');
+// Partial mock (keeps the real MissingUserApiKeyError class, so `instanceof`
+// checks in tests below are against the real thing, not an automocked
+// stand-in) — only getDecryptedKey itself is replaced.
+jest.mock('../src/services/userSubscription.service', () => ({
+  ...jest.requireActual('../src/services/userSubscription.service'),
+  getDecryptedKey: jest.fn(),
+}));
 
 import { pool } from '../src/db/pool';
 import * as marketData from '../src/services/marketData.service';
+import * as userSubscription from '../src/services/userSubscription.service';
 import {
   listPortfolios, createPortfolio, getPortfolio, updatePortfolio, deletePortfolio,
   importHoldings, refreshPrices, PortfolioNotFoundError, PortfolioNameConflictError,
@@ -12,11 +20,14 @@ import { ParseResult, HoldingEntry } from '../src/services/parser.service';
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockConnect = pool.connect as unknown as jest.Mock;
 const mockGetQuotes = marketData.getQuotes as jest.Mock;
+const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
 
 beforeEach(() => {
   mockQuery.mockReset();
   mockConnect.mockReset();
   mockGetQuotes.mockReset();
+  mockGetDecryptedKey.mockReset();
+  mockGetDecryptedKey.mockResolvedValue('fake-fmp-key'); // refreshPrices tests: real key resolution isn't under test here
 });
 
 describe('listPortfolios', () => {
@@ -237,10 +248,26 @@ describe('refreshPrices', () => {
     expect(msft?.priceUpdatedAt).toBeNull(); // left untouched
   });
 
-  test('returns an empty array when the portfolio has no holdings', async () => {
+  test('returns an empty array when the portfolio has no holdings (skips key resolution entirely)', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ id: '1' }] }).mockResolvedValueOnce({ rows: [] });
     const result = await refreshPrices('user-1', '1');
     expect(result).toEqual([]);
+    expect(mockGetDecryptedKey).not.toHaveBeenCalled();
+    expect(mockGetQuotes).not.toHaveBeenCalled();
+  });
+
+  test('propagates MissingUserApiKeyError when the user has no FMP key on file', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'h1', symbol: 'AAPL', name: 'Apple', quantity: '10', purchase_price: '100', current_price: '100',
+          sector: 'Tech', purchase_date: null, cost_basis: '1000', current_value: '1000', gain_loss: '0',
+          return_pct: '0', allocation_pct: '100', price_updated_at: null,
+        }],
+      });
+    mockGetDecryptedKey.mockRejectedValue(new userSubscription.MissingUserApiKeyError('No fmp API key on file.'));
+    await expect(refreshPrices('user-1', '1')).rejects.toBeInstanceOf(userSubscription.MissingUserApiKeyError);
     expect(mockGetQuotes).not.toHaveBeenCalled();
   });
 });

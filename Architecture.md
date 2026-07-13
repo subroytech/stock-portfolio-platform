@@ -53,7 +53,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 07-12 17:14
+## Section 1 — Accomplished Till 07-12 23:21
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -184,9 +184,44 @@ local-midnight timezone quirk (`renewal_date` of `2027-01-01` round-tripped as
 but worth knowing if a future frontend renders it naively.
 
 ### Phase 2 — Auth & Multi-Tenancy ✅ Done
-Auth (signup/login/logout), per-request `user_id` scoping (portfolio CRUD), and the user
-API-key model decision (Option A, bring-your-own, storage built above) are all resolved.
-Actually *using* per-user keys in FMP calls is a new, separate follow-up — see Section 2.
+Auth (signup/login/logout), per-request `user_id` scoping (portfolio CRUD), the user
+API-key model decision (Option A, bring-your-own, storage built above), and per-user keys
+now actually wired into every FMP call site (below) are all resolved.
+
+**Per-user FMP keys wired into the actual call sites — 2026-07-12.** `users_subscriptions`
+storage existed but nothing read from it; now `GET /quotes`, `POST /contrarian-finder/scan`,
+and `portfolio.service.ts`'s `refreshPrices` all resolve and decrypt the *calling user's own*
+FMP key instead of the global `env.fmpApiKey`. Confirmed during planning: **Finnhub still has
+zero real implementation anywhere** (only config vars + an allowlist entry) — this pass is
+FMP-only in practice, there's no Finnhub-consuming code to wire a key into.
+- New `userSubscription.service.ts` export: `getDecryptedKey(userId, provider)` (throws a new
+  `MissingUserApiKeyError` if no row exists for that user/provider) and the
+  `MissingUserApiKeyError` class itself.
+- `marketData.service.ts`'s `getQuotes`/`getHistorical` now take an explicit `apiKey` param
+  instead of reading one internally — `requireFmpKey()`/`MissingApiKeyError` deleted (zero
+  remaining callers, confirmed via grep). `env.fmpApiKey`/`FMP_API_KEY` itself stays (still
+  useful for ops/seed-script purposes), only the dead read-it-internally function is gone.
+- **Breaking change, intentional:** `GET /quotes` and `POST /contrarian-finder/scan` are now
+  `requireAuth`-gated — previously anonymous/public endpoints. This is the direct consequence
+  of bring-your-own-key: an anonymous caller has no key to resolve. No real external consumers
+  exist yet (no frontend), so blast radius was just the test suite.
+- **No fallback to the global key.** An authenticated user with no FMP key on file gets a
+  clear `503 { error: "No fmp API key on file. Add one via PUT /subscriptions/fmp." }` from
+  all three surfaces — never a silent fallback to `env.fmpApiKey`.
+- 3 test files updated (`portfolio.service.test.ts`, `portfolio.controller.test.ts`,
+  `app.test.ts`) — each partial-mocks `userSubscription.service` (`jest.requireActual(...)`
+  spread + only `getDecryptedKey` replaced) rather than full-automocking the module, so the
+  real `MissingUserApiKeyError` class survives for `instanceof` checks in tests. 130 tests
+  passing (up from 126), `tsc --noEmit` clean on both configs, lint clean (0 errors).
+- Verified live against the real CockroachDB instance via the actual dev server: signed up a
+  throwaway user, confirmed `GET /quotes`/`POST /contrarian-finder/scan` 401 with no cookie,
+  503 with a valid cookie but no FMP key, added a real (fake-value) key via
+  `PUT /subscriptions/fmp`, then confirmed both endpoints got *past* the 503 — `/quotes`
+  reached real FMP and got back "Invalid or expired FMP API key" (expected, no real key
+  available in this environment), `/contrarian-finder/scan` completed a full 348-symbol scan
+  (per-symbol FMP failures are already tolerated by `contrarianFinder.service.ts`, so an
+  invalid key there degrades to zero candidates rather than an error). Throwaway user deleted
+  afterward, confirmed `users_subscriptions` cascade-deleted with it.
 
 ### Phases 3–6 — Not started
 Frontend framework decided (React, for Phase 3 — porting behavior/UX, not the old `innerHTML` markup), but no code written; formal planning deliberately deferred until Phase 2 is further along.
@@ -195,28 +230,31 @@ Frontend framework decided (React, for Phase 3 — porting behavior/UX, not the 
 
 ## Section 2 — Next Step
 
-**Wire per-user FMP/Finnhub keys into the actual call sites.** `users_subscriptions`
-storage exists (Section 1) but nothing reads from it yet — `quotes.controller.ts`,
-`contrarianFinder.controller.ts`, and `portfolio.controller.ts`'s refresh-prices all still
-call FMP with the global `env.fmpApiKey`. Needs: each call site threading a `userId`
-through to look up + decrypt that user's own key (falling back to... what, if the user
-hasn't added one yet? worth deciding explicitly rather than assuming) before calling
-`marketData.service.ts`.
+**Phase 3 — React frontend.** Port behavior/UX (widget layout, KPI cards, signal/color
+conventions, chart configs), not the old `innerHTML`-string rendering code. Mobile-first per
+component (the 10-column holdings table and the fixed 2-column widget grids are the biggest
+desktop-only offenders to fix). Replace every direct `fetch(FMP/...)` call and all
+`localStorage` portfolio persistence with calls to the backend API. **Must show an explicit
+"replace existing holdings with this upload?" confirmation before ever calling
+`POST /portfolios/:id/import`** — that endpoint unconditionally replaces when called; the
+confirmation is a UI responsibility, not something the backend enforces (noted during the
+portfolio-CRUD plan, 2026-07-12). The frontend will also need a UI for adding/managing a
+user's own FMP key (`PUT/GET/DELETE /subscriptions/fmp`) — without it, every authenticated
+user hits the new 503 with nowhere to act on it.
 
-- **Test gate:** integration tests confirming a request actually uses the calling user's
-  own key (not the global one), plus a defined, tested behavior for the no-key-yet case.
+- **Test gate:** component tests + a real browser walkthrough of the golden path before
+  calling it done.
 
 ---
 
 ## Section 3 — Backlog (serial, in order)
 
-1. **Phase 3 — React frontend.** Port behavior/UX (widget layout, KPI cards, signal/color conventions, chart configs), not the old `innerHTML`-string rendering code. Mobile-first per component (the 10-column holdings table and the fixed 2-column widget grids are the biggest desktop-only offenders to fix). Replace every direct `fetch(FMP/...)` call and all `localStorage` portfolio persistence with calls to the backend API. **Must show an explicit "replace existing holdings with this upload?" confirmation before ever calling `POST /portfolios/:id/import`** — that endpoint unconditionally replaces when called; the confirmation is a UI responsibility, not something the backend enforces (noted during the portfolio-CRUD plan, 2026-07-12). Test gate: component tests + a real browser walkthrough of the golden path before calling it done.
-2. **Python service scaffolding.** New `analysis-service/` running FastAPI (Pydantic request/response validation, auto-generated OpenAPI docs), Dockerized from day one, `pytest` wired up. Test gate: a trivial health-check endpoint round-trips through the Node gateway before any real analysis logic goes in.
-3. **Long-Term Analysis — built greenfield in Python.** No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this is new logic, not an extraction — lowest-risk place to prove the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself is the correctness bar, since there's no legacy JS output to diff against.
-4. **Momentum Analysis — extracted from `momentum.service.ts`.** Port the RSI/SMA/Bollinger Band/Kelly-sizing math to Python (`pandas`/`numpy`/`ta`). Test gate: shadow-test the Python port against the existing Jest fixtures value-for-value before the gateway cuts over; keep the TS version in place as a rollback path until confidence is high. (This service has a documented history of a subtle bug — the Kelly-sizing score-gate — slipping through silently, so the shadow-test discipline matters more here than it might elsewhere.)
-5. **Contrarian Analysis — extracted from `contrarianFinder.service.ts`**, once a data-ownership call is made: Node stays the sole DB owner and passes the pre-fetched universe + price data into Python as a request payload (recommended, keeps Python purely computational), vs. giving the Python service its own CockroachDB connection. Test gate: same shadow-test discipline as step 4.
-6. **Phase 4 — Shared quote cache.** Redis or a TTL table, behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30–60 seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history tracking into the DB.
-7. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from step 2), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
-8. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.
+1. **Python service scaffolding.** New `analysis-service/` running FastAPI (Pydantic request/response validation, auto-generated OpenAPI docs), Dockerized from day one, `pytest` wired up. Test gate: a trivial health-check endpoint round-trips through the Node gateway before any real analysis logic goes in.
+2. **Long-Term Analysis — built greenfield in Python.** No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this is new logic, not an extraction — lowest-risk place to prove the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself is the correctness bar, since there's no legacy JS output to diff against.
+3. **Momentum Analysis — extracted from `momentum.service.ts`.** Port the RSI/SMA/Bollinger Band/Kelly-sizing math to Python (`pandas`/`numpy`/`ta`). Test gate: shadow-test the Python port against the existing Jest fixtures value-for-value before the gateway cuts over; keep the TS version in place as a rollback path until confidence is high. (This service has a documented history of a subtle bug — the Kelly-sizing score-gate — slipping through silently, so the shadow-test discipline matters more here than it might elsewhere.)
+4. **Contrarian Analysis — extracted from `contrarianFinder.service.ts`**, once a data-ownership call is made: Node stays the sole DB owner and passes the pre-fetched universe + price data into Python as a request payload (recommended, keeps Python purely computational), vs. giving the Python service its own CockroachDB connection. Test gate: same shadow-test discipline as step 3.
+5. **Phase 4 — Shared quote cache.** Redis or a TTL table, behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30–60 seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history tracking into the DB.
+6. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from step 1), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
+7. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.
 
-**How to apply:** before starting any item above, open with `/plan` mode to walk through that item's decisions with the user first — this is especially true for Section 2 (API-key model) and Section 3 item 1 (frontend framework/UX decisions), which are expensive to reverse once real user data is flowing.
+**How to apply:** before starting any item above, open with `/plan` mode to walk through that item's decisions with the user first — this is especially true for Section 2 (frontend framework/UX decisions), which is expensive to reverse once real user data is flowing.

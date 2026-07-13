@@ -1,15 +1,24 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
 jest.mock('../src/services/marketData.service');
+// Partial mock (keeps the real MissingUserApiKeyError class so `instanceof`
+// checks inside portfolio.controller.ts are against the real thing) — only
+// getDecryptedKey itself is replaced.
+jest.mock('../src/services/userSubscription.service', () => ({
+  ...jest.requireActual('../src/services/userSubscription.service'),
+  getDecryptedKey: jest.fn(),
+}));
 
 import request from 'supertest';
 import { pool } from '../src/db/pool';
 import * as marketData from '../src/services/marketData.service';
+import * as userSubscription from '../src/services/userSubscription.service';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
 
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockConnect = pool.connect as unknown as jest.Mock;
 const mockGetQuotes = marketData.getQuotes as jest.Mock;
+const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
 
 // A real, validly-signed cookie so requests pass through the real
 // requireAuth middleware — this suite is testing portfolio.controller.ts,
@@ -20,6 +29,8 @@ beforeEach(() => {
   mockQuery.mockReset();
   mockConnect.mockReset();
   mockGetQuotes.mockReset();
+  mockGetDecryptedKey.mockReset();
+  mockGetDecryptedKey.mockResolvedValue('fake-fmp-key');
 });
 
 describe('auth gating', () => {
@@ -143,5 +154,21 @@ describe('POST /portfolios/:id/refresh-prices', () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).post('/portfolios/999/refresh-prices').set('Cookie', authCookie);
     expect(res.status).toBe(404);
+  });
+
+  test('503 when the caller has no FMP key on file', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'h1', symbol: 'AAPL', name: 'Apple', quantity: '10', purchase_price: '100', current_price: '100',
+          sector: 'Tech', purchase_date: null, cost_basis: '1000', current_value: '1000', gain_loss: '0',
+          return_pct: '0', allocation_pct: '100', price_updated_at: null,
+        }],
+      });
+    mockGetDecryptedKey.mockRejectedValue(new userSubscription.MissingUserApiKeyError('No fmp API key on file.'));
+    const res = await request(app).post('/portfolios/1/refresh-prices').set('Cookie', authCookie);
+    expect(res.status).toBe(503);
+    expect(mockGetQuotes).not.toHaveBeenCalled();
   });
 });

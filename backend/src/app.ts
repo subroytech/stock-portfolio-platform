@@ -26,12 +26,18 @@ app.use(cookieParser());
 // All five call FMP, touch auth state, or mutate user/portfolio data —
 // rate-limited so one user/IP can't exhaust the shared quota / hammer
 // signup-login/writes.
-app.use('/quotes', rateLimiters, quotesRoutes);
-app.use('/contrarian-finder', rateLimiters, contrarianFinderRoutes);
-app.use('/auth', rateLimiters, authRoutes);
+//
 // requireAuth runs before rateLimiters so the per-user limiter (which reads
-// req.user.id) actually has it populated — the first route to activate real
-// per-user limits since rateLimit.ts was written anticipating this.
+// req.user.id) actually has it populated — rateLimit.ts was written
+// anticipating this back on 2026-07-08.
+//
+// /quotes and /contrarian-finder became auth-required on 2026-07-12, when
+// they switched from the global env.fmpApiKey to each caller's own
+// users_subscriptions key (they need to know who's calling to resolve it) —
+// an intentional breaking change to what were previously public routes.
+app.use('/quotes', requireAuth, rateLimiters, quotesRoutes);
+app.use('/contrarian-finder', requireAuth, rateLimiters, contrarianFinderRoutes);
+app.use('/auth', rateLimiters, authRoutes);
 app.use('/portfolios', requireAuth, rateLimiters, portfolioRoutes);
 app.use('/subscriptions', requireAuth, rateLimiters, userSubscriptionRoutes);
 
