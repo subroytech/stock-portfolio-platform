@@ -5,7 +5,7 @@
 // being req.user's cast (now covered by src/types/express.d.ts's global
 // augmentation instead of an inline cast here).
 
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { Request } from 'express';
 import env from '../config/env';
 
@@ -22,7 +22,7 @@ const perUserLimiter = rateLimit({
   max: env.rateLimitMaxPerUser,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req: Request) => (req.user?.id ? `user:${req.user.id}` : `ip:${req.ip}`),
+  keyGenerator: (req: Request) => (req.user?.id ? `user:${req.user.id}` : `ip:${ipKeyGenerator(req.ip ?? '')}`),
   message: { error: 'Too many requests from this account, please try again shortly.' },
 });
 
