@@ -1,4 +1,4 @@
-import { mwSMA, mwRSI, mwMACD, mwBB, calcKellySizing } from '../src/services/momentum.service';
+import { mwSMA, mwRSI, mwMACD, mwBB, calcKellySizing, assembleMomentumAnalysis } from '../src/services/momentum.service';
 
 describe('mwSMA', () => {
   test('averages the first n elements (newest-first array)', () => {
@@ -113,5 +113,76 @@ describe('calcKellySizing', () => {
   test('entryMid of 0 yields 0 shares without throwing (division guard)', () => {
     const s = calcKellySizing(1.0, 100000, 0, 7);
     expect(s.sh).toBe(0);
+  });
+});
+
+describe('assembleMomentumAnalysis', () => {
+  // newest-first descending integers -> oldest->newest is strictly increasing,
+  // same construction as the mwRSI "strictly increasing" test above (RSI=100).
+  function makeSeries(len: number) {
+    return Array.from({ length: len }, (_, i) => len - i);
+  }
+
+  test('score.total equals the sum of its component scores', () => {
+    const closes = makeSeries(60);
+    const lows = closes.map((c) => c - 1);
+    const volumes = [300, ...Array(19).fill(100), ...Array(40).fill(100)];
+    const a = assembleMomentumAnalysis(closes, lows, volumes, closes[0]);
+    const { rsi, macd, volume, trend, riskReward, total } = a.score;
+    expect(total).toBe(rsi + macd + volume + trend + riskReward);
+  });
+
+  test('signal is derived from score.total via the documented thresholds', () => {
+    const closes = makeSeries(60);
+    const lows = closes.map((c) => c - 1);
+    const volumes = Array(60).fill(100);
+    const a = assembleMomentumAnalysis(closes, lows, volumes, closes[0]);
+    const expected = a.score.total >= 8 ? 'STRONG BUY'
+      : a.score.total >= 6 ? 'BUY'
+      : a.score.total >= 4 ? 'WATCH' : 'AVOID';
+    expect(a.signal).toBe(expected);
+  });
+
+  test('dayChg is the difference between the two most recent closes', () => {
+    const closes = makeSeries(40);
+    const a = assembleMomentumAnalysis(closes, closes.map((c) => c - 1), Array(40).fill(100), closes[0]);
+    expect(a.dayChg).toBeCloseTo(closes[0] - closes[1], 6);
+  });
+
+  test('high relative volume with a positive day change scores the volume component at 2', () => {
+    const closes = makeSeries(40); // dayChg = closes[0]-closes[1] = 1 > 0
+    const volumes = [1000, ...Array(19).fill(100), ...Array(20).fill(100)];
+    const a = assembleMomentumAnalysis(closes, closes.map((c) => c - 1), volumes, closes[0]);
+    expect(a.volRatio).toBeGreaterThan(1.5);
+    expect(a.score.volume).toBe(2);
+  });
+
+  test('trend scores 2 when price is above both sma20 and sma50', () => {
+    const closes = makeSeries(60);
+    const a = assembleMomentumAnalysis(closes, closes.map((c) => c - 1), Array(60).fill(100), closes[0]);
+    expect(closes[0]).toBeGreaterThan(a.sma20);
+    expect(closes[0]).toBeGreaterThan(a.sma50);
+    expect(a.score.trend).toBe(2);
+  });
+
+  test('extras flags RSI overbought for a strictly-increasing (RSI=100) series', () => {
+    const closes = makeSeries(40);
+    const a = assembleMomentumAnalysis(closes, closes.map((c) => c - 1), Array(40).fill(100), closes[0]);
+    expect(a.rsi).toBe(100);
+    expect(a.extras).toContain('RSI overbought — consider waiting for a pullback before entry');
+  });
+
+  test('flags always include at least one Bollinger-position message', () => {
+    const closes = makeSeries(40);
+    const a = assembleMomentumAnalysis(closes, closes.map((c) => c - 1), Array(40).fill(100), closes[0]);
+    expect(a.flags.length).toBeGreaterThanOrEqual(1);
+    expect(a.flags.length).toBeLessThanOrEqual(2);
+  });
+
+  test('entryMid sits between stopLoss and target for a healthy uptrend setup', () => {
+    const closes = makeSeries(60);
+    const a = assembleMomentumAnalysis(closes, closes.map((c) => c - 1), Array(60).fill(100), closes[0]);
+    expect(a.stopLoss).toBeLessThan(a.entryMid);
+    expect(a.entryMid).toBeLessThan(a.target);
   });
 });

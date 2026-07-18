@@ -20,8 +20,8 @@ database, and auth.
   API keys stored in browser `localStorage` (visible in DevTools).
 
 **This repo:** `stock-portfolio-platform`
-→ Node.js/Express backend + CockroachDB Cloud + auth + REST API.
-  Frontend is a placeholder — not started yet.
+→ Node.js/Express backend + CockroachDB Cloud + auth + REST API + a React frontend
+  (`frontend/`, Vite + TypeScript + Tailwind v4 + React Router + TanStack Query).
 
 **This repo's own `Architecture.md`** (problem statement, shortcomings table, target
 architecture diagram, and the full accomplished/next-step/backlog plan) is the authoritative,
@@ -39,13 +39,13 @@ is **not** kept in sync with this one.
 | Database | CockroachDB Cloud | Instance created at cockroachlabs.cloud; migrations written and applied |
 | Backend host | Render / Railway / Fly.io | TBD — confirm with user before provisioning |
 | Auth approach | Roll-your-own (bcrypt + JWT, httpOnly cookie) | Decided + built 2026-07-12 — see Architecture.md Section 1 |
-| Frontend framework | TBD | Vanilla JS (lower effort) vs. React/Vue/Svelte (recommended once auth/routing enter the picture) — decide in Phase 3 |
+| Frontend framework | React (Vite + TS) | Decided + built 2026-07-13 — Tailwind v4 (CSS-first `@theme`, npm resolved current major, not the v3 originally scoped), React Router, TanStack Query, Chart.js/`react-chartjs-2` — see Architecture.md Section 1 |
 | API key strategy | Keys server-side only | FMP/Finnhub keys in backend `.env` — frontend never sees them |
 | User key model | Bring-your-own (Option A), stored encrypted | Decided + storage built 2026-07-12; wired into every FMP call site the same day — see Architecture.md Section 1 |
 
 ---
 
-# Current Build State (as of 07-12 23:21)
+# Current Build State (as of 07-13 22:30)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -53,7 +53,6 @@ is **not** kept in sync with this one.
   Triggers said `main` until 2026-07-11 (this repo's actual default branch is `master`, so
   the workflow had never once fired before then). Fixed, and **confirmed live** on the next
   push — GitHub Actions run #1, `success`.
-- `frontend/index.html` is a placeholder only
 - Backend fully migrated to TypeScript (`strict: true`) 2026-07-11 — see `Architecture.md`
   Section 1 for detail.
 
@@ -120,8 +119,25 @@ is **not** kept in sync with this one.
   still reads `ticker_sectors.js` directly (untouched) — the `m_tickers` table exists but
   isn't queried by any service yet.
 
-## Phases 3–6 — Not Started
-- Phase 3: Frontend refactor + responsive design
+## Phase 3 — React Frontend ✅ Done
+- **Built 2026-07-13**: full React app in `frontend/` — Login/Signup, Dashboard (portfolio
+  CRUD, CSV/TXT import with replace-confirmation, KPI cards, allocation/gain-loss charts,
+  refresh-prices, responsive Holdings table), Subscriptions, Contrarian Finder, Momentum,
+  Stock Preview Chart. 2 new backend endpoints (`GET /momentum/:symbol`,
+  `GET /stock-preview/:symbol`). Deferred: Long-Term Analysis and Contrarian Comeback
+  Analysis (both promoted to Section 3 backlog, sized as new Python builds — see
+  `Architecture.md`). 153 backend tests (up from 130), 22 new frontend tests.
+- **3 bugs found via manual browser walkthrough, fixed same day**: Holdings table not
+  switching to card view on first resize (root cause: `AllocationChart`/`PerformanceChart`
+  Chart.js canvases missing a height-constrained parent); Momentum page missing its score
+  breakdown; Contrarian Finder's scan giving no wait-state feedback. Full detail in
+  `Architecture.md` Section 1.
+- **Import preview ("Proceed w/o Replace") built 2026-07-13**: a `dryRun: true` branch on
+  the existing `POST /portfolios/:id/import` (calls the already-pure `parseFile()`, zero DB
+  writes — confirmed via direct row-count checks) + a new `/portfolios/:id/import-preview`
+  page. Surfaces the parser's per-row `errors` to a user for the first time ever.
+
+## Phases 4–6 — Not Started
 - Phase 4: Shared quote cache (Redis / Postgres TTL table)
 - Phase 5: Production hardening (Docker, Sentry, staging/prod split)
 - Phase 6: Migration tool + cutover from current app
@@ -131,8 +147,9 @@ is **not** kept in sync with this one.
 # Before Starting Any New Phase
 
 Always open with `/plan` mode to walk through the decisions for that phase before writing
-code. Phase 2 decisions (auth provider, user key model) and Phase 3 decisions (frontend
-framework) are expensive to reverse once data is flowing — plan them first.
+code. Phase 2 (auth provider, user key model) and Phase 3 (frontend framework) decisions were
+expensive-to-reverse examples of why this matters — the same discipline applies to the
+Python-microservices decisions ahead (Section 2/3 of `Architecture.md`).
 
 ---
 

@@ -47,6 +47,10 @@ export interface Quote {
   changeDollar: number;
   changePercent: number;
   name: string;
+  // Only consumed by stockPreview.controller.ts today (deciding whether the
+  // chart's rightmost point is a live intraday price or the last close) —
+  // present here since every other Quote consumer just ignores it.
+  isActivelyTrading: boolean;
 }
 
 // One call per symbol, all parallel — mirrors fetchQuotesFMP's shape exactly
@@ -64,7 +68,10 @@ export async function getQuotes(symbols: string[], apiKey: string): Promise<Reco
         const chgPct = prevPx > 0.01
           ? (chgDol / prevPx) * 100
           : parseFloat(q.changesPercentage ?? q.changePercent) || 0;
-        return { sym, price: livePx, changeDollar: chgDol, changePercent: chgPct, name: q.name || '' };
+        return {
+          sym, price: livePx, changeDollar: chgDol, changePercent: chgPct, name: q.name || '',
+          isActivelyTrading: q.isActivelyTrading === true,
+        };
       })
     )
   );
@@ -72,8 +79,8 @@ export async function getQuotes(symbols: string[], apiKey: string): Promise<Reco
   const map: Record<string, Quote> = {};
   for (const r of results) {
     if (r.status === 'fulfilled' && r.value) {
-      const { sym, price, changeDollar, changePercent, name } = r.value;
-      if (!isNaN(price) && price > 0) map[sym] = { price, changeDollar, changePercent, name };
+      const { sym, price, changeDollar, changePercent, name, isActivelyTrading } = r.value;
+      if (!isNaN(price) && price > 0) map[sym] = { price, changeDollar, changePercent, name, isActivelyTrading };
     }
   }
 

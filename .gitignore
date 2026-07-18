@@ -3,3 +3,5 @@ node_modules/
 *.log
 .DS_Store
 dist/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

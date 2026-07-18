@@ -129,6 +129,22 @@ describe('POST /portfolios/:id/import', () => {
     const res = await request(app).post('/portfolios/1/import').set('Cookie', authCookie).send({ content: 'Foo,Bar\n1,2' });
     expect(res.status).toBe(400);
   });
+
+  test('dryRun: true returns the parsed preview and never opens a DB transaction', async () => {
+    const csv = 'Symbol,Quantity,Current Price\nAAPL,10,150';
+    const res = await request(app).post('/portfolios/1/import').set('Cookie', authCookie).send({ filename: 'x.csv', content: csv, dryRun: true });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ preview: true, sourceFormat: 'csv', cashAmount: 0, errors: [] });
+    expect(res.body.holdings).toHaveLength(1);
+    expect(res.body.holdings[0]).toMatchObject({ symbol: 'AAPL', quantity: 10 });
+    expect(mockConnect).not.toHaveBeenCalled();
+  });
+
+  test('dryRun: true still 400s on a malformed CSV, same as a real import', async () => {
+    const res = await request(app).post('/portfolios/1/import').set('Cookie', authCookie).send({ content: 'Foo,Bar\n1,2', dryRun: true });
+    expect(res.status).toBe(400);
+    expect(mockConnect).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /portfolios/:id/refresh-prices', () => {

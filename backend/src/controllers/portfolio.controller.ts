@@ -99,7 +99,7 @@ export async function remove(req: Request, res: Response, next: NextFunction): P
 }
 
 export async function importHoldings(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const { filename, content } = req.body || {};
+  const { filename, content, dryRun } = req.body || {};
   if (typeof content !== 'string' || !content.trim()) {
     res.status(400).json({ error: 'File content is required.' });
     return;
@@ -108,6 +108,22 @@ export async function importHoldings(req: Request, res: Response, next: NextFunc
   try {
     const parsed = parseFile(content);
     const sourceFormat = isRobinhoodTxt(content) ? 'robinhood_txt' : 'csv';
+
+    // Preview only — parseFile() is pure (no DB access at all), so this
+    // returns before ever calling portfolioService.importHoldings, which is
+    // where every tx_* write happens. Lets the caller inspect a parse
+    // without replacing anything (see the import-preview plan, 2026-07-13).
+    if (dryRun === true) {
+      res.json({
+        preview: true,
+        sourceFormat,
+        holdings: parsed.data,
+        cashAmount: parsed.cashAmount,
+        errors: parsed.errors,
+      });
+      return;
+    }
+
     const result = await portfolioService.importHoldings(
       getUserId(req),
       getIdParam(req),

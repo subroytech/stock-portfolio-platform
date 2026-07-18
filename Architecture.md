@@ -1,6 +1,6 @@
 ## Rebuild Plan — From Single-User Client-Side App to a Scalable Multi-User Platform
 
-**Last updated:** 2026-07-11
+**Last updated:** 2026-07-13
 
 **Why this section exists:** the user identified the single biggest shortcoming of the current app: it's a 100% client-side, single-user project (no backend, no database, no auth — `localStorage` is the only persistence layer) and therefore cannot scale beyond "one person, one browser." This doc started as a forward-looking rebuild plan and has since become a **living status document** — Section 1 tracks what's actually built, Section 2 is the immediate next action, Section 3 is the full ordered backlog. Update it as work lands rather than letting it drift back into a stale one-time plan. For a compact, fast-scan version of Section 1, see `CLAUDE.md`'s "Current Build State" — this doc carries the detail and rationale; that one carries the quick summary.
 
@@ -53,7 +53,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 07-12 23:21
+## Section 1 — Accomplished Till 07-13 22:30
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -223,38 +223,121 @@ FMP-only in practice, there's no Finnhub-consuming code to wire a key into.
   invalid key there degrades to zero candidates rather than an error). Throwaway user deleted
   afterward, confirmed `users_subscriptions` cascade-deleted with it.
 
-### Phases 3–6 — Not started
-Frontend framework decided (React, for Phase 3 — porting behavior/UX, not the old `innerHTML` markup), but no code written; formal planning deliberately deferred until Phase 2 is further along.
+### Phase 3 — React frontend ✅ Done
+
+**Scaffold (2026-07-13):** Vite + React + TypeScript in `frontend/` (first real code there —
+was a single placeholder `index.html`). **Tailwind v4**, not v3 as originally planned — npm
+resolved the current major version, which moved config from `tailwind.config.ts` to a
+CSS-first `@theme` block; source app's design tokens (`css/styles.css`'s `:root`/
+`[data-theme="dark"]` custom properties) ported directly into `src/index.css`'s `@theme`,
+so `[data-theme="dark"]` still flips every color via cascading CSS vars, same mechanism as
+the source app. React Router (pages, not modals, for every major surface — matches the
+source app's separate-page pattern more than a SPA-modal pattern would), TanStack Query
+(server state + the attempt-and-catch-401 session check — no dedicated `GET /auth/me`
+endpoint needed), Chart.js via `react-chartjs-2` (reuses the source app's chart configs
+conceptually). Vitest + React Testing Library, mirroring the backend's Jest discipline.
+
+**2 new backend endpoints**, both following the exact `requireAuth` +
+`userSubscription.getDecryptedKey(userId,'fmp')` + 503-on-missing-key pattern already
+established:
+- **`GET /momentum/:symbol`** — `momentum.service.ts` gained `assembleMomentumAnalysis()`,
+  completing the port its own header comment had flagged as pending (volume ratio, entry/
+  stop/target/R:R, 5-part 0-10 scoring, signal classification, flags/extras), ported from the
+  source app's `analyzeMomentum()`. `calcKellySizing()` stays a call the **frontend** makes
+  client-side (capital is a live-editable input, no reason to round-trip on every keystroke).
+- **`GET /stock-preview/:symbol`** — thin proxy (`marketData.getQuotes`+`getHistorical`), the
+  trivial 8-window period-return math stays client-side. Uncovered a real gap while building
+  this: `marketData.service.ts`'s `Quote` type had no `isActivelyTrading` field (needed to
+  decide the chart's live-vs-last-close rightmost point) — added to `getQuotes()`'s mapping,
+  additive/non-breaking, no consumer needed updating.
+
+**6 pages/widgets shipped:** Login/Signup, Dashboard (portfolio selector/create, CSV/TXT
+import with the required replace-confirmation, KPI cards, allocation + gain/loss charts,
+`refresh-prices`, responsive Holdings table), Subscriptions (add/update/delete the FMP key;
+notes Finnhub is storable but unused by any feature), Contrarian Finder (scan controls +
+responsive results table), Momentum (ticker lookup, score breakdown, trade setup, client-side
+Kelly sizing), Stock Preview Chart (modal, triggered by clicking a symbol in either table).
+
+**Deferred, per an explicit scope decision during planning** (checked each unbuilt page's
+actual complexity before committing to scope, not assumed): Long-Term Analysis (already
+backlog, no existing implementation anywhere) and **Contrarian Comeback Analysis** — the
+full `contrarian-analysis.html` detail page (distinct from the small Stock Preview Chart
+widget) turned out to have ~500+ lines of real logic with zero backend equivalent (weekly
+RSI/OBV built from scratch, Fibonacci levels, a 5-factor weighted scoring model,
+fundamental-ratio thresholds, staged entry/stop math, a stateful gate-check workflow) —
+comparable in size to Long-Term Analysis, not a quick port. Both are now Section 3 backlog
+items (below).
+
+**Responsive-design fix (shortcoming #11), the actual point of this phase:** both the
+Holdings table and the Contrarian Finder results table render as stacked cards below `md`
+instead of the source app's horizontal-scroll-only tables — verified via component tests
+asserting both markups exist simultaneously (Tailwind's `md:hidden`/`hidden md:block` just
+toggle visibility) and via the user's own manual browser walkthrough.
+
+**3 real bugs found during that manual walkthrough, all fixed same day:**
+1. Holdings table didn't switch to card view on first resize (only after navigating away and
+   back) — root cause was `AllocationChart`/`PerformanceChart`'s Chart.js canvases having no
+   explicit height-constrained parent, so they held onto a desktop-measured width and pushed
+   the whole page into horizontal scroll until something forced a remount. Fixed: wrapped
+   both charts in a fixed-height (`h-64`) container + `maintainAspectRatio: false` (a pattern
+   already correctly used by `StockPreviewChart` but missed on the dashboard). Contrarian
+   Finder's results table, which has no charts above it, switched correctly on the very first
+   try — the differential symptom that pointed at Chart.js rather than the table CSS itself.
+2. Momentum page showed only the total score, not its breakdown — added a "Score Breakdown"
+   card (RSI/MACD/Volume/Trend/R:R, each 0-2 with a mini progress bar).
+3. Contrarian Finder's scan (batches against ~348 symbols with a ~60s wait between batches,
+   so genuinely 1-3 minutes) showed a bare "Scanning…" with zero feedback — added a spinner +
+   elapsed-second counter + explanatory text (no real progress bar, since the API is a single
+   synchronous response, not a polled job — that would be a separate, larger feature).
+
+**Import preview ("Proceed w/o Replace") — built 2026-07-13, a follow-up feature request**
+after Phase 3 landed: the replace-confirmation modal only offered Cancel/Replace. Added a
+third option that parses the newly-picked file and shows the result **without writing
+anything** — confirmed live via direct DB row-count checks (`tx_holdings`/`tx_uploads`/
+`tx_portfolio_action_hist` counts identical before/after). Backend: `POST
+/portfolios/:id/import` gained a `dryRun: true` early-return branch that calls the already-
+pure `parseFile()` and returns before ever reaching `portfolioService.importHoldings` — no
+new route, since parsing has no portfolio context to scope by `:id` in the first place.
+Frontend: a new `/portfolios/:id/import-preview` page (not a modal, matching the rest of
+Phase 3's page-not-dialog pattern) reached via React Router navigation state, showing an
+"⚠ Unsaved" banner, the parsed holdings (reusing `HoldingsTable` via a small adapter, keeping
+the responsive card/table behavior rather than a second table), and — a first — the parser's
+per-row `errors` array, which existed all along in `tx_uploads.errors` but was never
+surfaced to any user before. Import Now / Discard actions.
+
+**Test counts**: backend 153 Jest tests (up from 130 pre-Phase-3), frontend 22
+Vitest tests (0 before, since `frontend/` had no code). Both sides: `tsc`/`vite build`/lint
+clean throughout.
+
+**Verification caveat, worth knowing**: this session's browser-automation tool could not
+reach `localhost` on this machine (confirmed: a real external site loaded fine, `localhost`/
+`127.0.0.1` on the dev-server ports both showed as an error page — an environment network
+boundary, not an app bug). Automated tests, full curl-based API walkthroughs, and direct
+DB row-count checks were used throughout instead; the actual visual/responsive/mobile-viewport
+walkthrough was done by the user directly in their own browser, which is what surfaced the
+3 bugs above.
 
 ---
 
 ## Section 2 — Next Step
 
-**Phase 3 — React frontend.** Port behavior/UX (widget layout, KPI cards, signal/color
-conventions, chart configs), not the old `innerHTML`-string rendering code. Mobile-first per
-component (the 10-column holdings table and the fixed 2-column widget grids are the biggest
-desktop-only offenders to fix). Replace every direct `fetch(FMP/...)` call and all
-`localStorage` portfolio persistence with calls to the backend API. **Must show an explicit
-"replace existing holdings with this upload?" confirmation before ever calling
-`POST /portfolios/:id/import`** — that endpoint unconditionally replaces when called; the
-confirmation is a UI responsibility, not something the backend enforces (noted during the
-portfolio-CRUD plan, 2026-07-12). The frontend will also need a UI for adding/managing a
-user's own FMP key (`PUT/GET/DELETE /subscriptions/fmp`) — without it, every authenticated
-user hits the new 503 with nowhere to act on it.
+**Python service scaffolding.** New `analysis-service/` running FastAPI (Pydantic
+request/response validation, auto-generated OpenAPI docs), Dockerized from day one, `pytest`
+wired up.
 
-- **Test gate:** component tests + a real browser walkthrough of the golden path before
-  calling it done.
+- **Test gate:** a trivial health-check endpoint round-trips through the Node gateway before
+  any real analysis logic goes in.
 
 ---
 
 ## Section 3 — Backlog (serial, in order)
 
-1. **Python service scaffolding.** New `analysis-service/` running FastAPI (Pydantic request/response validation, auto-generated OpenAPI docs), Dockerized from day one, `pytest` wired up. Test gate: a trivial health-check endpoint round-trips through the Node gateway before any real analysis logic goes in.
-2. **Long-Term Analysis — built greenfield in Python.** No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this is new logic, not an extraction — lowest-risk place to prove the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself is the correctness bar, since there's no legacy JS output to diff against.
+1. **Long-Term Analysis — built greenfield in Python.** No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this is new logic, not an extraction — lowest-risk place to prove the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself is the correctness bar, since there's no legacy JS output to diff against.
+2. **Contrarian Comeback Analysis — built greenfield in Python**, deferred from Phase 3 (see above): the full gate-check/fundamental-health/scoring/thesis workflow from `contrarian-analysis.html`, ~500+ lines of logic with zero backend equivalent today. Sized like item 1, not a quick port — same rationale for going straight to Python rather than a throwaway Node version. Test gate: same as item 1, `pytest` coverage is the correctness bar.
 3. **Momentum Analysis — extracted from `momentum.service.ts`.** Port the RSI/SMA/Bollinger Band/Kelly-sizing math to Python (`pandas`/`numpy`/`ta`). Test gate: shadow-test the Python port against the existing Jest fixtures value-for-value before the gateway cuts over; keep the TS version in place as a rollback path until confidence is high. (This service has a documented history of a subtle bug — the Kelly-sizing score-gate — slipping through silently, so the shadow-test discipline matters more here than it might elsewhere.)
-4. **Contrarian Analysis — extracted from `contrarianFinder.service.ts`**, once a data-ownership call is made: Node stays the sole DB owner and passes the pre-fetched universe + price data into Python as a request payload (recommended, keeps Python purely computational), vs. giving the Python service its own CockroachDB connection. Test gate: same shadow-test discipline as step 3.
+4. **Contrarian Analysis — extracted from `contrarianFinder.service.ts`**, once a data-ownership call is made: Node stays the sole DB owner and passes the pre-fetched universe + price data into Python as a request payload (recommended, keeps Python purely computational), vs. giving the Python service its own CockroachDB connection. Test gate: same shadow-test discipline as item 3.
 5. **Phase 4 — Shared quote cache.** Redis or a TTL table, behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30–60 seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history tracking into the DB.
-6. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from step 1), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
+6. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from Section 2), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
 7. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.
 
-**How to apply:** before starting any item above, open with `/plan` mode to walk through that item's decisions with the user first — this is especially true for Section 2 (frontend framework/UX decisions), which is expensive to reverse once real user data is flowing.
+**How to apply:** before starting any item above, open with `/plan` mode to walk through that item's decisions with the user first.

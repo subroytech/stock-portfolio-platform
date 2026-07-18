@@ -10,10 +10,14 @@ function holding(overrides: Partial<HoldingLike> = {}): HoldingLike {
   };
 }
 
+function quote(overrides: Partial<Quote> = {}): Quote {
+  return { price: 0, changeDollar: 0, changePercent: 0, name: '', isActivelyTrading: true, ...overrides };
+}
+
 describe('applyLivePrices', () => {
   test('updates currentPrice/currentValue/gainLoss/returnPct from the price map', () => {
     const holdings = [holding()];
-    const { updated } = applyLivePrices(holdings, { AAPL: { price: 120, changeDollar: 2, changePercent: 1.7, name: 'Apple' } });
+    const { updated } = applyLivePrices(holdings, { AAPL: quote({ price: 120, changeDollar: 2, changePercent: 1.7, name: 'Apple' }) });
     expect(updated).toBe(1);
     expect(holdings[0].currentPrice).toBe(120);
     expect(holdings[0].currentValue).toBe(1200);
@@ -26,14 +30,14 @@ describe('applyLivePrices', () => {
       holding({ symbol: 'AAPL', quantity: 10, currentValue: 1000 }),
       holding({ symbol: 'MSFT', quantity: 10, currentValue: 1000 }),
     ];
-    applyLivePrices(holdings, { AAPL: { price: 300, changeDollar: 0, changePercent: 0, name: '' } }); // AAPL -> 3000, MSFT stays 1000
+    applyLivePrices(holdings, { AAPL: quote({ price: 300 }) }); // AAPL -> 3000, MSFT stays 1000
     expect(holdings[0].allocation).toBeCloseTo(75, 6);
     expect(holdings[1].allocation).toBeCloseTo(25, 6);
   });
 
   test('leaves holdings with no price-map entry untouched and not counted in updated', () => {
     const holdings = [holding({ symbol: 'AAPL' }), holding({ symbol: 'TSLA', currentPrice: 50 })];
-    const { updated } = applyLivePrices(holdings, { AAPL: { price: 110, changeDollar: 0, changePercent: 0, name: '' } });
+    const { updated } = applyLivePrices(holdings, { AAPL: quote({ price: 110 }) });
     expect(updated).toBe(1);
     expect(holdings[1].currentPrice).toBe(50);
   });
@@ -54,7 +58,7 @@ describe('computeGroupGain', () => {
       holding({ symbol: 'AAPL', currentValue: 1200 }), // 10 shares implied by quantity, but uses currentValue/price for shares
       holding({ symbol: 'TSLA', currentValue: 500 }),
     ];
-    const priceMap: Record<string, Quote> = { AAPL: { price: 120, changeDollar: 2, changePercent: 0, name: '' } }; // TSLA absent -> excluded
+    const priceMap: Record<string, Quote> = { AAPL: { price: 120, changeDollar: 2, changePercent: 0, name: '', isActivelyTrading: true } }; // TSLA absent -> excluded
     const { gainDollars, covered } = computeGroupGain(holdings, priceMap);
     expect(covered).toHaveLength(1);
     // shares = currentValue / price = 1200/120 = 10; gain = 10 * 2 = 20

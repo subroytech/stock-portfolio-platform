@@ -46,11 +46,34 @@ export function mapHeaders(headers: string[]): Record<string, number> {
   return map;
 }
 
-export function parseGenericCsv(text: string): ParseResult {
-  const result = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: true });
-  if (!result.data.length) throw new Error('CSV appears to be empty or could not be parsed.');
+// Finds which row actually holds column headers, scanning at most the first
+// 20 non-empty rows for one containing a cell that normalizes to a known
+// HEADER_ALIASES value — defaults to row 0 if none match. Needed because some
+// exports (Excel files converted client-side via xlsxToCsv.ts among them)
+// have a title/logo row above the real header. Ported from the source app's
+// xlsxSheetToCsv() (which needed this only for its Excel path); relocated
+// here since HEADER_ALIASES only lives server-side, and it doubles as a
+// robustness improvement for native CSV uploads with the same issue.
+const KNOWN_HEADERS = new Set(Object.values(HEADER_ALIASES).flat());
 
-  const headers = result.meta.fields ?? [];
+function findHeaderRowIndex(rows: string[][]): number {
+  const limit = Math.min(rows.length, 20);
+  for (let i = 0; i < limit; i++) {
+    const norm = rows[i].map((c) => String(c ?? '').toLowerCase().trim().replace(/[_-]/g, ' '));
+    if (norm.some((c) => KNOWN_HEADERS.has(c))) return i;
+  }
+  return 0;
+}
+
+export function parseGenericCsv(text: string): ParseResult {
+  const aoa = Papa.parse<string[]>(text, { skipEmptyLines: true }).data;
+  if (!aoa.length) throw new Error('CSV appears to be empty or could not be parsed.');
+
+  const headerRowIdx = findHeaderRowIndex(aoa);
+  const headers = aoa[headerRowIdx];
+  const rows = aoa.slice(headerRowIdx + 1).map((row) => Object.fromEntries(headers.map((h, i) => [h, row[i] ?? ''])));
+  if (!rows.length) throw new Error('CSV appears to be empty or could not be parsed.');
+
   const map = mapHeaders(headers);
 
   const hasPurchasePrice = 'purchasePrice' in map;
@@ -73,7 +96,7 @@ export function parseGenericCsv(text: string): ParseResult {
     return n == null ? null : (neg ? -Math.abs(n) : n);
   }
 
-  result.data.forEach((row, i) => {
+  rows.forEach((row, i) => {
     const vals = Object.values(row);
     const sym = vals[map.symbol] ? String(vals[map.symbol]).trim().toUpperCase() : null;
     const qty = parseNum(vals[map.quantity]);

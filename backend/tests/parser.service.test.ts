@@ -72,6 +72,26 @@ describe('parseGenericCsv', () => {
     const { data } = parseGenericCsv(csv);
     expect(data[0]).toMatchObject({ symbol: 'AAPL', quantity: 5, currentPrice: 180 });
   });
+
+  // Excel exports converted to CSV client-side (xlsxToCsv.ts, "Empower format")
+  // sometimes have a title/logo row above the real header — this is the
+  // server-side detection that skips it, ported from the source app's
+  // xlsxSheetToCsv() and relocated here since HEADER_ALIASES lives here.
+  test('skips a leading title/banner row and finds the real header row beneath it', () => {
+    const csv = 'My Empower Retirement Account\n\nSymbol,Quantity,Current Price\nAAPL,5,180';
+    const { data, errors } = parseGenericCsv(csv);
+    expect(errors).toHaveLength(0);
+    expect(data).toHaveLength(1);
+    expect(data[0]).toMatchObject({ symbol: 'AAPL', quantity: 5, currentPrice: 180 });
+  });
+
+  test('falls back to row 0 as the header when no row matches a known alias', () => {
+    // No row anywhere contains a recognizable header — parseGenericCsv should
+    // still treat row 0 as the header (matching xlsxSheetToCsv's fallback)
+    // and fail with "Missing required columns", not crash.
+    const csv = 'Foo,Bar,Baz\n1,2,3\n4,5,6';
+    expect(() => parseGenericCsv(csv)).toThrow(/Missing required columns/);
+  });
 });
 
 describe('Robinhood TXT parser', () => {
