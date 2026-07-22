@@ -42,10 +42,11 @@ is **not** kept in sync with this one.
 | Frontend framework | React (Vite + TS) | Decided + built 2026-07-13 — Tailwind v4 (CSS-first `@theme`, npm resolved current major, not the v3 originally scoped), React Router, TanStack Query, Chart.js/`react-chartjs-2` — see Architecture.md Section 1 |
 | API key strategy | Keys server-side only | FMP/Finnhub keys in backend `.env` — frontend never sees them |
 | User key model | Bring-your-own (Option A), stored encrypted | Decided + storage built 2026-07-12; wired into every FMP call site the same day — see Architecture.md Section 1 |
+| E2E testing framework | Playwright + Cucumber (`playwright-bdd`) | Decided 2026-07-21 — originally proposed as Selenium+Cucumber, switched to Playwright's engine for auto-waiting/less CI flakiness; single pilot golden-path scenario in new `e2e/`, see Architecture.md Section 3 item 1 |
 
 ---
 
-# Current Build State (as of 07-13 22:30)
+# Current Build State (as of 07-21 22:10)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -136,6 +137,17 @@ is **not** kept in sync with this one.
   the existing `POST /portfolios/:id/import` (calls the already-pure `parseFile()`, zero DB
   writes — confirmed via direct row-count checks) + a new `/portfolios/:id/import-preview`
   page. Surfaces the parser's per-row `errors` to a user for the first time ever.
+
+## Section 3 Backlog — reordered 2026-07-21, item 1 scaffolded
+Section 3 of `Architecture.md` now opens with a new item 1: a Playwright + Cucumber
+(`playwright-bdd`) E2E pilot suite, inserted ahead of Long-Term Analysis/Contrarian Comeback
+Analysis/the Python extraction items so it's in place as a regression net before that riskier
+work. New `e2e/` project scaffolded (config, feature file, step definitions, `data-testid`
+additions to 6 frontend files) — verified locally that `bddgen` generates the single scenario
+correctly and Playwright's test list resolves all 8 Gherkin steps. **Not yet done**:
+provisioning the dedicated CockroachDB Cloud test database, running the suite against a real
+DB, and wiring the CI job + `E2E_DATABASE_URL` secret — all need the user's cloud console /
+GitHub repo admin access. See Architecture.md Section 3 item 1 for full detail.
 
 ## Phases 4–6 — Not Started
 - Phase 4: Shared quote cache (Redis / Postgres TTL table)

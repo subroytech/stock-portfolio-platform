@@ -28,7 +28,11 @@ export default function KpiCards({ portfolio }: KpiCardsProps) {
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
       {cards.map((card) => (
-        <div key={card.label} className="rounded-card bg-bg-card p-4 shadow-card">
+        <div
+          key={card.label}
+          data-testid={`kpi-${card.label.toLowerCase().replace(/\s+/g, '-').replace(/\//g, '-')}`}
+          className="rounded-card bg-bg-card p-4 shadow-card"
+        >
           <p className="text-sm text-text-secondary">{card.label}</p>
           <p className={`mt-1 text-xl font-semibold ${card.colorClass ?? 'text-text-primary'}`}>
             {card.value}

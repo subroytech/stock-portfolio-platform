@@ -32,3 +32,31 @@ jobs:
           # which is what silently broke `npm test` here until this fix.
           JWT_SECRET: cd858a5648181a67da0fb7f9fedb68dcff34230803dfd47e44f2e65d4b44f6b5
           API_KEY_ENCRYPTION_KEY: a91bb2a80230af61e10e3ac0a44cc322629b854f8712eabc07cc308ab0c53c12
+
+  e2e:
+    needs: backend
+    runs-on: ubuntu-latest
+    # Non-blocking until proven stable across several CI runs - remove once green.
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: e2e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: e2e/package-lock.json
+      - run: npm ci
+      - run: cd ../backend && npm ci
+      - run: cd ../frontend && npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+        env:
+          # E2E_DATABASE_URL points at a dedicated CockroachDB Cloud test
+          # database (a second database on the same cluster as dev/prod),
+          # never the real stockPortfolioAnalysis database.
+          DATABASE_URL: ${{ secrets.E2E_DATABASE_URL }}
+          JWT_SECRET: cd858a5648181a67da0fb7f9fedb68dcff34230803dfd47e44f2e65d4b44f6b5
+          API_KEY_ENCRYPTION_KEY: a91bb2a80230af61e10e3ac0a44cc322629b854f8712eabc07cc308ab0c53c12

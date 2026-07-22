@@ -1,6 +1,6 @@
 ## Rebuild Plan — From Single-User Client-Side App to a Scalable Multi-User Platform
 
-**Last updated:** 2026-07-13
+**Last updated:** 2026-07-21
 
 **Why this section exists:** the user identified the single biggest shortcoming of the current app: it's a 100% client-side, single-user project (no backend, no database, no auth — `localStorage` is the only persistence layer) and therefore cannot scale beyond "one person, one browser." This doc started as a forward-looking rebuild plan and has since become a **living status document** — Section 1 tracks what's actually built, Section 2 is the immediate next action, Section 3 is the full ordered backlog. Update it as work lands rather than letting it drift back into a stale one-time plan. For a compact, fast-scan version of Section 1, see `CLAUDE.md`'s "Current Build State" — this doc carries the detail and rationale; that one carries the quick summary.
 
@@ -332,12 +332,39 @@ wired up.
 
 ## Section 3 — Backlog (serial, in order)
 
-1. **Long-Term Analysis — built greenfield in Python.** No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this is new logic, not an extraction — lowest-risk place to prove the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself is the correctness bar, since there's no legacy JS output to diff against.
-2. **Contrarian Comeback Analysis — built greenfield in Python**, deferred from Phase 3 (see above): the full gate-check/fundamental-health/scoring/thesis workflow from `contrarian-analysis.html`, ~500+ lines of logic with zero backend equivalent today. Sized like item 1, not a quick port — same rationale for going straight to Python rather than a throwaway Node version. Test gate: same as item 1, `pytest` coverage is the correctness bar.
-3. **Momentum Analysis — extracted from `momentum.service.ts`.** Port the RSI/SMA/Bollinger Band/Kelly-sizing math to Python (`pandas`/`numpy`/`ta`). Test gate: shadow-test the Python port against the existing Jest fixtures value-for-value before the gateway cuts over; keep the TS version in place as a rollback path until confidence is high. (This service has a documented history of a subtle bug — the Kelly-sizing score-gate — slipping through silently, so the shadow-test discipline matters more here than it might elsewhere.)
-4. **Contrarian Analysis — extracted from `contrarianFinder.service.ts`**, once a data-ownership call is made: Node stays the sole DB owner and passes the pre-fetched universe + price data into Python as a request payload (recommended, keeps Python purely computational), vs. giving the Python service its own CockroachDB connection. Test gate: same shadow-test discipline as item 3.
-5. **Phase 4 — Shared quote cache.** Redis or a TTL table, behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30–60 seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history tracking into the DB.
-6. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from Section 2), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
-7. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.
+1. **First E2E test suite — Playwright + Cucumber (`playwright-bdd`), single pilot golden-path
+   scenario.** New top-level `e2e/` directory (its own npm project, matching `backend/`/
+   `frontend/`'s split — no workspaces exist to join). Gherkin `.feature` files for BDD
+   readability, Playwright's engine underneath for speed/reliability — originally proposed as
+   Selenium+Cucumber, switched to Playwright when presented with the tradeoff (auto-waiting vs.
+   WebDriver flakiness, no separate driver-binary management in CI). Scope deliberately narrow:
+   **Signup → Login → Create portfolio → Import CSV → View dashboard KPIs/holdings** — one
+   scenario, proving the whole chain (CI, both dev servers, a dedicated CockroachDB Cloud test
+   database, the browser driver, Gherkin step wiring) works before investing in full page
+   coverage, mirroring this doc's own Section 2 philosophy ("a trivial health-check endpoint
+   round-trips... before any real analysis logic goes in"). Test DB: a second database on the
+   same CockroachDB Cloud cluster (not a new local Docker Postgres), migrated via the existing
+   `backend/src/db/migrate.ts` (reused as-is, no new DB access pattern) and cleaned up
+   per-scenario via a direct `DELETE FROM users WHERE email = $1` (cascades through every child
+   table, already the repo's proven cleanup shape). Added 5 `data-testid` attributes (additive
+   only, no behavior change) to `LoginPage.tsx`/`SignupPage.tsx`/`PortfolioSelector.tsx`/
+   `UploadImportDialog.tsx`/`KpiCards.tsx`/`HoldingsTable.tsx` — the repo had none before. CI: a
+   new `e2e` job in `.github/workflows/ci.yml`, gated behind the existing `backend` job, starting
+   `continue-on-error: true` until proven stable over several runs. **Positioned here** —
+   immediately after Section 2's Python scaffolding, before item 2 (Long-Term Analysis) — so its
+   value as a regression net is available through the riskiest upcoming work (items 4-5's
+   Momentum/Contrarian TS→Python extractions) and so Long-Term Analysis / Contrarian Comeback
+   Analysis (items 2-3, both new pages) get E2E coverage as they're built rather than retrofitted
+   later. Test gate: the pilot scenario passing locally and green in CI is the bar — no page
+   coverage expansion happens until this lands and proves stable. Scaffolded 2026-07-21;
+   provisioning the actual CockroachDB Cloud test database and the `E2E_DATABASE_URL` GitHub
+   secret are pending (need the user's cloud console / repo admin access).
+2. **Long-Term Analysis — built greenfield in Python.** No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this is new logic, not an extraction — lowest-risk place to prove the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself is the correctness bar, since there's no legacy JS output to diff against.
+3. **Contrarian Comeback Analysis — built greenfield in Python**, deferred from Phase 3 (see above): the full gate-check/fundamental-health/scoring/thesis workflow from `contrarian-analysis.html`, ~500+ lines of logic with zero backend equivalent today. Sized like item 1, not a quick port — same rationale for going straight to Python rather than a throwaway Node version. Test gate: same as item 1, `pytest` coverage is the correctness bar.
+4. **Momentum Analysis — extracted from `momentum.service.ts`.** Port the RSI/SMA/Bollinger Band/Kelly-sizing math to Python (`pandas`/`numpy`/`ta`). Test gate: shadow-test the Python port against the existing Jest fixtures value-for-value before the gateway cuts over; keep the TS version in place as a rollback path until confidence is high. (This service has a documented history of a subtle bug — the Kelly-sizing score-gate — slipping through silently, so the shadow-test discipline matters more here than it might elsewhere.)
+5. **Contrarian Analysis — extracted from `contrarianFinder.service.ts`**, once a data-ownership call is made: Node stays the sole DB owner and passes the pre-fetched universe + price data into Python as a request payload (recommended, keeps Python purely computational), vs. giving the Python service its own CockroachDB connection. Test gate: same shadow-test discipline as item 3.
+6. **Phase 4 — Shared quote cache.** Redis or a TTL table, behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30–60 seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history tracking into the DB.
+7. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from Section 2), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
+8. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.
 
 **How to apply:** before starting any item above, open with `/plan` mode to walk through that item's decisions with the user first.

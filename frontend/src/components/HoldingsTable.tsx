@@ -57,7 +57,7 @@ export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTable
 
       {/* Desktop: table */}
       <div className="hidden overflow-x-auto rounded-card border border-border bg-bg-card shadow-card md:block">
-        <table className="w-full text-sm">
+        <table className="w-full text-sm" data-testid="holdings-table">
           <thead>
             <tr className="border-b border-border text-left text-text-secondary">
               <th className="whitespace-nowrap px-3 py-2">Symbol</th>
@@ -74,7 +74,7 @@ export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTable
           </thead>
           <tbody>
             {holdings.map((h) => (
-              <tr key={h.id} className="border-b border-border last:border-0 text-text-primary">
+              <tr key={h.id} data-testid={`holdings-row-${h.symbol}`} className="border-b border-border last:border-0 text-text-primary">
                 <td className="whitespace-nowrap px-3 py-2 font-medium">{symbolButton(h.symbol, 'font-medium text-text-primary')}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-text-secondary">{h.name ?? '—'}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-text-secondary">{h.sector ?? '—'}</td>

@@ -1,0 +1,24 @@
+{
+  "name": "e2e",
+  "version": "1.0.0",
+  "description": "Playwright + Cucumber (playwright-bdd) end-to-end test suite",
+  "private": true,
+  "scripts": {
+    "pretest": "ts-node scripts/migrate-test-db.ts && bddgen",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "@types/node": "^26.1.1",
+    "@types/pg": "^8.20.0",
+    "playwright-bdd": "^9.2.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}

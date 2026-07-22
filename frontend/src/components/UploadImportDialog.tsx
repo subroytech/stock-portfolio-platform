@@ -68,6 +68,7 @@ export default function UploadImportDialog({ portfolioId, hasExistingHoldings }:
         type="file"
         accept=".csv,.txt,.xls,.xlsx,.xlsm"
         onChange={handleFileChange}
+        data-testid="import-file-input"
         className="block text-sm text-text-secondary file:mr-3 file:rounded-btn file:border-0 file:bg-accent file:px-3 file:py-1.5 file:text-white file:hover:bg-accent-hover"
       />
 
@@ -79,7 +80,7 @@ export default function UploadImportDialog({ portfolioId, hasExistingHoldings }:
         </p>
       )}
       {importHoldings.isSuccess && (
-        <p className="mt-2 text-sm text-success">
+        <p className="mt-2 text-sm text-success" data-testid="import-success">
           Imported {importHoldings.data.holdingsCount} holdings, logged {importHoldings.data.actionsLogged} buy/sell actions.
         </p>
       )}

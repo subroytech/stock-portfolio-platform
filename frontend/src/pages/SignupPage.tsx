@@ -34,6 +34,7 @@ export default function SignupPage() {
           required
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          data-testid="signup-email"
           className="mb-4 w-full rounded-btn border border-border bg-bg-primary px-3 py-2 text-text-primary"
         />
 
@@ -45,6 +46,7 @@ export default function SignupPage() {
           minLength={8}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+          data-testid="signup-password"
           className="mb-1 w-full rounded-btn border border-border bg-bg-primary px-3 py-2 text-text-primary"
         />
         <p className="mb-4 text-xs text-text-muted">At least 8 characters.</p>
@@ -58,6 +60,7 @@ export default function SignupPage() {
         <button
           type="submit"
           disabled={signup.isPending}
+          data-testid="signup-submit"
           className="w-full rounded-btn bg-accent px-4 py-2 font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
         >
           {signup.isPending ? 'Creating account…' : 'Sign up'}

@@ -97,9 +97,10 @@ export default function PortfolioSelector({ selectedId, onSelect }: PortfolioSel
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder="Portfolio name"
+            data-testid="new-portfolio-name-input"
             className="rounded-btn border border-border bg-bg-primary px-2 py-1.5 text-sm text-text-primary"
           />
-          <button type="submit" disabled={createPortfolio.isPending} className="rounded-btn bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent-hover">
+          <button type="submit" disabled={createPortfolio.isPending} data-testid="new-portfolio-submit" className="rounded-btn bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent-hover">
             Add
           </button>
           <button type="button" onClick={() => setShowCreate(false)} className="text-sm text-text-secondary hover:underline">
@@ -110,6 +111,7 @@ export default function PortfolioSelector({ selectedId, onSelect }: PortfolioSel
         <button
           type="button"
           onClick={() => setShowCreate(true)}
+          data-testid="new-portfolio-button"
           className="rounded-btn border border-dashed border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-primary"
         >
           + New portfolio
