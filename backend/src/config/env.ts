@@ -18,6 +18,8 @@ export interface Env {
   finnhubApiKey: string;
   finnhubBaseUrl: string;
 
+  analysisServiceUrl: string;
+
   rateLimitWindowMs: number;
   rateLimitMaxPerUser: number;
   rateLimitMaxPerIp: number;
@@ -45,6 +47,8 @@ const env: Readonly<Env> = {
 
   finnhubApiKey: process.env.FINNHUB_API_KEY || '',
   finnhubBaseUrl: process.env.FINNHUB_BASE_URL || 'https://finnhub.io/api/v1',
+
+  analysisServiceUrl: process.env.ANALYSIS_SERVICE_URL || 'http://localhost:8000',
 
   rateLimitWindowMs: num(process.env.RATE_LIMIT_WINDOW_MS, 60000),
   rateLimitMaxPerUser: num(process.env.RATE_LIMIT_MAX_PER_USER, 30),

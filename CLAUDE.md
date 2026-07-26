@@ -46,7 +46,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 07-21 22:10)
+# Current Build State (as of 07-24 22:15)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -56,33 +56,6 @@ is **not** kept in sync with this one.
   push — GitHub Actions run #1, `success`.
 - Backend fully migrated to TypeScript (`strict: true`) 2026-07-11 — see `Architecture.md`
   Section 1 for detail.
-
-## Phase 2 — Auth & Multi-Tenancy ✅ Done
-- **Auth built 2026-07-12**: roll-your-own bcrypt + JWT in an httpOnly cookie —
-  `POST /auth/signup|login|logout`, `requireAuth` middleware, wired into `app.ts` with
-  `cookie-parser` + CORS credentials.
-- **Portfolio CRUD built 2026-07-12** (first real use of `requireAuth` through HTTP,
-  and per-`user_id` scoping): `GET/POST/PUT/DELETE /portfolios`,
-  `POST /portfolios/:id/import` (CSV/TXT, reuses `parser.service.ts`), and
-  `POST /portfolios/:id/refresh-prices` (reuses `marketData.service.ts`/
-  `livePrices.service.ts`), plus a new buy/sell `tx_portfolio_action_hist` table populated
-  by diffing holdings on every import. 113 tests passing (34 new this round). Verified live
-  against the real DB via the actual dev server. Full detail in `Architecture.md` Section 1.
-- **User API keys built 2026-07-12**: Option A (bring-your-own) chosen; new unprefixed
-  `users_subscriptions` table (one row per `user`+`provider`, extensible to future
-  providers), `GET/PUT/DELETE /subscriptions`, keys AES-256-GCM encrypted via new
-  `src/utils/encryption.ts` (Node's built-in `crypto`, no new dependency) — raw key never
-  returned in any API response, only a masked `••••••••wxyz` value. 126 tests total (13
-  new). Verified live, including confirming the DB column holds genuine ciphertext.
-- **Per-user FMP keys wired into every call site — 2026-07-12**: `quotes.controller.ts`,
-  `contrarianFinder.controller.ts`, and `portfolio.service.ts`'s `refreshPrices` now all
-  resolve + decrypt the calling user's own key via a new `userSubscription.service
-  .getDecryptedKey()`, instead of the global `env.fmpApiKey`. **Breaking change**:
-  `GET /quotes` and `POST /contrarian-finder/scan` are now `requireAuth`-gated (previously
-  public); a user with no key on file gets a clear 503, never a silent fallback. 130 tests
-  total (4 new), `tsc`/lint clean, verified live end-to-end (401 → 503 → past-503 after
-  adding a key) against the real DB. Full detail in `Architecture.md` Section 1. Finnhub
-  confirmed to still have zero real implementation — this pass is FMP-only in practice.
 
 ## Phase 1 — Backend API & Data Model ✅ Done
 
@@ -120,6 +93,33 @@ is **not** kept in sync with this one.
   still reads `ticker_sectors.js` directly (untouched) — the `m_tickers` table exists but
   isn't queried by any service yet.
 
+## Phase 2 — Auth & Multi-Tenancy ✅ Done
+- **Auth built 2026-07-12**: roll-your-own bcrypt + JWT in an httpOnly cookie —
+  `POST /auth/signup|login|logout`, `requireAuth` middleware, wired into `app.ts` with
+  `cookie-parser` + CORS credentials.
+- **Portfolio CRUD built 2026-07-12** (first real use of `requireAuth` through HTTP,
+  and per-`user_id` scoping): `GET/POST/PUT/DELETE /portfolios`,
+  `POST /portfolios/:id/import` (CSV/TXT, reuses `parser.service.ts`), and
+  `POST /portfolios/:id/refresh-prices` (reuses `marketData.service.ts`/
+  `livePrices.service.ts`), plus a new buy/sell `tx_portfolio_action_hist` table populated
+  by diffing holdings on every import. 113 tests passing (34 new this round). Verified live
+  against the real DB via the actual dev server. Full detail in `Architecture.md` Section 1.
+- **User API keys built 2026-07-12**: Option A (bring-your-own) chosen; new unprefixed
+  `users_subscriptions` table (one row per `user`+`provider`, extensible to future
+  providers), `GET/PUT/DELETE /subscriptions`, keys AES-256-GCM encrypted via new
+  `src/utils/encryption.ts` (Node's built-in `crypto`, no new dependency) — raw key never
+  returned in any API response, only a masked `••••••••wxyz` value. 126 tests total (13
+  new). Verified live, including confirming the DB column holds genuine ciphertext.
+- **Per-user FMP keys wired into every call site — 2026-07-12**: `quotes.controller.ts`,
+  `contrarianFinder.controller.ts`, and `portfolio.service.ts`'s `refreshPrices` now all
+  resolve + decrypt the calling user's own key via a new `userSubscription.service
+  .getDecryptedKey()`, instead of the global `env.fmpApiKey`. **Breaking change**:
+  `GET /quotes` and `POST /contrarian-finder/scan` are now `requireAuth`-gated (previously
+  public); a user with no key on file gets a clear 503, never a silent fallback. 130 tests
+  total (4 new), `tsc`/lint clean, verified live end-to-end (401 → 503 → past-503 after
+  adding a key) against the real DB. Full detail in `Architecture.md` Section 1. Finnhub
+  confirmed to still have zero real implementation — this pass is FMP-only in practice.
+
 ## Phase 3 — React Frontend ✅ Done
 - **Built 2026-07-13**: full React app in `frontend/` — Login/Signup, Dashboard (portfolio
   CRUD, CSV/TXT import with replace-confirmation, KPI cards, allocation/gain-loss charts,
@@ -148,6 +148,19 @@ correctly and Playwright's test list resolves all 8 Gherkin steps. **Not yet don
 provisioning the dedicated CockroachDB Cloud test database, running the suite against a real
 DB, and wiring the CI job + `E2E_DATABASE_URL` secret — all need the user's cloud console /
 GitHub repo admin access. See Architecture.md Section 3 item 1 for full detail.
+
+## Python Service Scaffolding — analysis-service ✅ Done
+Built 2026-07-24 — Section 2's "Next Step" is now landed. New `analysis-service/` (FastAPI,
+Poetry, first Python/Docker in this repo) exposes `GET /health`; Node proxies it at
+`GET /analysis/health` (`requireAuth`-gated, same as every other proxied route), following
+the existing `stockPreview.controller.ts` thin-proxy pattern. Verified live end-to-end: the
+full round-trip (client → Node auth-check → Python → back through Node) returns 200, and
+killing the Python process degrades to a clean 503 rather than a crash. 158 backend tests
+(up from 153), new independent `analysis-service` CI job (hard-gated, no
+`continue-on-error`, unlike `e2e`). **Known gap**: Docker itself isn't installed on the
+machine this was built on, so the `Dockerfile` is unverified by an actual build/run — only
+the direct `poetry run uvicorn` path was live-tested. Full detail in `Architecture.md`
+Section 1. Section 2 is now an open placeholder — next Section 3 item TBD via `/plan`.
 
 ## Phases 4–6 — Not Started
 - Phase 4: Shared quote cache (Redis / Postgres TTL table)
