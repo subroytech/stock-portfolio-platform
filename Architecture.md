@@ -1,6 +1,6 @@
 ## Rebuild Plan — From Single-User Client-Side App to a Scalable Multi-User Platform
 
-**Last updated:** 2026-07-21
+**Last updated:** 2026-07-24
 
 **Why this section exists:** the user identified the single biggest shortcoming of the current app: it's a 100% client-side, single-user project (no backend, no database, no auth — `localStorage` is the only persistence layer) and therefore cannot scale beyond "one person, one browser." This doc started as a forward-looking rebuild plan and has since become a **living status document** — Section 1 tracks what's actually built, Section 2 is the immediate next action, Section 3 is the full ordered backlog. Update it as work lands rather than letting it drift back into a stale one-time plan. For a compact, fast-scan version of Section 1, see `CLAUDE.md`'s "Current Build State" — this doc carries the detail and rationale; that one carries the quick summary.
 
@@ -317,16 +317,68 @@ DB row-count checks were used throughout instead; the actual visual/responsive/m
 walkthrough was done by the user directly in their own browser, which is what surfaced the
 3 bugs above.
 
+### Python service scaffolding — analysis-service ✅ Done
+
+**Built 2026-07-24.** First Python code and first Docker artifact in this repo. New
+`analysis-service/` (fourth sibling to `backend/`/`frontend/`/`e2e/`, its own independent
+project): FastAPI app (`app/main.py`) exposing `GET /health` via a Pydantic `HealthResponse`
+model — using `response_model` even for one field deliberately, to establish the
+Pydantic/OpenAPI pattern before real analysis logic (Section 3 items 2-3) needs it.
+Dependency management via **Poetry** (`pyproject.toml`/`poetry.lock`, `package-mode = false`
+since this is an application, not an installable library) — first use of Poetry in this repo,
+chosen over plain `requirements.txt` for its dependency locking. `pytest` via FastAPI's
+`TestClient`, zero external dependencies (no DB, no live Node). `Dockerfile`: single-stage
+`python:3.12-slim`, Poetry installed in-image with `virtualenvs.create false` (installs
+straight into system site-packages, standard practice for Dockerized Poetry apps), non-root
+`appuser`, `uvicorn` as the run command.
+
+**Node-side proxy**, following the existing `stockPreview.controller.ts` thin-proxy shape
+exactly: new `backend/src/services/analysisService.ts` (`checkHealth()` — a small
+purpose-built `fetch`-with-timeout wrapper, deliberately NOT copying `marketData.service.ts`'s
+`fmpGet` FMP-specific quirks like 402-as-no-data, since there's nothing FMP-shaped to
+distinguish when talking to an internal same-infra service), `analysis.controller.ts`,
+`analysis.routes.ts`, wired into `app.ts` as `GET /analysis/health`. **Decision**: this route
+is `requireAuth`-gated, consistent with every other proxied route (`/stock-preview`,
+`/momentum`) — no special-casing a public route now that has to be walked back later once
+real paid analysis logic (Section 3 items 2-3) sits behind it. New `ANALYSIS_SERVICE_URL` env
+var (`backend/src/config/env.ts` + `.env.example`), defaults to `http://localhost:8000`. 3 new
+backend tests (`analysis.controller.test.ts`: 401/200/503) using the established
+partial-mock-for-Error-subclass pattern (`AnalysisServiceError` needs to survive `instanceof`
+checks, so `jest.mock` uses `jest.requireActual(...)` spread + only `checkHealth` replaced —
+same pattern `userSubscription.service`'s tests already use). 158 backend tests total,
+`tsc`/lint clean.
+
+New independent `analysis-service` CI job in `.github/workflows/ci.yml` (first Python job in
+this repo, via `actions/setup-python@v5` + Poetry installed via `pipx` before the cache step)
+— `poetry run pytest`, no `continue-on-error` since it has zero external dependencies (unlike
+`e2e`'s CockroachDB Cloud dependency), so it's a hard gate from day one like `backend`.
+
+**Verified live — the actual Section 2 test gate** ("a trivial health-check endpoint
+round-trips through the Node gateway"): `poetry run uvicorn` on port 8000 (`curl
+localhost:8000/health` → `{"status":"ok"}`, `/docs` → 200 Swagger UI) + `npm run dev` on port
+4000, then via curl: no-cookie → `401`; signed-up throwaway user, authenticated → `200
+{"status":"ok"}` (the actual round-trip: client → Node auth-check → Python FastAPI → back
+through Node → client); killed the Python process, re-curled authenticated → `503
+{"error":"Analysis service unavailable."}` — not a crash, confirming `analysisService.ts`'s
+timeout/error handling degrades gracefully. Throwaway user deleted from the real DB afterward.
+
+**Known gap**: Docker itself is not installed on the machine this was built on, so the
+`Dockerfile` has not been build/run-verified end-to-end (only the direct `poetry run uvicorn`
+path was live-tested). Revisit — build and run the image, confirm `/health`/`/docs` work
+identically from inside the container — once Docker is available, ideally before Phase 5
+(Docker for the rest of the stack) assumes this Dockerfile as a working template.
+
+`e2e/SCENARIOS.md`: explicitly not updated — this phase adds zero new browser-facing flow
+(the health-check round-trip is server-to-server only), per CLAUDE.md's E2E-coverage-decision
+rule.
+
 ---
 
 ## Section 2 — Next Step
 
-**Python service scaffolding.** New `analysis-service/` running FastAPI (Pydantic
-request/response validation, auto-generated OpenAPI docs), Dockerized from day one, `pytest`
-wired up.
-
-- **Test gate:** a trivial health-check endpoint round-trips through the Node gateway before
-  any real analysis logic goes in.
+Next item TBD — open `/plan` mode with the user to pick and scope the next Section 3 item
+before starting. Item 1 (E2E suite)'s CockroachDB Cloud test-DB provisioning + CI wiring
+already landed; item 2 (Long-Term Analysis) is next in strict backlog order.
 
 ---
 

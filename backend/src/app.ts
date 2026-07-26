@@ -10,6 +10,7 @@ import portfolioRoutes from './routes/portfolio.routes';
 import userSubscriptionRoutes from './routes/userSubscription.routes';
 import momentumRoutes from './routes/momentum.routes';
 import stockPreviewRoutes from './routes/stockPreview.routes';
+import analysisRoutes from './routes/analysis.routes';
 import errorHandler from './middleware/errorHandler';
 import rateLimiters from './middleware/rateLimit';
 import requireAuth from './middleware/requireAuth';
@@ -46,6 +47,11 @@ app.use('/portfolios', requireAuth, rateLimiters, portfolioRoutes);
 app.use('/subscriptions', requireAuth, rateLimiters, userSubscriptionRoutes);
 app.use('/momentum', requireAuth, rateLimiters, momentumRoutes);
 app.use('/stock-preview', requireAuth, rateLimiters, stockPreviewRoutes);
+// Node stays the sole gateway even with Python in the picture (Architecture.md
+// target architecture) — this proxies to the analysis-service, requireAuth-gated
+// like every other route here since it'll eventually sit in front of real
+// paid analysis logic (Section 3 items 2-3), not just the health check it is today.
+app.use('/analysis', requireAuth, rateLimiters, analysisRoutes);
 
 app.use(errorHandler);
 
