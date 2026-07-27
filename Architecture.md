@@ -1,6 +1,6 @@
 ## Rebuild Plan — From Single-User Client-Side App to a Scalable Multi-User Platform
 
-**Last updated:** 2026-07-24
+**Last updated:** 2026-07-26
 
 **Why this section exists:** the user identified the single biggest shortcoming of the current app: it's a 100% client-side, single-user project (no backend, no database, no auth — `localStorage` is the only persistence layer) and therefore cannot scale beyond "one person, one browser." This doc started as a forward-looking rebuild plan and has since become a **living status document** — Section 1 tracks what's actually built, Section 2 is the immediate next action, Section 3 is the full ordered backlog. Update it as work lands rather than letting it drift back into a stale one-time plan. For a compact, fast-scan version of Section 1, see `CLAUDE.md`'s "Current Build State" — this doc carries the detail and rationale; that one carries the quick summary.
 
@@ -53,7 +53,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 07-13 22:30
+## Section 1 — Accomplished Till 07-26
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -372,13 +372,102 @@ identically from inside the container — once Docker is available, ideally befo
 (the health-check round-trip is server-to-server only), per CLAUDE.md's E2E-coverage-decision
 rule.
 
+### Long-Term Analysis (Section 3 item 2) ✅ Done
+
+**Built 2026-07-26** — the first real business logic in `analysis-service`, and the first
+full exercise of the Node→Python gateway pattern end to end. Ported the deterministic
+point-scoring model from the source app's `lt-analysis.html` (NOT the newer, qualitative
+`lt-mt-stock-analyzer` Claude skill — that requires an LLM+web-search workflow, which isn't
+deployable as a stateless FastAPI endpoint; the two now serve different surfaces with no
+conflict).
+
+**Python** (`analysis-service/app/models/long_term.py`, `app/scoring/long_term.py`): pure
+functions — `bucket_grades` (regex classification + dedupe-to-latest-per-firm, ported
+verbatim from the source's client-side logic, now server-side), `compute_financial_growth`,
+`compute_earnings_surprise_pct` (most recent quarter only, matching source), `compute_valuation`,
+`derive_conviction` (the exact ported mt/lt point rules), `build_bull_bear_signals`. New
+`POST /long-term-analysis` endpoint in `app/main.py`. **Two source-app bugs/quirks
+deliberately preserved or fixed, both flagged during `/plan`**: (1) the source's `epsGrowth`
+variable name inside `deriveConviction()` was actually net-income growth, not EPS growth —
+kept as a distinct `netIncomeGrowthPct` field, separate from the genuine `eps.yoyPct` used
+by bull/bear signals, so the two don't get silently conflated; (2) the source's forward-P/E
+scoring rule was dead code in production (it read `profile.pe`, which doesn't exist in FMP's
+`/stable` tier, so `fwdPe` was always `0` and the rule never fired) — **now activated with a
+real forward P/E** (confirmed sourceable via FMP's `/stable/financial-estimates` `epsAvg`
+field), so conviction scores now genuinely reflect forward valuation for the first time.
+33 new pytest cases (`test_long_term_scoring.py`, `test_long_term_endpoint.py`), covering
+every threshold boundary in the point-scoring rules.
+
+**V1 scope beyond the ported model**: Forward P/E, EV/EBITDA (subject + peers, from FMP's
+`/stable/key-metrics`), and a peer-group-average "sector" approximation (labeled as such in
+the UI — it's an average of ≤4 peers, not a true sector index). Finnhub company-news was
+also pulled into V1 (a mid-session scope addition) — **the first feature in the whole
+platform to actually consume a user's stored Finnhub key**; `SubscriptionsPage.tsx`'s
+"not used by any feature yet" copy is now stale-and-fixed to reflect this.
+
+**Node** (`backend/src/services/longTermAnalysisData.service.ts`, new): owns every external
+call (FMP + optional Finnhub) and the user's decrypted keys — reuses `marketData.service.ts`'s
+`fmpGet` wrapper, adds ~10 new FMP endpoints never called elsewhere in this repo (profile,
+income-statement, earnings-calendar, price-target-consensus, grades, stock-peers,
+financial-estimates, key-metrics). Runs in parallel (`Promise.allSettled`) rather than the
+source app's sequential-for-loading-UI shape, since that UX reason doesn't apply
+server-side — worth noting this means one analysis request fires ~12-20 FMP calls at once.
+Grades are passed through **raw and undeduplicated**; Python does the bucketing — Node's job
+is data-fetching/field-selection only, never scoring (same data-ownership split recommended
+for the later Contrarian Analysis extraction, Section 3 item 5). `analysisService.ts` gained
+`computeLongTermAnalysis()` with its own 20s timeout (vs. `checkHealth`'s 5s — this call does
+real computation over a larger payload). New `GET /analysis/long-term/:symbol` route,
+`requireAuth`-gated like every other proxied route; a missing FMP key is a 503, a missing
+Finnhub key silently degrades to an empty news list (optional, never blocks the report). 15
+new backend tests. 170 backend tests total, `tsc`/lint clean.
+
+**Frontend**: new `LongTermAnalysisPage.tsx` (`frontend/src/pages/`), following
+`MomentumPage.tsx`'s ticker-form/mutation-hook shape exactly (`useLongTermAnalysis()` in a
+new `api/longTermAnalysis.ts`, mirroring the Python response model field-for-field — no
+shared-schema codegen in this repo, so Python/Node/frontend types are 3 hand-maintained
+copies of the same shape, same caveat as every other proxied feature here). Reuses
+`StockPreviewChart` as a click-triggered modal, same pattern as `ContrarianFinderPage.tsx`.
+New nav link + route registration. 2 new frontend tests (first test file for this
+"mutation/form-submit page" shape, adapted from `SubscriptionsPage.test.tsx`'s structure).
+29 frontend tests total, `tsc`/lint clean.
+
+**Manually verified live against a real FMP account, 2026-07-26/27 — 3 real bugs found and
+fixed, 1 confirmed plan-tier limitation (not a bug):**
+1. **Peers were always empty.** `/stable/stock-peers` returns the peer list as a flat array
+   of peer objects directly — the code was reading a `peersList` wrapper field that doesn't
+   exist in this API tier. Fixed.
+2. **Earnings-surprise data was wrong.** `/stable/earnings-calendar?symbol=X` silently
+   **ignores the symbol parameter** and returns that day's market-wide earnings calendar —
+   not AAPL-specific data at all. Fixed to use `/stable/earnings?symbol=X`, the correct
+   per-symbol actual-vs-estimate history. A second latent bug was caught alongside it: an
+   upcoming, not-yet-reported quarter (`epsActual: null`) could sort ahead of the last
+   genuinely reported one, corrupting the surprise-% calc — fixed by filtering on
+   `epsActual != null` before sorting.
+3. **Peer P/E was always null.** `/stable/quote` has no `pe` field at all — confirmed live,
+   the same gap as `profile.pe` (which is *why* the forward-P/E scoring rule was dead code
+   in the source app to begin with). Fixed by deriving peer P/E from `1/earningsYield`, a
+   field already being fetched via `key-metrics` for EV/EBITDA — no extra API call needed.
+4. **Forward P/E stays `null` — confirmed a real account-plan limitation, not a bug.**
+   `/stable/financial-estimates` returns `[]` for both AAPL and MSFT on the test account
+   used. The code degrades gracefully exactly as designed (`forwardPe: null`, the scoring
+   rule simply doesn't fire) — this would need a higher FMP plan tier to actually populate,
+   not a code fix.
+
+All fixes verified against real AAPL data: peer P/E/EV-EBITDA/market cap and 4 genuinely
+reported quarterly EPS surprises all populate with sensible real values. 170 backend / 33
+Python / 29 frontend tests still green after the fixes.
+
+`e2e/SCENARIOS.md`: not updated this pass — no new pilot-scenario-relevant flow (the pilot
+covers Signup→Login→Portfolio, not this feature); revisit once E2E coverage expands beyond
+the single golden path.
+
 ---
 
 ## Section 2 — Next Step
 
-Next item TBD — open `/plan` mode with the user to pick and scope the next Section 3 item
-before starting. Item 1 (E2E suite)'s CockroachDB Cloud test-DB provisioning + CI wiring
-already landed; item 2 (Long-Term Analysis) is next in strict backlog order.
+Item 3 — **Contrarian Comeback Analysis**, built greenfield in Python (same
+proxy/data-ownership pattern as Long-Term Analysis above). Open `/plan` mode with the user
+to scope it before starting.
 
 ---
 
@@ -411,7 +500,7 @@ already landed; item 2 (Long-Term Analysis) is next in strict backlog order.
    coverage expansion happens until this lands and proves stable. Scaffolded 2026-07-21;
    provisioning the actual CockroachDB Cloud test database and the `E2E_DATABASE_URL` GitHub
    secret are pending (need the user's cloud console / repo admin access).
-2. **Long-Term Analysis — built greenfield in Python.** No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this is new logic, not an extraction — lowest-risk place to prove the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself is the correctness bar, since there's no legacy JS output to diff against.
+2. **Long-Term Analysis — built greenfield in Python. ✅ Done 2026-07-26** — see Section 1 for full detail. No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this was new logic, not an extraction — proved the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself was the correctness bar, since there was no legacy JS output to diff against.
 3. **Contrarian Comeback Analysis — built greenfield in Python**, deferred from Phase 3 (see above): the full gate-check/fundamental-health/scoring/thesis workflow from `contrarian-analysis.html`, ~500+ lines of logic with zero backend equivalent today. Sized like item 1, not a quick port — same rationale for going straight to Python rather than a throwaway Node version. Test gate: same as item 1, `pytest` coverage is the correctness bar.
 4. **Momentum Analysis — extracted from `momentum.service.ts`.** Port the RSI/SMA/Bollinger Band/Kelly-sizing math to Python (`pandas`/`numpy`/`ta`). Test gate: shadow-test the Python port against the existing Jest fixtures value-for-value before the gateway cuts over; keep the TS version in place as a rollback path until confidence is high. (This service has a documented history of a subtle bug — the Kelly-sizing score-gate — slipping through silently, so the shadow-test discipline matters more here than it might elsewhere.)
 5. **Contrarian Analysis — extracted from `contrarianFinder.service.ts`**, once a data-ownership call is made: Node stays the sole DB owner and passes the pre-fetched universe + price data into Python as a request payload (recommended, keeps Python purely computational), vs. giving the Python service its own CockroachDB connection. Test gate: same shadow-test discipline as item 3.

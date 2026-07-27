@@ -19,12 +19,12 @@ function renderPage() {
 }
 
 describe('SubscriptionsPage', () => {
-  test('lists FMP as active and Finnhub as not used by any feature yet', async () => {
+  test('lists FMP and Finnhub, noting Finnhub is used by Long-Term Analysis for news', async () => {
     vi.spyOn(client, 'apiFetch').mockResolvedValue({ subscriptions: [] });
     renderPage();
     expect(await screen.findByText('FMP (Financial Modeling Prep)')).toBeInTheDocument();
     expect(screen.getByText('Finnhub')).toBeInTheDocument();
-    expect(screen.getByText('not used by any feature yet')).toBeInTheDocument();
+    expect(screen.getByText('used by Long-Term Analysis for news')).toBeInTheDocument();
   });
 
   test('shows the masked key when a subscription already exists', async () => {

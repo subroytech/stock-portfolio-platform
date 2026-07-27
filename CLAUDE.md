@@ -46,7 +46,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 07-24 22:15)
+# Current Build State (as of 07-26)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -160,7 +160,36 @@ killing the Python process degrades to a clean 503 rather than a crash. 158 back
 `continue-on-error`, unlike `e2e`). **Known gap**: Docker itself isn't installed on the
 machine this was built on, so the `Dockerfile` is unverified by an actual build/run — only
 the direct `poetry run uvicorn` path was live-tested. Full detail in `Architecture.md`
-Section 1. Section 2 is now an open placeholder — next Section 3 item TBD via `/plan`.
+Section 1.
+
+## Long-Term Analysis (Section 3 item 2) ✅ Done
+Built 2026-07-26 — the first real business logic in `analysis-service` and the first full
+Node→Python feature exercise. Ported the deterministic point-scoring model from the source
+app's `lt-analysis.html` (not the newer, qualitative `lt-mt-stock-analyzer` skill — that
+needs an LLM+web-search workflow, not deployable as a stateless FastAPI endpoint; the two
+now serve different surfaces). V1 adds Forward P/E, EV/EBITDA, and a labeled peer-group
+"sector" approximation on top of the ported metrics, plus Finnhub company-news — **the first
+feature in the platform to actually consume a user's stored Finnhub key** (fixed
+`SubscriptionsPage.tsx`'s now-stale "not used by any feature yet" copy). Node
+(`longTermAnalysisData.service.ts`, new) owns all FMP/Finnhub calls + the user's decrypted
+keys and fetches in parallel; Python (`analysis-service/app/scoring/long_term.py`) does pure
+scoring/computation only, including reactivating a forward-P/E scoring rule that was
+historically dead code in the source app (it read a field that doesn't exist in FMP's
+`/stable` tier, so it silently never fired) — confirmed real forward EPS data is sourceable
+via FMP before flipping it live. New `GET /analysis/long-term/:symbol` (`requireAuth`-gated),
+new `LongTermAnalysisPage.tsx` following the Momentum page's ticker-form/mutation pattern.
+33 new Python tests, 15 new backend tests (170 total), 2 new frontend tests (29 total) —
+`tsc`/lint clean on both backend and frontend. **Manually verified live 2026-07-26/27
+against a real FMP account — 3 real bugs found and fixed**: peers were always empty
+(`/stable/stock-peers` returns the peer list as a flat array, not wrapped in `peersList`);
+earnings-surprise data was wrong (`/stable/earnings-calendar?symbol=X` ignores `symbol`
+entirely and returns that day's market-wide calendar — fixed to use `/stable/earnings`);
+peer P/E was always null (`/stable/quote` has no `pe` field — fixed by deriving it from
+`1/earningsYield`, already fetched via `key-metrics`). **Confirmed real, not a bug**:
+Forward P/E stays `null` because `/stable/financial-estimates` returns `[]` on this
+account's plan tier — degrades gracefully exactly as designed. Full detail in
+`Architecture.md` Section 1. Section 2 is now an open placeholder — next Section 3 item is
+item 3 (Contrarian Comeback Analysis), TBD-scoped via `/plan`.
 
 ## Phases 4–6 — Not Started
 - Phase 4: Shared quote cache (Redis / Postgres TTL table)
