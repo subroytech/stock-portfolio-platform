@@ -3,14 +3,14 @@ import { Link } from 'react-router-dom';
 import { useDeleteSubscription, useSubscriptions, useUpsertSubscription } from '../api/subscriptions';
 import { ApiError } from '../api/client';
 
-// FMP is the only provider any backend feature actually consumes today
-// (quotes, contrarian-finder, refresh-prices, momentum, stock-preview all
-// resolve the caller's own 'fmp' key). Finnhub is a storable provider on the
-// backend allowlist but has zero consuming code — noted here rather than
-// hidden, so a user doesn't wonder why adding one has no visible effect.
-const PROVIDERS = [
-  { id: 'fmp', label: 'FMP (Financial Modeling Prep)', active: true },
-  { id: 'finnhub', label: 'Finnhub', active: false },
+// FMP is required by most features (quotes, contrarian-finder,
+// refresh-prices, momentum, stock-preview, long-term-analysis all resolve
+// the caller's own 'fmp' key). Finnhub became a real consumed provider
+// 2026-07-26 — Long-Term Analysis uses it (optionally) for the news panel,
+// the first feature in the platform to actually read a stored Finnhub key.
+const PROVIDERS: { id: string; label: string; note: string | null }[] = [
+  { id: 'fmp', label: 'FMP (Financial Modeling Prep)', note: null },
+  { id: 'finnhub', label: 'Finnhub', note: 'used by Long-Term Analysis for news' },
 ];
 
 export default function SubscriptionsPage() {
@@ -50,9 +50,9 @@ export default function SubscriptionsPage() {
                 <div>
                   <p className="font-medium text-text-primary">
                     {provider.label}
-                    {!provider.active && (
+                    {provider.note && (
                       <span className="ml-2 rounded-btn bg-bg-primary px-2 py-0.5 text-xs text-text-muted">
-                        not used by any feature yet
+                        {provider.note}
                       </span>
                     )}
                   </p>

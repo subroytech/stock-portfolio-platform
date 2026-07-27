@@ -25,6 +25,7 @@ export default function DashboardPage() {
         <nav className="flex items-center gap-3">
           <Link to="/momentum" className="text-sm text-text-secondary hover:text-accent">Momentum</Link>
           <Link to="/contrarian-finder" className="text-sm text-text-secondary hover:text-accent">Contrarian Finder</Link>
+          <Link to="/long-term-analysis" className="text-sm text-text-secondary hover:text-accent">Long-Term Analysis</Link>
           <Link to="/subscriptions" className="text-sm text-text-secondary hover:text-accent">API Keys</Link>
           <button
             type="button"
