@@ -67,8 +67,9 @@ describe('LongTermAnalysisPage', () => {
 
     expect(await screen.findByText('AAPL')).toBeInTheDocument();
     expect(client.apiFetch).toHaveBeenCalledWith('/analysis/long-term/AAPL');
-    expect(screen.getByText(/MT: bullish/)).toBeInTheDocument();
-    expect(screen.getByText(/LT: bullish/)).toBeInTheDocument();
+    expect(screen.getByText('Medium Term — 12 to 18 Months')).toBeInTheDocument();
+    expect(screen.getByText('Long Term — 3 Years and Beyond')).toBeInTheDocument();
+    expect(screen.getByText('Strong medium-term picture.')).toBeInTheDocument();
     expect(screen.getByText('Revenue growth of +10.0% YoY demonstrates strong top-line momentum.')).toBeInTheDocument();
   });
 
