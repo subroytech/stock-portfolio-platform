@@ -120,10 +120,10 @@ export default function LongTermAnalysisPage() {
 
         {data && (
           <div className="flex flex-col gap-4">
-            {/* Section 1: ticker/company snapshot | Analyst Commentary & Price Targets, side by side */}
+            {/* Section 1: Snapshot | Analyst Commentary | Bull Signals | Bear Signals, side by side */}
             <div className="rounded-card bg-bg-card p-4 shadow-card">
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                {/* Left: ticker/company snapshot + stat grid */}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                {/* Snapshot: ticker/company + stat grid */}
                 <div>
                   <div>
                     <button
@@ -141,7 +141,7 @@ export default function LongTermAnalysisPage() {
                     </p>
                   </div>
 
-                  <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-3 xl:grid-cols-4">
+                  <div className="mt-4 grid grid-cols-3 gap-3">
                     <div>
                       <p className="text-xs text-text-muted">Price</p>
                       <p className="text-sm font-semibold text-text-primary">{fmt$(data.price)}</p>
@@ -155,16 +155,12 @@ export default function LongTermAnalysisPage() {
                       <p className="text-sm font-semibold text-text-primary">{data.dividend != null ? `${fmt$(data.dividend)}/yr` : 'None'}</p>
                     </div>
                     <div>
-                      <p className="text-xs text-text-muted">Trailing P/E</p>
-                      <p className="text-sm font-semibold text-text-primary">{fmtMultiple(data.valuation.trailingPe)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-text-muted">Forward P/E</p>
-                      <p className="text-sm font-semibold text-text-primary">{fmtMultiple(data.valuation.forwardPe)}</p>
-                    </div>
-                    <div>
                       <p className="text-xs text-text-muted">EV/EBITDA</p>
                       <p className="text-sm font-semibold text-text-primary">{fmtMultiple(data.valuation.evToEbitda)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-text-muted">Trailing P/E</p>
+                      <p className="text-sm font-semibold text-text-primary">{fmtMultiple(data.valuation.trailingPe)}</p>
                     </div>
                     <div>
                       <p className="text-xs text-text-muted">52w Range</p>
@@ -173,8 +169,8 @@ export default function LongTermAnalysisPage() {
                   </div>
                 </div>
 
-                {/* Right: Analyst Commentary & Price Targets */}
-                <div className="border-t border-border pt-4 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
+                {/* Analyst Commentary & Price Targets */}
+                <div className="border-t border-border pt-4 sm:border-l sm:border-t-0 sm:pl-4 sm:pt-0">
                   <h2 className="mb-3 text-sm font-semibold text-text-primary">Analyst Commentary &amp; Price Targets</h2>
                   <div>
                     <p className="text-xs text-text-muted">12-Month Consensus Price Target</p>
@@ -205,6 +201,22 @@ export default function LongTermAnalysisPage() {
                       <p className="text-sm text-text-muted">Analyst consensus data not available.</p>
                     )}
                   </div>
+                </div>
+
+                {/* Bull Signals */}
+                <div className="border-t border-border pt-4 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0">
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-success">Bull Signals</h3>
+                  <ul className="list-inside list-disc text-sm text-text-secondary">
+                    {data.bullSignals.map((s) => <li key={s}>{s}</li>)}
+                  </ul>
+                </div>
+
+                {/* Bear Signals */}
+                <div className="border-t border-border pt-4 sm:border-l sm:pl-4 xl:border-t-0 xl:pt-0">
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-danger">Bear Signals</h3>
+                  <ul className="list-inside list-disc text-sm text-text-secondary">
+                    {data.bearSignals.map((s) => <li key={s}>{s}</li>)}
+                  </ul>
                 </div>
               </div>
             </div>
@@ -335,42 +347,22 @@ export default function LongTermAnalysisPage() {
               </div>
             </div>
 
-            {/* Section 3: Bull/Bear Signals | Recent News (news itself rendered in 2 columns) */}
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <div className="rounded-card bg-bg-card p-4 shadow-card">
-                <h2 className="mb-3 text-sm font-semibold text-text-primary">Signals</h2>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div>
-                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-success">Bull Signals</h3>
-                    <ul className="list-inside list-disc text-sm text-text-secondary">
-                      {data.bullSignals.map((s) => <li key={s}>{s}</li>)}
-                    </ul>
-                  </div>
-                  <div>
-                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-danger">Bear Signals</h3>
-                    <ul className="list-inside list-disc text-sm text-text-secondary">
-                      {data.bearSignals.map((s) => <li key={s}>{s}</li>)}
-                    </ul>
-                  </div>
+            {/* Section 3: Recent News — flush with Section 2's 3-column structure */}
+            {data.news.length > 0 && (
+              <div className="flex flex-col gap-3">
+                <h2 className="text-sm font-semibold text-text-primary">Recent News</h2>
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+                  {data.news.map((n, i) => (
+                    <div key={`${n.url ?? n.title}-${i}`} className="rounded-card bg-bg-card p-4 shadow-card">
+                      <p className="text-xs text-text-muted">{na(n.date)}{n.source ? ` · ${n.source}` : ''}</p>
+                      <p className="text-sm text-text-primary">
+                        {n.url ? <a href={n.url} target="_blank" rel="noopener noreferrer" className="hover:text-accent hover:underline">{n.title}</a> : n.title}
+                      </p>
+                    </div>
+                  ))}
                 </div>
               </div>
-
-              {data.news.length > 0 && (
-                <div className="rounded-card bg-bg-card p-4 shadow-card">
-                  <h2 className="mb-3 text-sm font-semibold text-text-primary">Recent News</h2>
-                  <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                    {data.news.map((n, i) => (
-                      <div key={`${n.url ?? n.title}-${i}`} className="border-b border-border pb-2 last:border-none">
-                        <p className="text-xs text-text-muted">{na(n.date)}{n.source ? ` · ${n.source}` : ''}</p>
-                        <p className="text-sm text-text-primary">
-                          {n.url ? <a href={n.url} target="_blank" rel="noopener noreferrer" className="hover:text-accent hover:underline">{n.title}</a> : n.title}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
+            )}
           </div>
         )}
       </main>
