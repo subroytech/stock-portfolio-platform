@@ -1,54 +1,117 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { useContrarianScan } from '../api/contrarianFinder';
+import { useQueryClient } from '@tanstack/react-query';
+import { STRENGTH_LIST_QUERY_KEY, useContrarianBatchScan, type ScanResult } from '../api/contrarianFinder';
 import { ApiError } from '../api/client';
 import ContrarianFinderResultsTable from '../components/ContrarianFinderResultsTable';
+import StrengthListTable from '../components/StrengthListTable';
 import StockPreviewChart from '../components/StockPreviewChart';
 
-export default function ContrarianFinderPage() {
-  const scan = useContrarianScan();
-  const [threshold, setThreshold] = useState(25);
-  const [batchSize, setBatchSize] = useState('');
-  const [maxBatches, setMaxBatches] = useState('');
-  const [qualityPreset, setQualityPreset] = useState<'standard' | 'relaxed'>('standard');
-  const [scanDays, setScanDays] = useState('');
-  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+const WAIT_SECONDS = 62; // matches the wait between batches in api/contrarianFinder.ts
 
-  // The backend scans the universe in batches with a pause between each to
-  // respect FMP's rate limits (a few hundred symbols, ~1 batch/minute) — a
-  // scan can legitimately take a couple of minutes with no partial results
-  // to show in the meantime, so this is purely an expectation-setting timer,
-  // not real progress (the API is a single synchronous response, not a
-  // polled job).
+function filterCandidates(results: ScanResult[], threshold: number): ScanResult[] {
+  return results
+    .filter((r) => !r.filterFail && !r.noData && r.changePct !== undefined && r.changePct <= -threshold)
+    .sort((a, b) => (a.changePct as number) - (b.changePct as number));
+}
+
+// "dd-mmm" (e.g. "16-Jun") for the scan commentary — changeSinceDate is a
+// YYYY-MM-DD trading-day date (see contrarianFinder.service.ts), the same
+// for every stock in a scan since they all share the US market calendar.
+function formatDdMmm(dateStr: string): string {
+  const d = new Date(`${dateStr}T00:00:00`);
+  const day = String(d.getDate()).padStart(2, '0');
+  const month = d.toLocaleDateString('en-US', { month: 'short' });
+  return `${day}-${month}`;
+}
+
+export default function ContrarianFinderPage() {
+  const scan = useContrarianBatchScan();
+  const queryClient = useQueryClient();
+  const [threshold, setThreshold] = useState(25);
+  const [batchSize, setBatchSize] = useState(125);
+  const [maxBatches, setMaxBatches] = useState(3);
+  const [scanDays, setScanDays] = useState(7);
+  const [qualityPreset, setQualityPreset] = useState<'standard' | 'relaxed'>('standard');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'candidates' | 'strength'>('candidates');
+
+  const candidates = useMemo(
+    () => (scan.data ? filterCandidates(scan.data.results, threshold) : []),
+    [scan.data, threshold],
+  );
+  const strengthList = useMemo(
+    () => (scan.data ? scan.data.results.filter((r) => r.strength).sort((a, b) => (b.strength?.kF ?? 0) - (a.strength?.kF ?? 0)) : []),
+    [scan.data],
+  );
+  // Every stock shares the same US market calendar, so the first result
+  // that has one tells us the whole scan's comparison anchor date.
+  const referenceDate = useMemo(() => {
+    const found = scan.data?.results.find((r) => r.changeSinceDate)?.changeSinceDate;
+    return found ? formatDdMmm(found) : null;
+  }, [scan.data]);
+
   useEffect(() => {
-    if (!scan.isPending) { setElapsedSeconds(0); return; }
-    setElapsedSeconds(0);
-    const id = setInterval(() => setElapsedSeconds((s) => s + 1), 1000);
-    return () => clearInterval(id);
-  }, [scan.isPending]);
+    if (scan.data) {
+      queryClient.setQueryData(STRENGTH_LIST_QUERY_KEY, strengthList);
+    }
+    // Only re-run when the underlying scan data changes, not on every
+    // strengthList recompute (it's derived from scan.data anyway).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scan.data, queryClient]);
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    scan.mutate({
-      threshold,
-      batchSize: batchSize ? Number(batchSize) : undefined,
-      maxBatches: maxBatches ? Number(maxBatches) : undefined,
-      qualityPreset,
-      scanDays: scanDays ? Number(scanDays) : undefined,
-    });
+    scan.run({ threshold, batchSize, maxBatches, qualityPreset, scanDays });
   }
+
+  const missingKeyError = scan.isError && scan.error instanceof ApiError && scan.error.status === 503;
 
   return (
     <div className="min-h-screen bg-bg-primary">
-      <header className="flex items-center justify-between border-b border-border bg-bg-secondary px-4 py-4 shadow-card sm:px-6">
-        <h1 className="text-lg font-semibold text-text-primary">Contrarian Finder</h1>
-        <Link to="/" className="text-sm text-accent hover:underline">Back to dashboard</Link>
+      <header className="border-b border-border bg-bg-secondary px-4 py-4 shadow-card sm:px-6">
+        <div className="flex items-center justify-between">
+          <h1 className="text-lg font-semibold text-text-primary">Contrarian Finder</h1>
+          <Link to="/" className="text-sm text-accent hover:underline">Back to dashboard</Link>
+        </div>
+
+        {/* Running status commentary - lives here instead of a separate
+            full-width card in main, so it doesn't cost the page its own
+            block of vertical space while a scan is in flight. */}
+        {scan.isPending && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="h-3.5 w-3.5 flex-none animate-spin rounded-full border-2 border-border border-t-accent" />
+            <p className="text-xs text-text-secondary">
+              {scan.progress.phase === 'waiting'
+                ? `Batch ${scan.progress.currentBatch} of ${scan.progress.totalBatches ?? '?'} done · waiting ${scan.progress.waitRemaining}s (rate-limit buffer)`
+                : `Scanning batch ${scan.progress.currentBatch} of ${scan.progress.totalBatches ?? '?'}…`}
+            </p>
+            {scan.progress.totalBatches != null && (
+              <div className="h-1.5 w-24 flex-none overflow-hidden rounded-full bg-border">
+                <div
+                  className="h-1.5 rounded-full bg-accent transition-all"
+                  style={{ width: `${Math.round(((scan.progress.currentBatch - 1) / scan.progress.totalBatches) * 100)}%` }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Last-run details - the read-only record of what actually produced
+            the results currently on screen, independent of the (possibly
+            since-edited) live form below. Guarded for sessionStorage data
+            persisted by an older build of this page, which predates this field. */}
+        {!scan.isPending && scan.data?.params && (
+          <p className="mt-2 text-xs italic text-text-secondary">
+            Last scan used: {scan.data.params.threshold}% threshold · {scan.data.params.scanDays}-day window · batch size {scan.data.params.batchSize} · max {scan.data.params.maxBatches} batches · {scan.data.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
+          </p>
+        )}
       </header>
 
       <main className="flex flex-col gap-6 p-4 sm:p-6">
         <form onSubmit={handleSubmit} className="rounded-card bg-bg-card p-4 shadow-card">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="flex flex-wrap items-end gap-4">
             <label className="flex flex-col gap-1 text-sm text-text-secondary">
               Drop threshold (%)
               <input
@@ -56,63 +119,17 @@ export default function ContrarianFinderPage() {
                 min={1}
                 value={threshold}
                 onChange={(e) => setThreshold(Number(e.target.value))}
-                className="rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-text-primary"
+                className="w-28 rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-text-primary"
               />
             </label>
-            <label className="flex flex-col gap-1 text-sm text-text-secondary">
-              Scan window (days)
-              <input
-                type="number"
-                min={1}
-                value={scanDays}
-                onChange={(e) => setScanDays(e.target.value)}
-                placeholder="default"
-                className="rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-text-primary"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-sm text-text-secondary">
-              Batch size
-              <input
-                type="number"
-                min={1}
-                value={batchSize}
-                onChange={(e) => setBatchSize(e.target.value)}
-                placeholder="default"
-                className="rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-text-primary"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-sm text-text-secondary">
-              Max batches
-              <input
-                type="number"
-                min={1}
-                value={maxBatches}
-                onChange={(e) => setMaxBatches(e.target.value)}
-                placeholder="default"
-                className="rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-text-primary"
-              />
-            </label>
-          </div>
 
-          <div className="mt-4 flex flex-wrap items-center gap-4">
-            <label className="flex items-center gap-2 text-sm text-text-secondary">
-              <input
-                type="radio"
-                name="qualityPreset"
-                checked={qualityPreset === 'standard'}
-                onChange={() => setQualityPreset('standard')}
-              />
-              Standard
-            </label>
-            <label className="flex items-center gap-2 text-sm text-text-secondary">
-              <input
-                type="radio"
-                name="qualityPreset"
-                checked={qualityPreset === 'relaxed'}
-                onChange={() => setQualityPreset('relaxed')}
-              />
-              Relaxed
-            </label>
+            <button
+              type="button"
+              onClick={() => setAdvancedOpen((o) => !o)}
+              className="text-sm text-accent hover:underline"
+            >
+              ⚙ Advanced {advancedOpen ? '▴' : '▾'}
+            </button>
 
             <button
               type="submit"
@@ -122,32 +139,111 @@ export default function ContrarianFinderPage() {
               {scan.isPending ? 'Scanning…' : 'Run scan'}
             </button>
           </div>
+
+          {advancedOpen && (
+            <div className="mt-4 grid grid-cols-1 gap-4 border-t border-border pt-4 sm:grid-cols-2 lg:grid-cols-4">
+              <label className="flex flex-col gap-1 text-sm text-text-secondary">
+                Scan window
+                <select
+                  value={scanDays}
+                  onChange={(e) => setScanDays(Number(e.target.value))}
+                  className="rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-text-primary"
+                >
+                  <option value={7}>7 days</option>
+                  <option value={10}>10 days</option>
+                  <option value={14}>14 days</option>
+                  <option value={21}>21 days</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-text-secondary">
+                Batch size
+                <input
+                  type="number"
+                  min={10}
+                  max={250}
+                  value={batchSize}
+                  onChange={(e) => setBatchSize(Number(e.target.value))}
+                  className="rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-text-primary"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-text-secondary">
+                Max batches
+                <select
+                  value={maxBatches}
+                  onChange={(e) => setMaxBatches(Number(e.target.value))}
+                  className="rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-text-primary"
+                >
+                  {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+              <div className="flex flex-col gap-1 text-sm text-text-secondary">
+                Quality
+                <div className="flex items-center gap-4 pt-1.5">
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="qualityPreset" checked={qualityPreset === 'standard'} onChange={() => setQualityPreset('standard')} />
+                    Standard ($10 · $5B)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="qualityPreset" checked={qualityPreset === 'relaxed'} onChange={() => setQualityPreset('relaxed')} />
+                    Relaxed ($5 · $2.5B)
+                  </label>
+                </div>
+              </div>
+            </div>
+          )}
         </form>
 
-        {scan.isPending && (
-          <div className="flex items-center gap-3 rounded-card bg-bg-card p-4 shadow-card">
-            <span className="h-5 w-5 flex-none animate-spin rounded-full border-2 border-border border-t-accent" />
-            <div>
-              <p className="text-sm font-medium text-text-primary">Scanning the universe… {elapsedSeconds}s</p>
-              <p className="text-xs text-text-secondary">
-                This runs in rate-limited batches against FMP and can take a couple of minutes — there's no partial progress to show until it finishes.
-              </p>
-            </div>
+        {!scan.data && !scan.isPending && !scan.isError && (
+          <div className="rounded-card bg-bg-card p-4 shadow-card text-sm text-text-secondary">
+            <p>
+              Scans up to 450 stocks across the Dow 30, Nasdaq-100, S&amp;P 500 Top 200, and 11
+              sector ETFs, one batch of FMP calls at a time, with a real ~{WAIT_SECONDS}s pause
+              between batches to stay within rate limits — a full scan can take a couple of minutes.
+            </p>
+            <p className="mt-2">Requires an FMP API key on file — add one on the <Link to="/subscriptions" className="text-accent hover:underline">API Keys</Link> page.</p>
           </div>
         )}
 
         {scan.isError && (
-          <p className="text-sm text-danger">
-            {scan.error instanceof ApiError ? scan.error.message : 'Scan failed.'}
-          </p>
+          <div className="text-sm text-danger">
+            <p>{scan.error instanceof ApiError ? scan.error.message : 'Scan failed.'}</p>
+            {missingKeyError && (
+              <p className="mt-1">
+                <Link to="/subscriptions" className="text-accent hover:underline">Add your FMP API key</Link> to run a scan.
+              </p>
+            )}
+          </div>
         )}
 
         {scan.data && (
           <>
             <p className="text-sm text-text-secondary">
-              Scanned {scan.data.scanned} of {scan.data.universeSize} tickers · {scan.data.candidates.length} candidates at ≥{scan.data.threshold}% drop
+              Scanned {scan.data.scanned} of {scan.data.universeSize} tickers · {candidates.length} candidates at ≥{threshold}% drop
+              {referenceDate && <> · considering price since {referenceDate}</>}
             </p>
-            <ContrarianFinderResultsTable results={scan.data.candidates} onSymbolClick={setPreviewSymbol} />
+
+            <div className="flex gap-4 border-b border-border">
+              <button
+                type="button"
+                onClick={() => setActiveTab('candidates')}
+                className={`border-b-2 px-1 pb-2 text-sm font-medium ${activeTab === 'candidates' ? 'border-accent text-text-primary' : 'border-transparent text-text-secondary'}`}
+              >
+                Candidates ({candidates.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('strength')}
+                className={`border-b-2 px-1 pb-2 text-sm font-medium ${activeTab === 'strength' ? 'border-accent text-text-primary' : 'border-transparent text-text-secondary'}`}
+              >
+                Strength List ({strengthList.length})
+              </button>
+            </div>
+
+            {activeTab === 'candidates' ? (
+              <ContrarianFinderResultsTable results={candidates} onSymbolClick={setPreviewSymbol} />
+            ) : (
+              <StrengthListTable results={strengthList} onSymbolClick={setPreviewSymbol} />
+            )}
           </>
         )}
       </main>

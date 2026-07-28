@@ -9,7 +9,12 @@ const result: ScanResult = {
   name: 'Apple Inc.',
   sector: 'Tech',
   price: 150,
+  mktCap: 3_000_000_000_000,
+  volume: 2_000_000,
+  avgVol: 800_000,
   changePct: -30,
+  mktClosed: false,
+  source: 'DJ30',
   strength: { rsi: 28, sma20: 145, sma50: 150, rr: 2.5, kF: 0.2, halfKelly: 0.1 },
 };
 
@@ -23,5 +28,27 @@ describe('ContrarianFinderResultsTable', () => {
     render(<ContrarianFinderResultsTable results={[result]} />);
     expect(screen.getAllByText('AAPL').length).toBe(2);
     expect(screen.getByRole('table')).toBeInTheDocument();
+  });
+
+  test('renders market cap, volume/avg ratio, source index, and open/closed badge', () => {
+    render(<ContrarianFinderResultsTable results={[result]} />);
+    expect(screen.getAllByText('$3T').length).toBe(2); // mobile + desktop
+    expect(screen.getAllByText('2.5×').length).toBe(2); // 2,000,000 / 800,000
+    expect(screen.getAllByText('DJ30').length).toBe(2);
+    expect(screen.getAllByText('Open').length).toBe(2);
+  });
+
+  test('applies the most severe decline styling at -30% (>= -25% tier)', () => {
+    render(<ContrarianFinderResultsTable results={[result]} />);
+    const changeCells = screen.getAllByText('-30.00%');
+    expect(changeCells[0].className).toMatch(/text-danger/);
+    expect(changeCells[0].className).toMatch(/font-bold/);
+  });
+
+  test('shows "Closed" badge and no volume highlight when volume is below 2x average', () => {
+    const closedLowVol: ScanResult = { ...result, mktClosed: true, volume: 900_000, avgVol: 800_000 };
+    render(<ContrarianFinderResultsTable results={[closedLowVol]} />);
+    expect(screen.getAllByText('Closed').length).toBe(2);
+    expect(screen.getAllByText('1.1×')[0].className).not.toMatch(/text-warning/);
   });
 });

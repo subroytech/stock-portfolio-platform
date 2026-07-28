@@ -1,9 +1,12 @@
 import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { useMomentumAnalysis } from '../api/momentum';
+import { useStrengthListCache } from '../api/contrarianFinder';
 import { ApiError } from '../api/client';
 import { calcKellySizing } from '../lib/kelly';
 import { formatCurrency, formatNumber, formatPercent } from '../lib/format';
+import StrengthListTable from '../components/StrengthListTable';
+import StockPreviewChart from '../components/StockPreviewChart';
 
 const SIGNAL_STYLES: Record<string, string> = {
   'STRONG BUY': 'bg-success/10 text-success',
@@ -23,7 +26,13 @@ function readStoredCapital(): number {
 export default function MomentumPage() {
   const [ticker, setTicker] = useState('');
   const [capital, setCapital] = useState(readStoredCapital);
+  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
   const analysis = useMomentumAnalysis();
+  // Passively reads the last Contrarian Finder scan's Strength List (if any)
+  // from the shared TanStack Query cache — matches the source app's original
+  // placement of this table inside the Momentum widget, even though a
+  // Contrarian Finder scan is what populates it.
+  const { data: strengthList = [] } = useStrengthListCache();
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -171,7 +180,16 @@ export default function MomentumPage() {
             )}
           </div>
         )}
+
+        {strengthList.length > 0 && (
+          <div className="flex flex-col gap-3">
+            <h2 className="text-sm font-semibold text-text-primary">Strength List (from last Contrarian Finder scan)</h2>
+            <StrengthListTable results={strengthList} onSymbolClick={setPreviewSymbol} />
+          </div>
+        )}
       </main>
+
+      {previewSymbol && <StockPreviewChart symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />}
     </div>
   );
 }
