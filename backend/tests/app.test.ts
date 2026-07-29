@@ -29,8 +29,8 @@ describe('app routing (no DB, no real FMP key required)', () => {
     expect(res.status).toBe(401);
   });
 
-  test('POST /contrarian-finder/scan without a session cookie returns 401', async () => {
-    const res = await request(app).post('/contrarian-finder/scan').send({});
+  test('POST /contrarian-finder/scan-batch without a session cookie returns 401', async () => {
+    const res = await request(app).post('/contrarian-finder/scan-batch').send({ batchIndex: 0 });
     expect(res.status).toBe(401);
   });
 
@@ -44,8 +44,8 @@ describe('app routing (no DB, no real FMP key required)', () => {
     expect(res.status).toBe(503);
   });
 
-  test('POST /contrarian-finder/scan returns 503 when the caller has no FMP key on file', async () => {
-    const res = await request(app).post('/contrarian-finder/scan').set('Cookie', authCookie).send({});
+  test('POST /contrarian-finder/scan-batch returns 503 when the caller has no FMP key on file', async () => {
+    const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
     expect(res.status).toBe(503);
   });
 

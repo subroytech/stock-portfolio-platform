@@ -1,7 +1,7 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn() } }));
 import { pool } from '../src/db/pool';
 import {
-  buildBatches, filterCandidates, resolveQuality, assembleUniverse, scanStock, runScan,
+  buildBatches, filterCandidates, resolveQuality, assembleUniverse, scanStock, scanBatch,
 } from '../src/services/contrarianFinder.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
@@ -84,6 +84,13 @@ describe('assembleUniverse', () => {
     expect(new Set(symbols).size).toBe(symbols.length); // no duplicates
     expect(symbols).toContain('AAPL'); // present in DJ30/SP500/XLK fixtures, added once
   });
+
+  test('orders constituent rows deterministically (ORDER BY), unlike an unordered SELECT', async () => {
+    await assembleUniverse();
+    for (const call of mockQuery.mock.calls) {
+      expect(call[0]).toMatch(/ORDER BY/i);
+    }
+  });
 });
 
 describe('scanStock', () => {
@@ -126,7 +133,24 @@ describe('scanStock', () => {
     expect(r.noData).toBe(false);
     // mktClosed false (hist[0].date != today) -> endPrice=price(80), startClose=hist[4].close(98)
     expect(r.changePct).toBeCloseTo((80 - 98) / 98 * 100, 6);
+    expect(r.changeSinceDate).toBe('2026-06-16'); // hist[4]'s date - the actual trading day changePct is measured from
     expect(r.strength).toBeNull(); // only 6 closes available, well under the 50-close strength-screen minimum
+  });
+
+  test('changeSinceDate reflects the mktClosed branch too (hist[scanDays], not hist[scanDays-1])', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const hist = [
+      { date: today, close: 80 },
+      { date: '2026-06-19', close: 85 },
+      { date: '2026-06-18', close: 90 },
+      { date: '2026-06-17', close: 95 },
+      { date: '2026-06-16', close: 98 },
+      { date: '2026-06-15', close: 100 },
+    ];
+    mockQuoteAndHistory({ price: 81, marketCap: 1e10, name: 'Test Co' }, hist);
+    const r = await scanStock('CLOSED', 'key', { minPrice: 10, minMarketCap: 5e9 }, 5);
+    expect(r.mktClosed).toBe(true);
+    expect(r.changeSinceDate).toBe('2026-06-15'); // hist[5], since hist[0] is already today's close
   });
 
   test('strength is null when fewer than 50 closes are available, even with plenty of days for the decline scan', async () => {
@@ -172,16 +196,41 @@ describe('scanStock', () => {
   });
 });
 
-describe('runScan (integration, no real network/timers)', () => {
+describe('scanBatch — sector backfill', () => {
   const originalFetch = global.fetch;
   afterEach(() => { global.fetch = originalFetch; });
 
-  test('assembles a universe, scans it in batches, and returns results with waitSeconds=0', async () => {
-    global.fetch = jest.fn().mockResolvedValue({ status: 403, ok: false }) as unknown as typeof fetch; // forces filterFail for all (no quote data)
-    const out = await runScan({ key: 'fake-key', batchSize: 5, maxBatches: 1, waitSeconds: 0 });
-    expect(out.universeSize).toBeGreaterThan(0);
-    expect(out.scanned).toBe(5);
-    expect(out.results).toHaveLength(5);
-    expect(out.results.every((r) => r.filterFail)).toBe(true); // no quote ever succeeded
+  test('backfills sector from m_tickers (FMP /quote has no sector field); leaves it blank for symbols outside the curated set', async () => {
+    // Quote deliberately below the quality thresholds - filterFail for both,
+    // keeps this test focused on sector backfill rather than the full scan path.
+    global.fetch = jest.fn().mockResolvedValue({
+      status: 200, ok: true, json: () => Promise.resolve({ price: 1, marketCap: 1e6 }),
+    }) as unknown as typeof fetch;
+
+    mockQuery.mockImplementation((text: string, params: unknown[]) => {
+      expect(text).toMatch(/m_tickers/);
+      expect(params[0]).toEqual(['AAPL', 'ZZZZ']);
+      return Promise.resolve({ rows: [{ symbol: 'AAPL', sector: 'Technology' }] }); // ZZZZ absent from the curated set
+    });
+
+    const stocks = [
+      { symbol: 'AAPL', tier: 1, source: 'DJ30' },
+      { symbol: 'ZZZZ', tier: 1, source: 'DJ30' },
+    ];
+    const results = await scanBatch(stocks, 'key', { minPrice: 10, minMarketCap: 5e9 });
+
+    expect(results.find((r) => r.symbol === 'AAPL')?.sector).toBe('Technology');
+    expect(results.find((r) => r.symbol === 'ZZZZ')?.sector).toBeFalsy();
+  });
+
+  test('makes exactly one batched sector lookup for the whole batch, not one per symbol', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ status: 403, ok: false }) as unknown as typeof fetch;
+    mockQuery.mockClear(); // this file's beforeEach only sets behavior, not call-count reset
+    mockQuery.mockResolvedValue({ rows: [] });
+
+    const stocks = Array.from({ length: 5 }, (_, i) => ({ symbol: `S${i}`, tier: 1, source: 'TEST' }));
+    await scanBatch(stocks, 'key', { minPrice: 10, minMarketCap: 5e9 });
+
+    expect(mockQuery).toHaveBeenCalledTimes(1);
   });
 });

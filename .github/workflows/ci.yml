@@ -33,6 +33,23 @@ jobs:
           JWT_SECRET: cd858a5648181a67da0fb7f9fedb68dcff34230803dfd47e44f2e65d4b44f6b5
           API_KEY_ENCRYPTION_KEY: a91bb2a80230af61e10e3ac0a44cc322629b854f8712eabc07cc308ab0c53c12
 
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+
   analysis-service:
     runs-on: ubuntu-latest
     defaults:

@@ -1,9 +1,7 @@
 // Ported from CreateStockPortfolioViewWOSkill/js/contrarian-finder.js —
 // universe assembly + per-stock scan logic is pure/portable; the fetch
 // wrapper is refactored to call FMP via env-configured base URLs instead of
-// the browser fetch + localStorage key, and all UI orchestration (progress
-// bars, cfRun's DOM wiring) is dropped — the backend now rate-limits itself
-// against FMP server-side instead of driving a visual countdown.
+// the browser fetch + localStorage key.
 //
 // Synced 2026-07-08 against the source app's post-fix state: universe
 // assembly is static-only (the live FMP constituent/etf-holder endpoints all
@@ -16,6 +14,15 @@
 // index_master/index_constituent DB tables on 2026-07-10 (seeded one-time
 // from db/seed/cf_static_universe.ts via seedTickerData.ts) — same static
 // data, now queryable/editable without a code deploy.
+//
+// Batch orchestration moved to the frontend 2026-07-27 — assembleUniverse()/
+// buildBatches()/scanBatch() are called once per batch by a new per-batch
+// controller endpoint instead of one long-held request looping every batch
+// with a server-side sleep(). The frontend now paces itself between calls
+// (same ~62s rate-limit buffer, just client-side), which also gives it real
+// batch-by-batch progress instead of an estimate. assembleUniverse() is
+// deterministic (ORDER BY on fetchConstituents()'s query) so recomputing it
+// fresh on every batch request is safe and cheap.
 
 import env from '../config/env';
 import { pool } from '../db/pool';
@@ -24,7 +31,6 @@ import { mwSMA, mwRSI, mwBB } from './momentum.service';
 
 export const CF_ETF_LIST: string[] = ['XLK', 'XLV', 'XLF', 'XLY', 'XLI', 'XLC', 'XLP', 'XLE', 'XLB', 'XLU', 'XLRE'];
 export const CF_BATCH = 125;
-const CF_WAIT_SECONDS = 62; // real wait between batches - small buffer to avoid overlap
 export const CF_MAX = 450;
 export const CF_MAX_BATCHES = 3;
 export const CF_STRENGTH_LOOKBACK = 60; // bars needed for SMA50/RSI14 strength screen
@@ -35,8 +41,31 @@ export interface UniverseEntry {
   source: string;
 }
 
+// Sector isn't reliably available from FMP's /quote response — confirmed
+// live 2026-07-27 that /stable/quote has no sector field at all (same class
+// of gap as profile.pe not existing, which made Long-Term Analysis's
+// original forward-P/E rule dead code). Backfilled from the already-seeded
+// m_tickers reference table (ticker_sectors.ts, ~200 curated large-cap
+// symbols) instead of adding a third FMP call per stock — one batched
+// lookup covers a whole scan batch. Coverage is partial: less-common
+// tickers outside that curated set still come back with an empty sector.
+async function fetchSectorMap(symbols: string[]): Promise<Record<string, string>> {
+  if (symbols.length === 0) return {};
+  const { rows } = await pool.query<{ symbol: string; sector: string | null }>(
+    'SELECT symbol, sector FROM m_tickers WHERE symbol = ANY($1)',
+    [symbols],
+  );
+  const map: Record<string, string> = {};
+  for (const row of rows) {
+    if (row.sector) map[row.symbol] = row.sector;
+  }
+  return map;
+}
+
 async function fetchConstituents(indexId: string): Promise<string[]> {
-  const { rows } = await pool.query<{ symbol: string }>('SELECT symbol FROM m_index_constituent WHERE index_id = $1', [indexId]);
+  // ORDER BY makes batch composition reproducible run-to-run — CockroachDB/Postgres
+  // doesn't guarantee row order without it, unlike the source app's static array.
+  const { rows } = await pool.query<{ symbol: string }>('SELECT symbol FROM m_index_constituent WHERE index_id = $1 ORDER BY symbol', [indexId]);
   return rows.map((r) => r.symbol);
 }
 
@@ -90,6 +119,7 @@ export interface ScanResult {
   volume?: number | null;
   avgVol?: number | null;
   changePct?: number;
+  changeSinceDate?: string; // the actual trading-day date changePct is measured from (YYYY-MM-DD)
   mktClosed?: boolean;
   strength?: StrengthSignal | null;
   source?: string;
@@ -116,11 +146,16 @@ export async function scanStock(sym: string, key: string, quality: ScanQuality, 
   const today = new Date().toISOString().slice(0, 10);
   const mktClosed = hist[0]?.date === today;
   const endPrice = mktClosed ? hist[0].close : price;
-  const startClose = mktClosed ? hist[scanDays].close : hist[scanDays - 1]?.close;
+  // scanDays counts trading days, not calendar days - hist has one row per
+  // actual trading session (FMP's EOD data never includes weekends/market
+  // holidays), so indexing scanDays back is already weekend/holiday-safe.
+  const startBar = mktClosed ? hist[scanDays] : hist[scanDays - 1];
+  const startClose = startBar?.close;
 
   if (!endPrice || !startClose || startClose === 0) return { symbol: sym, filterFail: false, noData: true };
 
   const changePct = (Number(endPrice) - Number(startClose)) / Number(startClose) * 100;
+  const changeSinceDate = startBar?.date;
 
   // Bullish "strength" screen - RSI ideal zone + above both SMAs + hasn't already spiked.
   let strength: StrengthSignal | null = null;
@@ -161,6 +196,7 @@ export async function scanStock(sym: string, key: string, quality: ScanQuality, 
     volume: q?.volume ?? null,
     avgVol: q?.avgVolume ?? null,
     changePct,
+    changeSinceDate,
     mktClosed,
     filterFail: false,
     noData: false,
@@ -179,55 +215,19 @@ export function buildBatches(universe: UniverseEntry[], batchSize: number, maxBa
 }
 
 export async function scanBatch(stocks: UniverseEntry[], key: string, quality: ScanQuality, scanDays?: number): Promise<ScanResult[]> {
+  const sectorMap = await fetchSectorMap(stocks.map((s) => s.symbol));
+
   const settled = await Promise.allSettled(stocks.map(async (stock) => {
     const r = await scanStock(stock.symbol, key, quality, scanDays);
     r.source = stock.source;
+    r.sector = sectorMap[stock.symbol] || r.sector;
     return r;
   }));
   return settled.map((r, i) => (r.status === 'fulfilled' ? r.value : { symbol: stocks[i].symbol, filterFail: true, error: true }));
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export function resolveQuality(qualityPreset?: string): ScanQuality {
   return qualityPreset === 'relaxed' ? { minPrice: 5, minMarketCap: 2.5e9 } : { minPrice: 10, minMarketCap: 5e9 };
-}
-
-export interface RunScanOptions {
-  key: string;
-  batchSize?: number;
-  maxBatches?: number;
-  qualityPreset?: string;
-  waitSeconds?: number;
-  scanDays?: number;
-}
-
-export interface RunScanResult {
-  universeSize: number;
-  scanned: number;
-  results: ScanResult[];
-}
-
-// No UI countdown — waits waitSeconds between batches server-side as a
-// rate-limit buffer against FMP. waitSeconds is overridable for tests.
-export async function runScan({
-  key, batchSize = CF_BATCH, maxBatches = CF_MAX_BATCHES, qualityPreset = 'standard',
-  waitSeconds = CF_WAIT_SECONDS, scanDays = 7,
-}: RunScanOptions): Promise<RunScanResult> {
-  const quality = resolveQuality(qualityPreset);
-  const universe = await assembleUniverse();
-  const batches = buildBatches(universe, batchSize, maxBatches);
-
-  const allResults: ScanResult[] = [];
-  for (let i = 0; i < batches.length; i++) {
-    const r = await scanBatch(batches[i], key, quality, scanDays);
-    allResults.push(...r);
-    if (i < batches.length - 1 && waitSeconds > 0) await sleep(waitSeconds * 1000);
-  }
-
-  return { universeSize: universe.length, scanned: allResults.length, results: allResults };
 }
 
 export function filterCandidates(results: ScanResult[], threshold: number): ScanResult[] {

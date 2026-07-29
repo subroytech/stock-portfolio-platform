@@ -9,6 +9,7 @@ import SubscriptionsPage from './pages/SubscriptionsPage';
 import ContrarianFinderPage from './pages/ContrarianFinderPage';
 import MomentumPage from './pages/MomentumPage';
 import LongTermAnalysisPage from './pages/LongTermAnalysisPage';
+import ContrarianComebackPage from './pages/ContrarianComebackPage';
 import ImportPreviewPage from './pages/ImportPreviewPage';
 
 export default function App() {
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="/contrarian-finder" element={<ContrarianFinderPage />} />
             <Route path="/momentum" element={<MomentumPage />} />
             <Route path="/long-term-analysis" element={<LongTermAnalysisPage />} />
+            <Route path="/contrarian-comeback" element={<ContrarianComebackPage />} />
             <Route path="/portfolios/:id/import-preview" element={<ImportPreviewPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

@@ -3,6 +3,6 @@ import * as contrarianFinderController from '../controllers/contrarianFinder.con
 
 const router = express.Router();
 
-router.post('/scan', contrarianFinderController.scan);
+router.post('/scan-batch', contrarianFinderController.scanBatch);
 
 export default router;
