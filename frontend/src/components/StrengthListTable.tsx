@@ -3,6 +3,7 @@ import type { ScanResult } from '../api/contrarianFinder';
 interface StrengthListTableProps {
   results: ScanResult[];
   onSymbolClick?: (symbol: string) => void;
+  onLongTermAnalysis?: (symbol: string) => void;
 }
 
 // Bullish "strength" screen candidates (RSI ideal zone, above both SMAs,
@@ -13,7 +14,7 @@ interface StrengthListTableProps {
 // pattern as ContrarianFinderResultsTable, kept as a separate component
 // since the columns genuinely differ (no Change%/decline coloring here,
 // adds SMA20/SMA50/full Kelly%).
-export default function StrengthListTable({ results, onSymbolClick }: StrengthListTableProps) {
+export default function StrengthListTable({ results, onSymbolClick, onLongTermAnalysis }: StrengthListTableProps) {
   if (results.length === 0) {
     return <p className="text-sm text-text-secondary">No strength-list candidates in this scan.</p>;
   }
@@ -27,6 +28,20 @@ export default function StrengthListTable({ results, onSymbolClick }: StrengthLi
     );
   }
 
+  function launchButton(symbol: string) {
+    if (!onLongTermAnalysis) return null;
+    return (
+      <button
+        type="button"
+        onClick={() => onLongTermAnalysis(symbol)}
+        title="Long-Term Analysis"
+        className="rounded border border-border px-1 text-[.63rem] font-medium text-text-secondary hover:border-accent hover:text-accent"
+      >
+        LT
+      </button>
+    );
+  }
+
   return (
     <div>
       {/* Mobile: card list */}
@@ -34,7 +49,10 @@ export default function StrengthListTable({ results, onSymbolClick }: StrengthLi
         {results.map((r) => (
           <div key={r.symbol} className="rounded-card border border-border bg-bg-card p-4 shadow-card">
             <div className="flex items-baseline justify-between">
-              {symbolButton(r.symbol, 'font-semibold text-text-primary')}
+              <span className="flex items-center gap-1.5">
+                {symbolButton(r.symbol, 'font-semibold text-text-primary')}
+                {launchButton(r.symbol)}
+              </span>
               {r.price != null && <span className="text-text-primary">${r.price.toFixed(2)}</span>}
             </div>
             {r.name && <p className="text-xs text-text-muted">{r.name}</p>}
@@ -70,6 +88,7 @@ export default function StrengthListTable({ results, onSymbolClick }: StrengthLi
               <th className="whitespace-nowrap px-3 py-2 text-right">R:R</th>
               <th className="whitespace-nowrap px-3 py-2 text-right">Kelly %</th>
               <th className="whitespace-nowrap px-3 py-2 text-right">Half-Kelly</th>
+              {onLongTermAnalysis && <th className="whitespace-nowrap px-3 py-2" />}
             </tr>
           </thead>
           <tbody>
@@ -85,6 +104,7 @@ export default function StrengthListTable({ results, onSymbolClick }: StrengthLi
                 <td className="whitespace-nowrap px-3 py-2 text-right">{r.strength ? r.strength.rr.toFixed(2) : '—'}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-right">{r.strength ? `${(r.strength.kF * 100).toFixed(1)}%` : '—'}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-right">{r.strength ? `${(r.strength.halfKelly * 100).toFixed(1)}%` : '—'}</td>
+                {onLongTermAnalysis && <td className="whitespace-nowrap px-3 py-2">{launchButton(r.symbol)}</td>}
               </tr>
             ))}
           </tbody>

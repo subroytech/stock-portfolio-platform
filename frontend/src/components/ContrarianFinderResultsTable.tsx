@@ -4,6 +4,8 @@ import { contrarianSeverityClass, formatCompactCurrency, formatPercent } from '.
 interface ContrarianFinderResultsTableProps {
   results: ScanResult[];
   onSymbolClick?: (symbol: string) => void;
+  onLongTermAnalysis?: (symbol: string) => void;
+  onContrarianComeback?: (symbol: string) => void;
 }
 
 function volRatioDisplay(volume?: number, avgVol?: number): { text: string; hot: boolean } {
@@ -15,7 +17,7 @@ function volRatioDisplay(volume?: number, avgVol?: number): { text: string; hot:
 // Same card/table responsive split as HoldingsTable — the source app's
 // Contrarian Finder results table (.cf-table) has the identical
 // horizontal-scroll-only problem the holdings table does.
-export default function ContrarianFinderResultsTable({ results, onSymbolClick }: ContrarianFinderResultsTableProps) {
+export default function ContrarianFinderResultsTable({ results, onSymbolClick, onLongTermAnalysis, onContrarianComeback }: ContrarianFinderResultsTableProps) {
   if (results.length === 0) {
     return <p className="text-sm text-text-secondary">No candidates matched this scan's threshold.</p>;
   }
@@ -29,6 +31,34 @@ export default function ContrarianFinderResultsTable({ results, onSymbolClick }:
     );
   }
 
+  function launchButtons(symbol: string) {
+    if (!onLongTermAnalysis && !onContrarianComeback) return null;
+    return (
+      <span className="inline-flex gap-1">
+        {onLongTermAnalysis && (
+          <button
+            type="button"
+            onClick={() => onLongTermAnalysis(symbol)}
+            title="Long-Term Analysis"
+            className="rounded border border-border px-1 text-[.63rem] font-medium text-text-secondary hover:border-accent hover:text-accent"
+          >
+            LT
+          </button>
+        )}
+        {onContrarianComeback && (
+          <button
+            type="button"
+            onClick={() => onContrarianComeback(symbol)}
+            title="Contrarian Comeback"
+            className="rounded border border-border px-1 text-[.63rem] font-medium text-text-secondary hover:border-accent hover:text-accent"
+          >
+            CC
+          </button>
+        )}
+      </span>
+    );
+  }
+
   return (
     <div>
       {/* Mobile: card list */}
@@ -38,7 +68,10 @@ export default function ContrarianFinderResultsTable({ results, onSymbolClick }:
           return (
             <div key={r.symbol} className="rounded-card border border-border bg-bg-card p-4 shadow-card">
               <div className="flex items-baseline justify-between">
-                {symbolButton(r.symbol, 'font-semibold text-text-primary')}
+                <span className="flex items-center gap-1.5">
+                  {symbolButton(r.symbol, 'font-semibold text-text-primary')}
+                  {launchButtons(r.symbol)}
+                </span>
                 <span className="flex items-center gap-2">
                   {r.changePct != null && (
                     <span className={contrarianSeverityClass(r.changePct)}>{formatPercent(r.changePct)}</span>
@@ -82,6 +115,7 @@ export default function ContrarianFinderResultsTable({ results, onSymbolClick }:
               <th className="whitespace-nowrap px-3 py-2 text-right">RSI</th>
               <th className="whitespace-nowrap px-3 py-2 text-right">R:R</th>
               <th className="whitespace-nowrap px-3 py-2 text-right">Half-Kelly</th>
+              {(onLongTermAnalysis || onContrarianComeback) && <th className="whitespace-nowrap px-3 py-2" />}
             </tr>
           </thead>
           <tbody>
@@ -105,6 +139,7 @@ export default function ContrarianFinderResultsTable({ results, onSymbolClick }:
                   <td className="whitespace-nowrap px-3 py-2 text-right">{r.strength ? r.strength.rsi.toFixed(1) : '—'}</td>
                   <td className="whitespace-nowrap px-3 py-2 text-right">{r.strength ? r.strength.rr.toFixed(2) : '—'}</td>
                   <td className="whitespace-nowrap px-3 py-2 text-right">{r.strength ? `${(r.strength.halfKelly * 100).toFixed(1)}%` : '—'}</td>
+                  {(onLongTermAnalysis || onContrarianComeback) && <td className="whitespace-nowrap px-3 py-2">{launchButtons(r.symbol)}</td>}
                 </tr>
               );
             })}

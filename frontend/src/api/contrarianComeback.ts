@@ -46,6 +46,7 @@ export interface ScoreBreakdown {
   verdict: 'HIGH' | 'MODERATE' | 'SPECULATIVE' | 'AVOID';
   hybridCapActive: boolean;
   sectorOverrideCapActive: boolean;
+  hints: Record<string, string>;
 }
 
 export interface WeeklyTechnicals {
@@ -53,6 +54,8 @@ export interface WeeklyTechnicals {
   obvTrend: 'up' | 'down' | 'flat' | 'insufficient_data';
   volumeDrying: boolean;
   sma200w: number | null;
+  volumeRatioPct: number | null;
+  volumeClimax: boolean;
 }
 
 export interface FibonacciLevels {
@@ -98,6 +101,15 @@ export interface CatalystPipeline {
   recentInsiderTrades: InsiderTrade[];
   recentGrades: GradeRecord[];
   news: NewsItem[];
+  insiderSignal: string;
+  analystUpgrades90d: number;
+}
+
+export interface ValueDislocation {
+  peRatio: number | null;
+  priceToSales: number | null;
+  analystUpsidePct: number;
+  sanityCheckTriggered: boolean;
 }
 
 export interface TrancheEntry {
@@ -161,6 +173,7 @@ export interface ContrarianComebackSubmitResult {
   catalystPipeline: CatalystPipeline | null;
   stagedEntry: StagedEntry | null;
   recoveryTargets: RecoveryTargets | null;
+  valueDislocation: ValueDislocation | null;
 }
 
 export interface ContrarianComebackSubmitInput {

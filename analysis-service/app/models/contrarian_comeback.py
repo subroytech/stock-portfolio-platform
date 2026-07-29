@@ -125,6 +125,9 @@ class ScoreBreakdown(BaseModel):
     verdict: Literal['HIGH', 'MODERATE', 'SPECULATIVE', 'AVOID']
     hybridCapActive: bool
     sectorOverrideCapActive: bool
+    # One short "why" string per factor (keys: breakdown/sector/technical/value/catalyst),
+    # ported from the source app's compHints — never surfaced in this port until now.
+    hints: dict[str, str] = {}
 
 
 class WeeklyTechnicals(BaseModel):
@@ -132,6 +135,8 @@ class WeeklyTechnicals(BaseModel):
     obvTrend: Literal['up', 'down', 'flat', 'insufficient_data']
     volumeDrying: bool
     sma200w: Optional[float] = None
+    volumeRatioPct: Optional[float] = None
+    volumeClimax: bool = False
 
 
 class FibonacciLevels(BaseModel):
@@ -161,6 +166,18 @@ class CatalystPipeline(BaseModel):
     recentInsiderTrades: list[InsiderTrade] = []
     recentGrades: list[GradeRecord] = []
     news: list[NewsItem] = []
+    # The aggregate signal/count the catalyst score is actually based on -
+    # previously only ever reached the gate-preview response, never this one,
+    # so the card had no way to show *why* the catalyst score was what it was.
+    insiderSignal: str = 'Neutral'
+    analystUpgrades90d: int = 0
+
+
+class ValueDislocation(BaseModel):
+    peRatio: Optional[float] = None
+    priceToSales: Optional[float] = None
+    analystUpsidePct: float = 0.0
+    sanityCheckTriggered: bool = False
 
 
 class TrancheEntry(BaseModel):
@@ -230,3 +247,4 @@ class ContrarianComebackSubmitResponse(BaseModel):
     catalystPipeline: Optional[CatalystPipeline] = None
     stagedEntry: Optional[StagedEntry] = None
     recoveryTargets: Optional[RecoveryTargets] = None
+    valueDislocation: Optional[ValueDislocation] = None

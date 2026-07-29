@@ -1,6 +1,4 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
-import { useLogout } from '../api/auth';
 import { usePortfolio, useRefreshPrices } from '../api/portfolios';
 import { ApiError } from '../api/client';
 import PortfolioSelector from '../components/PortfolioSelector';
@@ -12,32 +10,13 @@ import HoldingsTable from '../components/HoldingsTable';
 import StockPreviewChart from '../components/StockPreviewChart';
 
 export default function DashboardPage() {
-  const logout = useLogout();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
   const { data: portfolio, isLoading } = usePortfolio(selectedId);
   const refreshPrices = useRefreshPrices(selectedId ?? '');
 
   return (
-    <div className="min-h-screen bg-bg-primary">
-      <header className="flex items-center justify-between border-b border-border bg-bg-secondary px-4 py-4 shadow-card sm:px-6">
-        <h1 className="text-lg font-semibold text-text-primary">Stock Portfolio Platform</h1>
-        <nav className="flex items-center gap-3">
-          <Link to="/momentum" className="text-sm text-text-secondary hover:text-accent">Momentum</Link>
-          <Link to="/contrarian-finder" className="text-sm text-text-secondary hover:text-accent">Contrarian Finder</Link>
-          <Link to="/long-term-analysis" className="text-sm text-text-secondary hover:text-accent">Long-Term Analysis</Link>
-          <Link to="/contrarian-comeback" className="text-sm text-text-secondary hover:text-accent">Contrarian Comeback</Link>
-          <Link to="/subscriptions" className="text-sm text-text-secondary hover:text-accent">API Keys</Link>
-          <button
-            type="button"
-            onClick={() => logout.mutate()}
-            className="rounded-btn border border-border px-3 py-1.5 text-sm text-text-secondary transition-colors hover:bg-bg-primary"
-          >
-            Log out
-          </button>
-        </nav>
-      </header>
-
+    <>
       <main className="flex flex-col gap-6 p-4 sm:p-6">
         <PortfolioSelector selectedId={selectedId} onSelect={setSelectedId} />
 
@@ -99,6 +78,6 @@ export default function DashboardPage() {
       </main>
 
       {previewSymbol && <StockPreviewChart symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />}
-    </div>
+    </>
   );
 }

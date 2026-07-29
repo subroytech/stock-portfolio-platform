@@ -264,15 +264,25 @@ export async function fetchContrarianComebackData(
     fetchFundamentals(symbol, fmpKey),
   ]);
 
+  const price = quote.price ?? profile.price ?? 0;
+  // profile.pe / quote.pe are both absent on this account's /stable tier
+  // (confirmed live during the Long-Term Analysis build - see
+  // longTermAnalysisData.service.ts's trailingPe comment). Same fix here:
+  // derive trailing P/E from price/EPS using the annual income statement's
+  // own eps field, which this call already fetches for the fundamentals
+  // above - no extra FMP request needed.
+  const eps0 = Array.isArray(incomeRaw) ? (incomeRaw[0]?.eps ?? incomeRaw[0]?.epsDiluted ?? null) : null;
+  const peRatio = eps0 && eps0 > 0 && price > 0 ? price / eps0 : null;
+
   return {
     symbol,
     companyName: profile.companyName ?? null,
     sector,
     exchange: profile.exchange ?? null,
-    price: quote.price ?? profile.price ?? 0,
+    price,
     marketCap: profile.mktCap ?? quote.marketCap ?? null,
     yearHigh: quote.yearHigh ?? null,
-    peRatio: profile.pe ?? quote.pe ?? null,
+    peRatio,
     incomeStatements,
     dailyBars,
     etfSymbol,
