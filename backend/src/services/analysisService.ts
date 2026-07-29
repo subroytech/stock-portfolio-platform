@@ -165,6 +165,7 @@ export interface ContrarianComebackScoreBreakdown {
   verdict: 'HIGH' | 'MODERATE' | 'SPECULATIVE' | 'AVOID';
   hybridCapActive: boolean;
   sectorOverrideCapActive: boolean;
+  hints: Record<string, string>;
 }
 
 export interface ContrarianComebackWeeklyTechnicals {
@@ -172,6 +173,8 @@ export interface ContrarianComebackWeeklyTechnicals {
   obvTrend: 'up' | 'down' | 'flat' | 'insufficient_data';
   volumeDrying: boolean;
   sma200w: number | null;
+  volumeRatioPct: number | null;
+  volumeClimax: boolean;
 }
 
 export interface ContrarianComebackFibonacciLevels {
@@ -201,6 +204,15 @@ export interface ContrarianComebackCatalystPipeline {
   recentInsiderTrades: InsiderTrade[];
   recentGrades: GradeRecord[];
   news: NewsItem[];
+  insiderSignal: string;
+  analystUpgrades90d: number;
+}
+
+export interface ContrarianComebackValueDislocation {
+  peRatio: number | null;
+  priceToSales: number | null;
+  analystUpsidePct: number;
+  sanityCheckTriggered: boolean;
 }
 
 export interface ContrarianComebackTrancheEntry {
@@ -264,6 +276,7 @@ export interface ContrarianComebackSubmitResult {
   catalystPipeline: ContrarianComebackCatalystPipeline | null;
   stagedEntry: ContrarianComebackStagedEntry | null;
   recoveryTargets: ContrarianComebackRecoveryTargets | null;
+  valueDislocation: ContrarianComebackValueDislocation | null;
 }
 
 export interface ContrarianComebackSubmitPayload extends ContrarianComebackData {

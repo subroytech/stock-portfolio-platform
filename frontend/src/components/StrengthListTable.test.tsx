@@ -37,4 +37,15 @@ describe('StrengthListTable', () => {
     await userEvent.click(buttons[0]);
     expect(clicked).toBe('MSFT');
   });
+
+  test('LT launch button only renders when onLongTermAnalysis is passed, and fires with the row symbol', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    render(<StrengthListTable results={[result]} />);
+    expect(screen.queryByTitle('Long-Term Analysis')).not.toBeInTheDocument();
+
+    let launched = '';
+    render(<StrengthListTable results={[result]} onLongTermAnalysis={(s) => { launched = s; }} />);
+    await userEvent.click(screen.getAllByTitle('Long-Term Analysis')[0]);
+    expect(launched).toBe('MSFT');
+  });
 });

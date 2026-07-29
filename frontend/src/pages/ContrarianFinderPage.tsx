@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { STRENGTH_LIST_QUERY_KEY, useContrarianBatchScan, type ScanResult } from '../api/contrarianFinder';
 import { ApiError } from '../api/client';
+import { useApiKeysModal } from '../lib/apiKeysModal';
+import { useTickerHandoff } from '../lib/tickerHandoff';
 import ContrarianFinderResultsTable from '../components/ContrarianFinderResultsTable';
 import StrengthListTable from '../components/StrengthListTable';
 import StockPreviewChart from '../components/StockPreviewChart';
@@ -67,20 +68,17 @@ export default function ContrarianFinderPage() {
   }
 
   const missingKeyError = scan.isError && scan.error instanceof ApiError && scan.error.status === 503;
+  const apiKeysModal = useApiKeysModal();
+  const { launch } = useTickerHandoff();
 
   return (
-    <div className="min-h-screen bg-bg-primary">
-      <header className="border-b border-border bg-bg-secondary px-4 py-4 shadow-card sm:px-6">
-        <div className="flex items-center justify-between">
-          <h1 className="text-lg font-semibold text-text-primary">Contrarian Finder</h1>
-          <Link to="/" className="text-sm text-accent hover:underline">Back to dashboard</Link>
-        </div>
-
-        {/* Running status commentary - lives here instead of a separate
-            full-width card in main, so it doesn't cost the page its own
-            block of vertical space while a scan is in flight. */}
+    <>
+      <main className="flex flex-col gap-6 p-4 sm:p-6">
+        {/* Running status commentary - a compact top-of-page line instead of
+            a separate full-width card, so it doesn't cost extra vertical
+            space while a scan is in flight. */}
         {scan.isPending && (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 rounded-card bg-bg-card p-3 shadow-card">
             <span className="h-3.5 w-3.5 flex-none animate-spin rounded-full border-2 border-border border-t-accent" />
             <p className="text-xs text-text-secondary">
               {scan.progress.phase === 'waiting'
@@ -103,13 +101,11 @@ export default function ContrarianFinderPage() {
             since-edited) live form below. Guarded for sessionStorage data
             persisted by an older build of this page, which predates this field. */}
         {!scan.isPending && scan.data?.params && (
-          <p className="mt-2 text-xs italic text-text-secondary">
+          <p className="text-xs italic text-text-secondary">
             Last scan used: {scan.data.params.threshold}% threshold · {scan.data.params.scanDays}-day window · batch size {scan.data.params.batchSize} · max {scan.data.params.maxBatches} batches · {scan.data.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
           </p>
         )}
-      </header>
 
-      <main className="flex flex-col gap-6 p-4 sm:p-6">
         <form onSubmit={handleSubmit} className="rounded-card bg-bg-card p-4 shadow-card">
           <div className="flex flex-wrap items-end gap-4">
             <label className="flex flex-col gap-1 text-sm text-text-secondary">
@@ -200,7 +196,7 @@ export default function ContrarianFinderPage() {
               sector ETFs, one batch of FMP calls at a time, with a real ~{WAIT_SECONDS}s pause
               between batches to stay within rate limits — a full scan can take a couple of minutes.
             </p>
-            <p className="mt-2">Requires an FMP API key on file — add one on the <Link to="/subscriptions" className="text-accent hover:underline">API Keys</Link> page.</p>
+            <p className="mt-2">Requires an FMP API key on file — <button type="button" onClick={apiKeysModal.open} className="text-accent hover:underline">add one under API Keys</button>.</p>
           </div>
         )}
 
@@ -209,7 +205,7 @@ export default function ContrarianFinderPage() {
             <p>{scan.error instanceof ApiError ? scan.error.message : 'Scan failed.'}</p>
             {missingKeyError && (
               <p className="mt-1">
-                <Link to="/subscriptions" className="text-accent hover:underline">Add your FMP API key</Link> to run a scan.
+                <button type="button" onClick={apiKeysModal.open} className="text-accent hover:underline">Add your FMP API key</button> to run a scan.
               </p>
             )}
           </div>
@@ -240,15 +236,24 @@ export default function ContrarianFinderPage() {
             </div>
 
             {activeTab === 'candidates' ? (
-              <ContrarianFinderResultsTable results={candidates} onSymbolClick={setPreviewSymbol} />
+              <ContrarianFinderResultsTable
+                results={candidates}
+                onSymbolClick={setPreviewSymbol}
+                onLongTermAnalysis={(symbol) => launch('long-term-analysis', symbol)}
+                onContrarianComeback={(symbol) => launch('contrarian-comeback', symbol)}
+              />
             ) : (
-              <StrengthListTable results={strengthList} onSymbolClick={setPreviewSymbol} />
+              <StrengthListTable
+                results={strengthList}
+                onSymbolClick={setPreviewSymbol}
+                onLongTermAnalysis={(symbol) => launch('long-term-analysis', symbol)}
+              />
             )}
           </>
         )}
       </main>
 
       {previewSymbol && <StockPreviewChart symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />}
-    </div>
+    </>
   );
 }

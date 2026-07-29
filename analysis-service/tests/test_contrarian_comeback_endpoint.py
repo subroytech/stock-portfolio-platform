@@ -99,7 +99,7 @@ def test_submit_format_a_response_includes_fundamental_health_and_catalyst_pipel
         "debtToEquity", "currentRatio", "freeCashFlow", "revenueGrowthPct", "grossMarginPct", "cashRunwayMonths", "positiveFcf",
     }
     assert body["catalystPipeline"] is not None
-    assert set(body["catalystPipeline"].keys()) == {"recentInsiderTrades", "recentGrades", "news"}
+    assert set(body["catalystPipeline"].keys()) == {"recentInsiderTrades", "recentGrades", "news", "insiderSignal", "analystUpgrades90d"}
 
 
 def test_submit_format_a_response_includes_staged_entry_and_recovery_targets():

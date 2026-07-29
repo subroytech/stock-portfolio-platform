@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
-import { describe, expect, test } from 'vitest';
+import userEvent from '@testing-library/user-event';
+import { describe, expect, test, vi } from 'vitest';
 import ContrarianFinderResultsTable from './ContrarianFinderResultsTable';
 import type { ScanResult } from '../api/contrarianFinder';
 
@@ -50,5 +51,25 @@ describe('ContrarianFinderResultsTable', () => {
     render(<ContrarianFinderResultsTable results={[closedLowVol]} />);
     expect(screen.getAllByText('Closed').length).toBe(2);
     expect(screen.getAllByText('1.1×')[0].className).not.toMatch(/text-warning/);
+  });
+
+  test('LT/CC launch buttons only render when their handler prop is passed', () => {
+    render(<ContrarianFinderResultsTable results={[result]} />);
+    expect(screen.queryByTitle('Long-Term Analysis')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Contrarian Comeback')).not.toBeInTheDocument();
+  });
+
+  test('LT button fires onLongTermAnalysis with the row symbol', async () => {
+    const onLongTermAnalysis = vi.fn();
+    render(<ContrarianFinderResultsTable results={[result]} onLongTermAnalysis={onLongTermAnalysis} />);
+    await userEvent.click(screen.getAllByTitle('Long-Term Analysis')[0]);
+    expect(onLongTermAnalysis).toHaveBeenCalledWith('AAPL');
+  });
+
+  test('CC button fires onContrarianComeback with the row symbol', async () => {
+    const onContrarianComeback = vi.fn();
+    render(<ContrarianFinderResultsTable results={[result]} onContrarianComeback={onContrarianComeback} />);
+    await userEvent.click(screen.getAllByTitle('Contrarian Comeback')[0]);
+    expect(onContrarianComeback).toHaveBeenCalledWith('AAPL');
   });
 });

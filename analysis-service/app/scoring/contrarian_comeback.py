@@ -18,6 +18,7 @@ from app.models.contrarian_comeback import (
     RecoveryTargets,
     ScoreBreakdown,
     StagedEntry,
+    ValueDislocation,
     TrancheEntry,
     WeeklyTechnicals,
 )
@@ -94,13 +95,37 @@ def obv_trend(bars: list[dict]) -> str:
     return 'flat'
 
 
-def vol_drying(bars: list[dict]) -> bool:
-    """`bars` is newest-first - slice(0,4) is the most recent 4 weeks."""
+def vol_ratio_pct(bars: list[dict]) -> float | None:
+    """`bars` is newest-first. Recent-4-week avg volume as a % of the prior
+    4-week avg - the number vol_drying() collapses into a threshold check."""
     if len(bars) < 8:
-        return False
+        return None
     r4 = sum((b['volume'] or 0) for b in bars[:4]) / 4
     p4 = sum((b['volume'] or 0) for b in bars[4:8]) / 4
-    return r4 < p4 * 0.85
+    return (r4 / p4) * 100 if p4 > 0 else None
+
+
+def vol_drying(bars: list[dict]) -> bool:
+    """`bars` is newest-first - slice(0,4) is the most recent 4 weeks."""
+    ratio = vol_ratio_pct(bars)
+    return ratio is not None and ratio < 85.0
+
+
+def volume_climax(bars: list[dict], lookback: int = 26, threshold: float = 2.0) -> bool:
+    """`bars` is newest-first. True if the single highest-volume week within
+    the lookback traded at >= threshold x the average of the OTHER weeks in
+    that window - a capitulation/climax spike, a classic bottoming signal
+    worth surfacing for a comeback candidate."""
+    window = bars[:lookback]
+    if len(window) < 8:
+        return False
+    volumes = [b['volume'] or 0 for b in window]
+    peak_idx = volumes.index(max(volumes))
+    others = volumes[:peak_idx] + volumes[peak_idx + 1:]
+    if not others:
+        return False
+    avg_others = sum(others) / len(others)
+    return avg_others > 0 and volumes[peak_idx] >= avg_others * threshold
 
 
 def sma(bars: list[dict], n: int) -> float:
@@ -455,9 +480,80 @@ def compute_score(
 
     verdict = 'HIGH' if total >= 8 else 'MODERATE' if total >= 6 else 'SPECULATIVE' if total >= 4 else 'AVOID'
 
+    hints = _score_hints(
+        breakdown_score=breakdown, sector_score=sector, technical_score=technical, value_score=value,
+        drawdown_pct=drawdown_pct, etf6m=etf6m, check3_override=check3_override,
+        weekly_rsi_value=weekly_rsi_value, pe_ratio=pe_ratio, price_to_sales=price_to_sales,
+        upside_pct=upside_pct, insider_buying=insider_buying, analyst_upgrades=analyst_upgrades,
+    )
+
     return ScoreBreakdown(
         breakdown=breakdown, sector=sector, technical=technical, value=value, catalyst=catalyst,
         total=total, verdict=verdict, hybridCapActive=hybrid_cap, sectorOverrideCapActive=check3_override,
+        hints=hints,
+    )
+
+
+def _score_hints(
+    breakdown_score: int, sector_score: int, technical_score: int, value_score: int,
+    drawdown_pct: float, etf6m: float | None, check3_override: bool,
+    weekly_rsi_value: float | None, pe_ratio: float | None, price_to_sales: float | None,
+    upside_pct: float, insider_buying: bool, analyst_upgrades: int,
+) -> dict[str, str]:
+    """One short 'why' string per factor - ported from the source app's
+    compHints, adjusted for this port's corrections (sector defaults to 1 not
+    0 with no ETF data; no 'strong catalyst' branch; see plan)."""
+    breakdown_hint = f"{drawdown_pct:.1f}% drawdown"
+    if breakdown_score == 2:
+        breakdown_hint += " + confirmed event-driven breakdown"
+
+    if check3_override:
+        sector_hint = "Sector override active — forced to 0/2"
+    elif etf6m is None:
+        sector_hint = "No sector ETF data available — defaulted to 1/2"
+    else:
+        qualifier = 'weak' if sector_score == 0 else 'flat' if sector_score == 1 else None
+        sector_hint = f"Sector ETF {etf6m:+.1f}% over 6 months" + (f" — {qualifier}" if qualifier else "")
+
+    if weekly_rsi_value is None:
+        technical_hint = "Insufficient weekly price history for RSI"
+    elif technical_score == 2:
+        technical_hint = f"Weekly RSI {weekly_rsi_value:.1f}, volume drying, OBV turning up"
+    elif technical_score == 1:
+        technical_hint = f"Weekly RSI {weekly_rsi_value:.1f} (oversold zone)"
+    else:
+        technical_hint = f"Weekly RSI {weekly_rsi_value:.1f} — not yet oversold"
+
+    sanity_triggered = (pe_ratio is not None and pe_ratio > 60) or (price_to_sales is not None and price_to_sales > 25)
+    if sanity_triggered:
+        parts = []
+        if pe_ratio is not None and pe_ratio > 60:
+            parts.append(f"PE {pe_ratio:.1f}")
+        if price_to_sales is not None and price_to_sales > 25:
+            parts.append(f"P/S {price_to_sales:.1f}")
+        value_hint = f"Valuation sanity check failed ({' or '.join(parts)} too high) — overridden to 0"
+    elif value_score == 0:
+        value_hint = f"Analyst upside {upside_pct:+.1f}% — below 25% threshold"
+    else:
+        value_hint = f"Analyst upside {upside_pct:+.1f}%"
+
+    if insider_buying:
+        catalyst_hint = "Net insider buying detected (90d)"
+    elif analyst_upgrades > 0:
+        catalyst_hint = f"{analyst_upgrades} analyst upgrade(s) (90d)"
+    else:
+        catalyst_hint = "No insider buying or analyst upgrades detected (90d)"
+
+    return {
+        'breakdown': breakdown_hint, 'sector': sector_hint, 'technical': technical_hint,
+        'value': value_hint, 'catalyst': catalyst_hint,
+    }
+
+
+def compute_value_dislocation(pe_ratio: float | None, price_to_sales: float | None, upside_pct: float) -> ValueDislocation:
+    sanity_triggered = (pe_ratio is not None and pe_ratio > 60) or (price_to_sales is not None and price_to_sales > 25)
+    return ValueDislocation(
+        peRatio=pe_ratio, priceToSales=price_to_sales, analystUpsidePct=upside_pct, sanityCheckTriggered=sanity_triggered,
     )
 
 
@@ -537,6 +633,8 @@ def assemble_submit_result(req: ContrarianComebackSubmitRequest) -> ContrarianCo
     w_rsi = weekly_rsi(weekly_bars) if len(weekly_bars) >= 20 else None
     obv_dir = obv_trend(weekly_bars)
     vd = vol_drying(weekly_bars)
+    vol_ratio = vol_ratio_pct(weekly_bars)
+    vol_climax = volume_climax(weekly_bars)
     sma200w = sma(weekly_bars, 200) if len(weekly_bars) >= 10 else None
 
     pt_avg = compute_pt_avg(req.priceTarget)
@@ -548,7 +646,9 @@ def assemble_submit_result(req: ContrarianComebackSubmitRequest) -> ContrarianCo
     fundamental_health = compute_fundamental_health(req)
     catalyst_pipeline = CatalystPipeline(
         recentInsiderTrades=insider['recent'][:4], recentGrades=grades['recent'][:4], news=req.news,
+        insiderSignal=insider['signal'], analystUpgrades90d=grades['upgrades'],
     )
+    value_dislocation = compute_value_dislocation(req.peRatio, price_to_sales, upside)
     staged_entry = compute_staged_entry(req.price, checks['fib382'], req.marketCap)
     recovery_targets = compute_recovery_targets(
         req.price, checks['fib382'], checks['fib618'], checks['fib100'],
@@ -580,7 +680,10 @@ def assemble_submit_result(req: ContrarianComebackSubmitRequest) -> ContrarianCo
         check3OverrideReason=req.check3OverrideReason if check3_override_active else None,
         etfSymbol=req.etfSymbol, etfReturn6M=checks['etf6m'],
         score=score,
-        technicals=WeeklyTechnicals(weeklyRsi=w_rsi, obvTrend=obv_dir, volumeDrying=vd, sma200w=sma200w),
+        technicals=WeeklyTechnicals(
+            weeklyRsi=w_rsi, obvTrend=obv_dir, volumeDrying=vd, sma200w=sma200w,
+            volumeRatioPct=vol_ratio, volumeClimax=vol_climax,
+        ),
         fibonacci=FibonacciLevels(
             swingLow=checks['swingLow'], athPrice=checks['athPrice'],
             fib382=checks['fib382'], fib618=checks['fib618'], fib100=checks['fib100'],
@@ -589,4 +692,5 @@ def assemble_submit_result(req: ContrarianComebackSubmitRequest) -> ContrarianCo
         catalystPipeline=catalyst_pipeline,
         stagedEntry=staged_entry,
         recoveryTargets=recovery_targets,
+        valueDislocation=value_dislocation,
     )

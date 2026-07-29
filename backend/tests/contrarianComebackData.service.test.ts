@@ -16,7 +16,9 @@ function mockFetchByUrl(routes: Record<string, unknown>) {
 const CRITICAL_HAPPY_ROUTES = {
   '/profile?': [{ companyName: 'Apple Inc.', sector: 'Technology', exchange: 'NASDAQ', mktCap: 3e12, pe: 28 }],
   '/quote?symbol=AAPL': [{ price: 200, yearHigh: 260, marketCap: 3e12, pe: 27 }],
-  '/income-statement?': [{ fiscalYear: '2026', revenue: 1100 }, { fiscalYear: '2025', revenue: 1000 }],
+  // eps only appears on the most recent period - profile.pe/quote.pe are both
+  // absent on FMP's /stable tier, so peRatio is derived from price/eps here.
+  '/income-statement?': [{ fiscalYear: '2026', revenue: 1100, eps: 5 }, { fiscalYear: '2025', revenue: 1000 }],
   '/price-target-consensus?': [{ targetConsensus: 230, targetHigh: 260, targetLow: 190 }],
   '/grades?': [{ gradingCompany: 'Firm A', newGrade: 'Buy', action: 'upgrade', date: '2026-01-01' }],
   '/insider-trading/search?': [{ transactionDate: '2026-07-01', transactionType: 'P-Purchase', acquisitionOrDisposition: 'A', securitiesTransacted: 100, price: 50, reportingName: 'Jane Doe' }],
@@ -43,7 +45,7 @@ describe('fetchContrarianComebackData', () => {
     expect(data.price).toBe(200); // quote.price preferred
     expect(data.marketCap).toBe(3e12); // profile.mktCap preferred
     expect(data.yearHigh).toBe(260);
-    expect(data.peRatio).toBe(28); // profile.pe preferred over quote.pe
+    expect(data.peRatio).toBe(40); // derived from price/eps (200/5) - profile.pe/quote.pe are both ignored
     expect(data.incomeStatements).toEqual([{ revenue: 1100, grossProfit: null }, { revenue: 1000, grossProfit: null }]);
     expect(data.dailyBars).toHaveLength(1);
     expect(data.etfSymbol).toBe('XLK');

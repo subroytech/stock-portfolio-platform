@@ -16,11 +16,14 @@ from app.scoring.contrarian_comeback import (
     compute_recovery_targets,
     compute_score,
     compute_staged_entry,
+    compute_value_dislocation,
     evaluate_auto_checks,
     obv_trend,
     sma,
     to_weekly_bars,
     vol_drying,
+    vol_ratio_pct,
+    volume_climax,
     weekly_rsi,
 )
 
@@ -107,6 +110,33 @@ def test_vol_drying_true_when_recent_volume_well_below_prior():
 
 def test_vol_drying_false_when_insufficient_bars():
     assert vol_drying([{"volume": 10}] * 7) is False
+
+
+# ─── vol_ratio_pct ─────────────────────────────────────────────────────────────
+
+def test_vol_ratio_pct_matches_vol_drying_threshold():
+    bars = [{"volume": 10} for _ in range(4)] + [{"volume": 100} for _ in range(4)]
+    assert vol_ratio_pct(bars) == pytest.approx(10.0)
+
+
+def test_vol_ratio_pct_none_when_insufficient_bars():
+    assert vol_ratio_pct([{"volume": 10}] * 7) is None
+
+
+# ─── volume_climax ─────────────────────────────────────────────────────────────
+
+def test_volume_climax_true_when_one_week_spikes_well_above_the_rest():
+    bars = [{"volume": 1000}] + [{"volume": 100} for _ in range(9)]
+    assert volume_climax(bars) is True
+
+
+def test_volume_climax_false_when_volume_is_even():
+    bars = [{"volume": 100} for _ in range(10)]
+    assert volume_climax(bars) is False
+
+
+def test_volume_climax_false_when_insufficient_bars():
+    assert volume_climax([{"volume": 1000}] + [{"volume": 10}] * 6) is False
 
 
 # ─── sma ──────────────────────────────────────────────────────────────────────
@@ -596,3 +626,95 @@ def test_submit_format_b_leaves_staged_entry_and_recovery_targets_null():
     assert result.format == "B"
     assert result.stagedEntry is None
     assert result.recoveryTargets is None
+
+
+# ─── compute_score — hints ───────────────────────────────────────────────────
+
+def test_breakdown_hint_mentions_event_driven_only_at_score_2():
+    two = compute_score(41, ["event"], None, None, False, False, 0, None, None, False, 0, False, False)
+    assert "event-driven" in two.hints["breakdown"]
+    one = compute_score(30, [], None, None, False, False, 0, None, None, False, 0, False, False)
+    assert "event-driven" not in one.hints["breakdown"]
+    assert "30.0% drawdown" in one.hints["breakdown"]
+
+
+def test_sector_hint_variants():
+    override = compute_score(30, [], 10.0, None, False, False, 0, None, None, False, 0, False, True)
+    assert "override" in override.hints["sector"].lower()
+    no_data = compute_score(30, [], None, None, False, False, 0, None, None, False, 0, False, False)
+    assert "no sector etf data" in no_data.hints["sector"].lower()
+    weak = compute_score(30, [], -5.0, None, False, False, 0, None, None, False, 0, False, False)
+    assert "weak" in weak.hints["sector"].lower()
+    flat = compute_score(30, [], 0.0, None, False, False, 0, None, None, False, 0, False, False)
+    assert "flat" in flat.hints["sector"].lower()
+    healthy = compute_score(30, [], 10.0, None, False, False, 0, None, None, False, 0, False, False)
+    assert "weak" not in healthy.hints["sector"].lower() and "flat" not in healthy.hints["sector"].lower()
+
+
+def test_technical_hint_variants():
+    insufficient = compute_score(30, [], None, None, False, False, 0, None, None, False, 0, False, False)
+    assert "insufficient" in insufficient.hints["technical"].lower()
+    strong = compute_score(30, [], None, 30.0, True, True, 0, None, None, False, 0, False, False)
+    assert "volume drying" in strong.hints["technical"] and "obv turning up" in strong.hints["technical"].lower()
+    weak = compute_score(30, [], None, 38.0, False, False, 0, None, None, False, 0, False, False)
+    assert "oversold zone" in weak.hints["technical"]
+    neutral = compute_score(30, [], None, 50.0, False, False, 0, None, None, False, 0, False, False)
+    assert "not yet oversold" in neutral.hints["technical"]
+
+
+def test_value_hint_variants():
+    sanity = compute_score(30, [], None, None, False, False, 0, 70.0, None, False, 0, False, False)
+    assert "sanity check failed" in sanity.hints["value"].lower()
+    assert "pe 70.0" in sanity.hints["value"].lower()
+    below = compute_score(30, [], None, None, False, False, 10.0, None, None, False, 0, False, False)
+    assert "below 25% threshold" in below.hints["value"]
+    good = compute_score(30, [], None, None, False, False, 45.0, None, None, False, 0, False, False)
+    assert "below 25% threshold" not in good.hints["value"]
+    assert "+45.0%" in good.hints["value"]
+
+
+def test_catalyst_hint_variants():
+    buying = compute_score(30, [], None, None, False, False, 0, None, None, True, 0, False, False)
+    assert "insider buying" in buying.hints["catalyst"].lower()
+    upgrades = compute_score(30, [], None, None, False, False, 0, None, None, False, 3, False, False)
+    assert "3 analyst upgrade(s)" in upgrades.hints["catalyst"]
+    neither = compute_score(30, [], None, None, False, False, 0, None, None, False, 0, False, False)
+    assert "no insider buying or analyst upgrades" in neither.hints["catalyst"].lower()
+
+
+# ─── compute_value_dislocation ───────────────────────────────────────────────
+
+def test_value_dislocation_sanity_check_flag():
+    triggered_pe = compute_value_dislocation(70.0, None, 10.0)
+    assert triggered_pe.sanityCheckTriggered is True
+    triggered_ps = compute_value_dislocation(None, 30.0, 10.0)
+    assert triggered_ps.sanityCheckTriggered is True
+    clean = compute_value_dislocation(20.0, 5.0, 45.0)
+    assert clean.sanityCheckTriggered is False
+    assert clean.peRatio == 20.0
+    assert clean.priceToSales == 5.0
+    assert clean.analystUpsidePct == 45.0
+
+
+# ─── assemble_submit_result — Catalyst Pipeline signal / Value Dislocation ───
+
+def test_submit_format_a_catalyst_pipeline_carries_insider_signal_and_upgrade_count():
+    req = ContrarianComebackSubmitRequest(**_submit_data(breakdownTypes=["event"]))
+    result = assemble_submit_result(req)
+    assert result.format == "A"
+    assert result.catalystPipeline.insiderSignal in ("Net Buying", "Net Selling", "Neutral")
+    assert result.catalystPipeline.analystUpgrades90d == 0  # no grades in the base fixture
+
+
+def test_submit_format_a_includes_value_dislocation():
+    req = ContrarianComebackSubmitRequest(**_submit_data(breakdownTypes=["event"]))
+    result = assemble_submit_result(req)
+    assert result.format == "A"
+    assert result.valueDislocation is not None
+
+
+def test_submit_format_b_leaves_value_dislocation_null():
+    req = ContrarianComebackSubmitRequest(**_submit_data(catalystAnswer="no"))
+    result = assemble_submit_result(req)
+    assert result.format == "B"
+    assert result.valueDislocation is None

@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
+import { useApiKeysModal } from '../lib/apiKeysModal';
+import { useIncomingTicker } from '../lib/tickerHandoff';
 import {
   useContrarianComebackGate,
   useContrarianComebackSubmit,
@@ -10,9 +11,13 @@ import {
   type CatalystPipeline,
   type StagedEntry,
   type RecoveryTargets,
+  type ValueDislocation,
+  type ScoreBreakdown,
+  type InsiderTrade,
 } from '../api/contrarianComeback';
 import { ApiError } from '../api/client';
 import StockPreviewChart from '../components/StockPreviewChart';
+import { formatCompactCurrency } from '../lib/format';
 
 const BREAKDOWN_TYPES: { value: string; label: string; desc: string; tier: 'green' | 'yellow' | 'red' }[] = [
   { value: 'event', label: 'Event-Driven', tier: 'green', desc: 'CEO crisis, regulatory probe, PR shock, cyberattack, one-off miss' },
@@ -44,6 +49,16 @@ const VERDICT_STYLES: Record<string, string> = {
   MODERATE: 'bg-warning/10 text-warning',
   SPECULATIVE: 'bg-warning/10 text-warning',
   AVOID: 'bg-danger/10 text-danger',
+};
+
+// Solid (non-tinted) variant of the same verdict tiers, for the Contra Score
+// badge - dark green for a strong score fading to red for a weak one, same
+// success/warning/danger tokens VERDICT_STYLES uses so the two stay in sync.
+const SCORE_BADGE_STYLES: Record<string, string> = {
+  HIGH: 'bg-success text-white',
+  MODERATE: 'bg-warning text-white',
+  SPECULATIVE: 'bg-warning text-white',
+  AVOID: 'bg-danger text-white',
 };
 
 const TIER_PILL_STYLES: Record<string, string> = {
@@ -230,7 +245,7 @@ function FundamentalHealthCard({ health }: { health: FundamentalHealth }) {
   const rows: { label: string; metric: FundamentalMetric; display: string }[] = [
     { label: 'Debt-to-Equity', metric: health.debtToEquity, display: metricDisplay(health.debtToEquity, (v) => `${v.toFixed(1)}×`) },
     { label: 'Current Ratio', metric: health.currentRatio, display: metricDisplay(health.currentRatio, (v) => `${v.toFixed(1)}×`) },
-    { label: 'Free Cash Flow', metric: health.freeCashFlow, display: metricDisplay(health.freeCashFlow, fmt$) },
+    { label: 'Free Cash Flow', metric: health.freeCashFlow, display: metricDisplay(health.freeCashFlow, formatCompactCurrency) },
     { label: 'Revenue Growth (YoY)', metric: health.revenueGrowthPct, display: metricDisplay(health.revenueGrowthPct, (v) => fmtPct(v)) },
     { label: 'Gross Margin', metric: health.grossMarginPct, display: metricDisplay(health.grossMarginPct, (v) => `${v.toFixed(1)}%`) },
     {
@@ -262,6 +277,37 @@ function FundamentalHealthCard({ health }: { health: FundamentalHealth }) {
   );
 }
 
+// Which side of the insider-buying signal a trade falls on - mirrors the
+// exact classification analyze_insiders() uses server-side (see plan), so
+// the highlighted rows visually match the aggregate signal shown above them.
+function insiderTone(t: InsiderTrade): 'buy' | 'sell' | 'neutral' {
+  const tp = (t.transactionType ?? '').toLowerCase();
+  const ad = (t.acquisitionOrDisposition ?? '').toUpperCase();
+  if (tp.includes('purchase') || ad === 'A') return 'buy';
+  if (tp.includes('sale') || ad === 'D') return 'sell';
+  return 'neutral';
+}
+
+// SEC Form 4 Table I transaction codes, as FMP passes them through
+// ("{code}-{label}", e.g. "M-Exempt", "F-InKind") - one line per code so the
+// tooltip explains only the specific code on that row, not the full list.
+const INSIDER_TYPE_CODES: Record<string, string> = {
+  P: 'Open-market purchase - the insider bought shares with their own money, a genuine bullish signal.',
+  S: 'Open-market sale - the insider sold shares, which can be routine (e.g. diversification) or bearish depending on size/context.',
+  A: 'Award/grant - new shares granted by the company (e.g. RSU vesting), not a market transaction and not a buy/sell signal.',
+  D: 'Disposition back to the issuer - shares returned to the company, not an open-market trade.',
+  F: 'Shares withheld "in kind" to cover taxes or an option\'s exercise cost - a routine administrative transaction, not a buy/sell decision.',
+  M: 'Exercise of a previously granted option/derivative - converts an existing grant into shares, often followed by an immediate sale; not a fresh open-market purchase.',
+  G: 'Bona fide gift of securities - a transfer, not a market transaction.',
+  C: 'Conversion of a derivative security into common stock - not an open-market trade.',
+};
+
+function insiderTypeTooltip(transactionType: string | null): string {
+  if (!transactionType) return 'SEC Form 4 transaction code.';
+  const code = transactionType.split('-')[0]?.trim().toUpperCase();
+  return INSIDER_TYPE_CODES[code] ?? `SEC Form 4 transaction code "${transactionType}".`;
+}
+
 function CatalystPipelineCard({ pipeline }: { pipeline: CatalystPipeline }) {
   const [showAllNews, setShowAllNews] = useState(false);
   const visibleNews = showAllNews ? pipeline.news : pipeline.news.slice(0, 5);
@@ -269,6 +315,18 @@ function CatalystPipelineCard({ pipeline }: { pipeline: CatalystPipeline }) {
   return (
     <div className="rounded-card bg-bg-card p-4 shadow-card">
       <h2 className="mb-3 text-sm font-semibold text-text-primary">Catalyst Pipeline</h2>
+
+      {/* Summary tying this card back to the actual catalyst score - the
+          aggregate signal/count used to compute it, not just raw rows. */}
+      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-btn bg-bg-primary px-3 py-2 text-sm">
+        <span className="text-text-secondary">Insider signal:</span>
+        <span className={`font-semibold ${pipeline.insiderSignal === 'Net Buying' ? 'text-success' : pipeline.insiderSignal === 'Net Selling' ? 'text-danger' : 'text-text-secondary'}`}>
+          {pipeline.insiderSignal}
+        </span>
+        <span className="text-text-muted">·</span>
+        <span className="text-text-secondary">{pipeline.analystUpgrades90d} analyst upgrade(s) (90d)</span>
+      </div>
+
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div>
           <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Recent News</p>
@@ -305,14 +363,22 @@ function CatalystPipelineCard({ pipeline }: { pipeline: CatalystPipeline }) {
                 </tr>
               </thead>
               <tbody className="text-text-secondary">
-                {pipeline.recentInsiderTrades.map((t, i) => (
-                  <tr key={i} className="border-t border-border">
-                    <td className="py-1">{t.transactionDate ?? '—'}</td>
-                    <td className="py-1">{t.reportingName ?? '—'}</td>
-                    <td className="py-1">{t.transactionType ?? '—'}</td>
-                    <td className="py-1 text-right">{t.securitiesTransacted != null ? t.securitiesTransacted.toLocaleString() : '—'}</td>
-                  </tr>
-                ))}
+                {pipeline.recentInsiderTrades.map((t, i) => {
+                  const tone = insiderTone(t);
+                  return (
+                    <tr key={i} className="border-t border-border">
+                      <td className="py-1">{t.transactionDate ?? '—'}</td>
+                      <td className="py-1">{t.reportingName ?? '—'}</td>
+                      <td
+                        className={`py-1 cursor-help font-medium underline decoration-dotted ${tone === 'buy' ? 'text-success' : tone === 'sell' ? 'text-danger' : ''}`}
+                        title={insiderTypeTooltip(t.transactionType)}
+                      >
+                        {t.transactionType ?? '—'}
+                      </td>
+                      <td className="py-1 text-right">{t.securitiesTransacted != null ? t.securitiesTransacted.toLocaleString() : '—'}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           ) : (
@@ -332,7 +398,7 @@ function CatalystPipelineCard({ pipeline }: { pipeline: CatalystPipeline }) {
                   <tr key={i} className="border-t border-border">
                     <td className="py-1">{g.date ?? '—'}</td>
                     <td className="py-1">{g.gradingCompany ?? '—'}</td>
-                    <td className="py-1">{g.action ?? '—'}</td>
+                    <td className={`py-1 font-medium ${g.action === 'upgrade' ? 'text-success' : g.action === 'downgrade' ? 'text-danger' : ''}`}>{g.action ?? '—'}</td>
                     <td className="py-1">{g.newGrade ?? '—'}</td>
                   </tr>
                 ))}
@@ -497,101 +563,210 @@ function InvalidationChecklistCard({ etfSymbol }: { etfSymbol: string | null }) 
   );
 }
 
+const SCORE_COMPONENT_LABELS: Record<string, string> = {
+  breakdown: 'Breakdown severity & type', sector: 'Sector health', technical: 'Technical exhaustion',
+  value: 'Value dislocation', catalyst: 'Catalyst pipeline',
+};
+
+function ContrarianScoreCard({ score }: { score: ScoreBreakdown }) {
+  return (
+    <div className="rounded-card bg-bg-card p-4 shadow-card">
+      <h2 className="mb-3 text-sm font-semibold text-text-primary">Contrarian Score</h2>
+      <div className="flex flex-col gap-3">
+        {(['breakdown', 'sector', 'technical', 'value', 'catalyst'] as const).map((key) => (
+          <div key={key}>
+            <div className="flex justify-between text-sm">
+              <span className="text-text-secondary">{SCORE_COMPONENT_LABELS[key]}</span>
+              <span className="font-semibold text-text-primary">{score[key]}/2</span>
+            </div>
+            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-border">
+              <div className="h-1.5 rounded-full bg-accent" style={{ width: `${(score[key] / 2) * 100}%` }} />
+            </div>
+            {/* The "why" behind this factor's score - ported from the source
+                app's compHints, never surfaced in this port until now. */}
+            {score.hints[key] && <p className="mt-1 text-xs text-text-muted">{score.hints[key]}</p>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ValueDislocationCard({ vd }: { vd: ValueDislocation }) {
+  const upsideBand = vd.sanityCheckTriggered
+    ? { label: 'Value score forced to 0', tier: 'red' as const }
+    : vd.analystUpsidePct > 40
+      ? { label: 'Qualifies for 2/2 (>40%)', tier: 'green' as const }
+      : vd.analystUpsidePct > 25
+        ? { label: 'Qualifies for 1/2 (>25%)', tier: 'yellow' as const }
+        : { label: 'Below threshold (≤25%)', tier: null };
+
+  return (
+    <div className="rounded-card bg-bg-card p-4 shadow-card">
+      <h2 className="mb-3 text-sm font-semibold text-text-primary">Value Dislocation</h2>
+      <div className="flex flex-col divide-y divide-border">
+        <div className="flex items-center justify-between py-2 text-sm">
+          <span className="text-text-secondary">Trailing P/E</span>
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-text-primary">{vd.peRatio != null ? `${vd.peRatio.toFixed(1)}×` : '—'}</span>
+            {vd.peRatio != null && (
+              <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${vd.peRatio > 60 ? TIER_PILL_STYLES.red : TIER_PILL_STYLES.green}`}>
+                {vd.peRatio > 60 ? 'High (>60)' : 'OK'}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center justify-between py-2 text-sm">
+          <span className="text-text-secondary">Price/Sales</span>
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-text-primary">{vd.priceToSales != null ? `${vd.priceToSales.toFixed(1)}×` : '—'}</span>
+            {vd.priceToSales != null && (
+              <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${vd.priceToSales > 25 ? TIER_PILL_STYLES.red : TIER_PILL_STYLES.green}`}>
+                {vd.priceToSales > 25 ? 'High (>25)' : 'OK'}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center justify-between py-2 text-sm">
+          <span className="text-text-secondary">Analyst Upside</span>
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-text-primary">{fmtPct(vd.analystUpsidePct)}</span>
+            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${upsideBand.tier ? TIER_PILL_STYLES[upsideBand.tier] : 'bg-border text-text-secondary'}`}>
+              {upsideBand.label}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Shared between the top ticker-form card (once a result exists) and nowhere
+// else - symbol/company/sector, headline stats, and verdict badges. Split
+// out so ContrarianComebackPage can render it next to the ticker form,
+// matching Long-Term Analysis's own top-card layout.
+function HeaderStats({ result }: { result: ContrarianComebackSubmitResult }) {
+  const score = result.score;
+  return (
+    <div className="flex-1 border-t border-border pt-4 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xl font-bold text-text-primary">{result.symbol}</p>
+          <p className="text-sm text-text-secondary">{result.companyName} {result.exchange ? `· ${result.exchange}` : ''}</p>
+          <p className="text-xs text-text-muted">{result.sector}</p>
+        </div>
+        <div className="flex gap-6 text-right">
+          <div>
+            <p className="text-lg font-semibold text-text-primary">{fmt$(result.price)}</p>
+            <p className="text-xs text-text-muted">Current Price</p>
+          </div>
+          <div>
+            <p className="text-lg font-semibold text-danger">-{result.drawdownPct?.toFixed(1)}%</p>
+            <p className="text-xs text-text-muted">Max Drawdown</p>
+          </div>
+          {score && (
+            <div className={`rounded-btn px-3 py-1.5 text-center ${SCORE_BADGE_STYLES[score.verdict]}`}>
+              <p className="text-lg font-semibold">{score.total}/10</p>
+              <p className="text-xs opacity-80">Contra Score</p>
+            </div>
+          )}
+        </div>
+      </div>
+      {score && (
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <span className={`inline-flex rounded-full px-3 py-1 text-sm font-semibold ${VERDICT_STYLES[score.verdict]}`}>{score.verdict}</span>
+          {score.hybridCapActive && <span className="text-xs text-warning">Cap rule: hybrid breakdown (7/10 max)</span>}
+          {score.sectorOverrideCapActive && <span className="text-xs text-warning">⚠ Sector Override active (6/10 max)</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ResultCard({ result }: { result: ContrarianComebackSubmitResult }) {
   if (result.format === 'B') {
     return <RejectionCard failedCheck={result.failedCheck} reason={result.reason} route={result.route} />;
   }
 
   const score = result.score;
-  const componentLabels: Record<string, string> = {
-    breakdown: 'Breakdown severity & type', sector: 'Sector health', technical: 'Technical exhaustion',
-    value: 'Value dislocation', catalyst: 'Catalyst pipeline',
-  };
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="rounded-card border-2 border-accent/40 bg-bg-card p-4 shadow-card">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="text-xl font-bold text-text-primary">{result.symbol}</p>
-            <p className="text-sm text-text-secondary">{result.companyName} {result.exchange ? `· ${result.exchange}` : ''}</p>
-            <p className="text-xs text-text-muted">{result.sector}</p>
-          </div>
-          <div className="flex gap-6 text-right">
-            <div>
-              <p className="text-lg font-semibold text-text-primary">{fmt$(result.price)}</p>
-              <p className="text-xs text-text-muted">Current Price</p>
+      {/* Section 1: Contrarian Score + Fundamental Health, side by side on md+.
+          Header stats now live in the top ticker-form card (see HeaderStats). */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {score && <ContrarianScoreCard score={score} />}
+        {result.fundamentalHealth && <FundamentalHealthCard health={result.fundamentalHealth} />}
+      </div>
+
+      {/* Section 2: Value Dislocation + Technical Indicators, side by side on md+. */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {result.valueDislocation && <ValueDislocationCard vd={result.valueDislocation} />}
+
+        {(result.technicals || result.fibonacci) && (
+          <div className="rounded-card bg-bg-card p-4 shadow-card">
+            <h2 className="mb-3 text-sm font-semibold text-text-primary">Technical Indicators</h2>
+            <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
+              {result.technicals && (
+                <>
+                  <div><p className="text-xs text-text-muted">Weekly RSI (14)</p><p className="font-semibold text-text-primary">{result.technicals.weeklyRsi != null ? result.technicals.weeklyRsi.toFixed(1) : '—'}</p></div>
+                  <div><p className="text-xs text-text-muted">OBV Trend</p><p className="font-semibold text-text-primary">{result.technicals.obvTrend}</p></div>
+                  <div>
+                    <p className="text-xs text-text-muted">Volume Trend</p>
+                    <p className="font-semibold text-text-primary">
+                      {result.technicals.volumeDrying ? 'Drying up' : 'Elevated'}
+                      {result.technicals.volumeRatioPct != null && (
+                        <span className="ml-1 text-xs font-normal text-text-muted">({result.technicals.volumeRatioPct.toFixed(0)}% of prior 4wk)</span>
+                      )}
+                    </p>
+                  </div>
+                  <div><p className="text-xs text-text-muted">200-Week SMA</p><p className="font-semibold text-text-primary">{fmt$(result.technicals.sma200w)}</p></div>
+                  <div>
+                    <p className="text-xs text-text-muted">
+                      Volume Climax{' '}
+                      <span
+                        className="cursor-help"
+                        title={
+                          result.technicals.volumeClimax
+                            ? "A single week's volume spiked to 2x+ the surrounding average - often capitulation selling near a bottom, a classic sign a decline is exhausting itself."
+                            : `No single week spiked to 2x+ the surrounding average - current volume is ${result.technicals.volumeDrying ? 'drying up' : 'elevated'}${result.technicals.volumeRatioPct != null ? ` at ${result.technicals.volumeRatioPct.toFixed(0)}% of the prior 4-week average` : ''}, not a climax event.`
+                        }
+                      >
+                        ⓘ
+                      </span>
+                    </p>
+                    <p className={`font-semibold ${result.technicals.volumeClimax ? 'text-warning' : 'text-text-primary'}`}>
+                      {result.technicals.volumeClimax ? 'Spike detected ⚠' : 'None detected'}
+                    </p>
+                  </div>
+                </>
+              )}
+              {result.fibonacci && (
+                <>
+                  <div><p className="text-xs text-text-muted">Fibonacci 38.2%</p><p className="font-semibold text-text-primary">{fmt$(result.fibonacci.fib382)}</p></div>
+                  <div><p className="text-xs text-text-muted">Fibonacci 61.8%</p><p className="font-semibold text-text-primary">{fmt$(result.fibonacci.fib618)}</p></div>
+                  <div><p className="text-xs text-text-muted">Full Recovery (ATH)</p><p className="font-semibold text-text-primary">{fmt$(result.fibonacci.fib100)}</p></div>
+                </>
+              )}
             </div>
-            <div>
-              <p className="text-lg font-semibold text-danger">-{result.drawdownPct?.toFixed(1)}%</p>
-              <p className="text-xs text-text-muted">Max Drawdown</p>
-            </div>
-            {score && (
-              <div>
-                <p className="text-lg font-semibold text-text-primary">{score.total}/10</p>
-                <p className="text-xs text-text-muted">Contra Score</p>
-              </div>
-            )}
-          </div>
-        </div>
-        {score && (
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <span className={`inline-flex rounded-full px-3 py-1 text-sm font-semibold ${VERDICT_STYLES[score.verdict]}`}>{score.verdict}</span>
-            {score.hybridCapActive && <span className="text-xs text-warning">Cap rule: hybrid breakdown (7/10 max)</span>}
-            {score.sectorOverrideCapActive && <span className="text-xs text-warning">⚠ Sector Override active (6/10 max)</span>}
           </div>
         )}
       </div>
 
-      {score && (
-        <div className="rounded-card bg-bg-card p-4 shadow-card">
-          <h2 className="mb-3 text-sm font-semibold text-text-primary">Contrarian Score</h2>
-          <div className="flex flex-col gap-3">
-            {(['breakdown', 'sector', 'technical', 'value', 'catalyst'] as const).map((key) => (
-              <div key={key}>
-                <div className="flex justify-between text-sm">
-                  <span className="text-text-secondary">{componentLabels[key]}</span>
-                  <span className="font-semibold text-text-primary">{score[key]}/2</span>
-                </div>
-                <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-border">
-                  <div className="h-1.5 rounded-full bg-accent" style={{ width: `${(score[key] / 2) * 100}%` }} />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {(result.technicals || result.fibonacci) && (
-        <div className="rounded-card bg-bg-card p-4 shadow-card">
-          <h2 className="mb-3 text-sm font-semibold text-text-primary">Technical Indicators</h2>
-          <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
-            {result.technicals && (
-              <>
-                <div><p className="text-xs text-text-muted">Weekly RSI (14)</p><p className="font-semibold text-text-primary">{result.technicals.weeklyRsi != null ? result.technicals.weeklyRsi.toFixed(1) : '—'}</p></div>
-                <div><p className="text-xs text-text-muted">OBV Trend</p><p className="font-semibold text-text-primary">{result.technicals.obvTrend}</p></div>
-                <div><p className="text-xs text-text-muted">Volume Trend</p><p className="font-semibold text-text-primary">{result.technicals.volumeDrying ? 'Drying up' : 'Elevated'}</p></div>
-                <div><p className="text-xs text-text-muted">200-Week SMA</p><p className="font-semibold text-text-primary">{fmt$(result.technicals.sma200w)}</p></div>
-              </>
-            )}
-            {result.fibonacci && (
-              <>
-                <div><p className="text-xs text-text-muted">Fibonacci 38.2%</p><p className="font-semibold text-text-primary">{fmt$(result.fibonacci.fib382)}</p></div>
-                <div><p className="text-xs text-text-muted">Fibonacci 61.8%</p><p className="font-semibold text-text-primary">{fmt$(result.fibonacci.fib618)}</p></div>
-                <div><p className="text-xs text-text-muted">Full Recovery (ATH)</p><p className="font-semibold text-text-primary">{fmt$(result.fibonacci.fib100)}</p></div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {result.fundamentalHealth && <FundamentalHealthCard health={result.fundamentalHealth} />}
+      {/* Section 3: Catalyst Pipeline, standalone full-width (already has its own internal split). */}
       {result.catalystPipeline && <CatalystPipelineCard pipeline={result.catalystPipeline} />}
-      <ValueTrapChecklist />
 
-      {result.stagedEntry && <StagedEntryCard stagedEntry={result.stagedEntry} />}
-      {result.recoveryTargets && <RecoveryTargetsCard targets={result.recoveryTargets} />}
-      <InvalidationChecklistCard etfSymbol={result.etfSymbol} />
+      {/* Section 4: Staged Entry Plan + Recovery Targets, side by side on md+. */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {result.stagedEntry && <StagedEntryCard stagedEntry={result.stagedEntry} />}
+        {result.recoveryTargets && <RecoveryTargetsCard targets={result.recoveryTargets} />}
+      </div>
+
+      {/* Section 5: Value Trap Check + Thesis Invalidation, side by side on md+. */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <ValueTrapChecklist />
+        <InvalidationChecklistCard etfSymbol={result.etfSymbol} />
+      </div>
 
       <p className="text-center text-xs text-text-muted">
         ⚠️ This analysis is for informational and educational purposes only. It does not constitute financial advice.
@@ -615,16 +790,25 @@ export default function ContrarianComebackPage() {
     setBreakdownTypes((prev) => (prev.includes(value) ? prev.filter((t) => t !== value) : [...prev, value]));
   }
 
-  function handleCheckEligibility(e: FormEvent) {
-    e.preventDefault();
-    if (!ticker.trim()) return;
+  function runGate(symbol: string) {
     setBreakdownTypes([]);
     setCatalystAnswer('');
     setCheck3Override(false);
     setCheck3OverrideReason('');
     submit.reset();
-    gate.mutate(ticker.trim().toUpperCase());
+    gate.mutate(symbol);
   }
+
+  function handleCheckEligibility(e: FormEvent) {
+    e.preventDefault();
+    if (!ticker.trim()) return;
+    runGate(ticker.trim().toUpperCase());
+  }
+
+  useIncomingTicker('contrarian-comeback', (symbol) => {
+    setTicker(symbol);
+    runGate(symbol);
+  });
 
   function handleConfirm(e: FormEvent) {
     e.preventDefault();
@@ -640,33 +824,36 @@ export default function ContrarianComebackPage() {
 
   const missingKeyError = (gate.isError && gate.error instanceof ApiError && gate.error.status === 503)
     || (submit.isError && submit.error instanceof ApiError && submit.error.status === 503);
+  const apiKeysModal = useApiKeysModal();
 
   return (
-    <div className="min-h-screen bg-bg-primary">
-      <header className="flex items-center justify-between border-b border-border bg-bg-secondary px-4 py-4 shadow-card sm:px-6">
-        <h1 className="text-lg font-semibold text-text-primary">Contrarian Comeback Analysis</h1>
-        <Link to="/" className="text-sm text-accent hover:underline">Back to dashboard</Link>
-      </header>
-
+    <>
       <main className="flex flex-col gap-6 p-4 sm:p-6">
-        <form onSubmit={handleCheckEligibility} className="flex flex-wrap items-end gap-3 rounded-card bg-bg-card p-4 shadow-card">
-          <label className="flex flex-col gap-1 text-sm text-text-secondary">
-            Ticker
-            <input
-              value={ticker}
-              onChange={(e) => setTicker(e.target.value)}
-              placeholder="AAPL"
-              className="w-32 rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-text-primary"
-            />
-          </label>
-          <button
-            type="submit"
-            disabled={gate.isPending}
-            className="rounded-btn bg-accent px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
-          >
-            {gate.isPending ? 'Checking…' : 'Check Eligibility'}
-          </button>
-        </form>
+        {/* Ticker entry + header stats, side by side once a result exists -
+            matches Long-Term Analysis's top-card layout (form + summary in
+            one card instead of two stacked ones). */}
+        <div className="flex flex-col gap-4 rounded-card bg-bg-card p-4 shadow-card lg:flex-row lg:items-start">
+          <form onSubmit={handleCheckEligibility} className="flex flex-wrap items-end gap-3 lg:flex-none">
+            <label className="flex flex-col gap-1 text-sm text-text-secondary">
+              Ticker
+              <input
+                value={ticker}
+                onChange={(e) => setTicker(e.target.value)}
+                placeholder="AAPL"
+                className="w-32 rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-text-primary"
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={gate.isPending}
+              className="rounded-btn bg-accent px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
+            >
+              {gate.isPending ? 'Checking…' : 'Check Eligibility'}
+            </button>
+          </form>
+
+          {submit.data && submit.data.format === 'A' && <HeaderStats result={submit.data} />}
+        </div>
 
         {!gate.data && !gate.isPending && !gate.isError && (
           <div className="rounded-card bg-bg-card p-4 shadow-card text-sm text-text-secondary">
@@ -675,7 +862,7 @@ export default function ContrarianComebackPage() {
               company viability, and a genuine recovery catalyst) before scoring it 0-10 on breakdown severity,
               sector health, technical exhaustion, value dislocation, and catalyst pipeline.
             </p>
-            <p className="mt-2">Requires an FMP API key on file — add one on the <Link to="/subscriptions" className="text-accent hover:underline">API Keys</Link> page.</p>
+            <p className="mt-2">Requires an FMP API key on file — <button type="button" onClick={apiKeysModal.open} className="text-accent hover:underline">add one under API Keys</button>.</p>
           </div>
         )}
 
@@ -688,7 +875,7 @@ export default function ContrarianComebackPage() {
             </p>
             {missingKeyError && (
               <p className="mt-1">
-                <Link to="/subscriptions" className="text-accent hover:underline">Add your FMP API key</Link> to run an analysis.
+                <button type="button" onClick={apiKeysModal.open} className="text-accent hover:underline">Add your FMP API key</button> to run an analysis.
               </p>
             )}
           </div>
@@ -727,6 +914,6 @@ export default function ContrarianComebackPage() {
       </main>
 
       {previewSymbol && <StockPreviewChart symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />}
-    </div>
+    </>
   );
 }

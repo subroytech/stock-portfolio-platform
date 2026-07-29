@@ -13,6 +13,7 @@ import type {
   CatalystPipeline,
   StagedEntry,
   RecoveryTargets,
+  ValueDislocation,
 } from '../api/contrarianComeback';
 
 function renderPage() {
@@ -70,6 +71,18 @@ function baseCatalystPipeline(overrides: Partial<CatalystPipeline> = {}): Cataly
     recentInsiderTrades: [],
     recentGrades: [],
     news: [],
+    insiderSignal: 'Neutral',
+    analystUpgrades90d: 0,
+    ...overrides,
+  };
+}
+
+function baseValueDislocation(overrides: Partial<ValueDislocation> = {}): ValueDislocation {
+  return {
+    peRatio: 22.5,
+    priceToSales: 4.2,
+    analystUpsidePct: 29.1,
+    sanityCheckTriggered: false,
     ...overrides,
   };
 }
@@ -120,13 +133,19 @@ function baseSubmit(overrides: Partial<ContrarianComebackSubmitResult> = {}): Co
     score: {
       breakdown: 1, sector: 2, technical: 0, value: 1, catalyst: 0, total: 4,
       verdict: 'SPECULATIVE', hybridCapActive: false, sectorOverrideCapActive: false,
+      hints: {
+        breakdown: '30.0% drawdown', sector: 'Sector ETF +3.0% over 6 months',
+        technical: 'Weekly RSI 38.0 — not yet oversold', value: 'Analyst upside +29.1%',
+        catalyst: 'No insider buying or analyst upgrades detected (90d)',
+      },
     },
-    technicals: { weeklyRsi: 38, obvTrend: 'flat', volumeDrying: false, sma200w: 140 },
+    technicals: { weeklyRsi: 38, obvTrend: 'flat', volumeDrying: false, sma200w: 140, volumeRatioPct: 105, volumeClimax: false },
     fibonacci: { swingLow: 100, athPrice: 200, fib382: 138, fib618: 162, fib100: 200 },
     fundamentalHealth: baseFundamentalHealth(),
     catalystPipeline: baseCatalystPipeline(),
     stagedEntry: baseStagedEntry(),
     recoveryTargets: baseRecoveryTargets(),
+    valueDislocation: baseValueDislocation(),
     ...overrides,
   };
 }
@@ -244,14 +263,14 @@ describe('ContrarianComebackPage', () => {
     expect(await screen.findByText('Check 5 — Recovery Catalyst')).toBeInTheDocument();
   });
 
-  test('missing FMP key shows a 503 message with a link to add one', async () => {
+  test('missing FMP key shows a 503 message with a button to add one', async () => {
     vi.spyOn(client, 'apiFetch').mockRejectedValue(new ApiError(503, 'No fmp API key on file.', null));
     renderPage();
     await userEvent.type(screen.getByLabelText('Ticker'), 'AAPL');
     await userEvent.click(screen.getByRole('button', { name: /check eligibility/i }));
 
     expect(await screen.findByText('No fmp API key on file.')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /add your fmp api key/i })).toHaveAttribute('href', '/subscriptions');
+    expect(screen.getByRole('button', { name: /add your fmp api key/i })).toBeInTheDocument();
   });
 
   async function runToFormatAResult(submitOverrides: Partial<ContrarianComebackSubmitResult> = {}) {
@@ -292,6 +311,20 @@ describe('ContrarianComebackPage', () => {
       fundamentalHealth: baseFundamentalHealth({ cashRunwayMonths: { value: null, tier: null }, positiveFcf: true }),
     });
     expect(screen.getByText('Positive FCF')).toBeInTheDocument();
+  });
+
+  test('Volume Climax row always renders, showing "None detected" when false', async () => {
+    await runToFormatAResult({
+      technicals: { weeklyRsi: 38, obvTrend: 'flat', volumeDrying: false, sma200w: 140, volumeRatioPct: 105, volumeClimax: false },
+    });
+    expect(screen.getByText('None detected')).toBeInTheDocument();
+  });
+
+  test('Volume Climax row shows "Spike detected" when true', async () => {
+    await runToFormatAResult({
+      technicals: { weeklyRsi: 38, obvTrend: 'flat', volumeDrying: false, sma200w: 140, volumeRatioPct: 210, volumeClimax: true },
+    });
+    expect(screen.getByText(/Spike detected/)).toBeInTheDocument();
   });
 
   test('Catalyst Pipeline news list shows a "show more" toggle beyond 5 headlines', async () => {
@@ -355,5 +388,74 @@ describe('ContrarianComebackPage', () => {
   test('Thesis Invalidation checklist interpolates the mapped sector ETF symbol', async () => {
     await runToFormatAResult({ etfSymbol: 'XLY' });
     expect(screen.getByText(/Sector ETF \(XLY\) breaks into sustained downtrend/)).toBeInTheDocument();
+  });
+
+  test('header stats are absent before any result exists', () => {
+    vi.spyOn(client, 'apiFetch').mockResolvedValue(baseGate());
+    renderPage();
+    expect(screen.queryByText('Current Price')).not.toBeInTheDocument();
+  });
+
+  test('header stats render next to the ticker form once a Format A result exists', async () => {
+    await runToFormatAResult();
+    expect(screen.getByText('Current Price')).toBeInTheDocument();
+    expect(screen.getByText('AAPL')).toBeInTheDocument();
+  });
+
+  test('Contrarian Score shows a "why" hint line under each factor', async () => {
+    await runToFormatAResult();
+    expect(screen.getByText('30.0% drawdown')).toBeInTheDocument();
+    expect(screen.getByText('Sector ETF +3.0% over 6 months')).toBeInTheDocument();
+    expect(screen.getByText('Weekly RSI 38.0 — not yet oversold')).toBeInTheDocument();
+    expect(screen.getByText('Analyst upside +29.1%')).toBeInTheDocument();
+    expect(screen.getByText('No insider buying or analyst upgrades detected (90d)')).toBeInTheDocument();
+  });
+
+  test('Value Dislocation shows PE/PS/upside with the correct qualifying pill', async () => {
+    await runToFormatAResult({ valueDislocation: baseValueDislocation({ peRatio: 22.5, priceToSales: 4.2, analystUpsidePct: 47.3, sanityCheckTriggered: false }) });
+    expect(screen.getByText('22.5×')).toBeInTheDocument();
+    expect(screen.getByText('4.2×')).toBeInTheDocument();
+    expect(screen.getByText('+47.3%')).toBeInTheDocument();
+    expect(screen.getByText('Qualifies for 2/2 (>40%)')).toBeInTheDocument();
+  });
+
+  test('Value Dislocation shows the sanity-check-failed pill when PE is too high', async () => {
+    await runToFormatAResult({ valueDislocation: baseValueDislocation({ peRatio: 71.0, sanityCheckTriggered: true }) });
+    expect(screen.getByText('High (>60)')).toBeInTheDocument();
+    expect(screen.getByText('Value score forced to 0')).toBeInTheDocument();
+  });
+
+  test('Catalyst Pipeline shows the insider signal / upgrade count summary and color-codes rows', async () => {
+    await runToFormatAResult({
+      catalystPipeline: baseCatalystPipeline({
+        insiderSignal: 'Net Buying',
+        analystUpgrades90d: 2,
+        recentInsiderTrades: [
+          { transactionDate: '2026-07-01', transactionType: 'P-Purchase', acquisitionOrDisposition: 'A', securitiesTransacted: 1000, price: 50, reportingName: 'Jane Doe' },
+        ],
+        recentGrades: [
+          { gradingCompany: 'Firm A', newGrade: 'Buy', action: 'upgrade', date: '2026-07-01' },
+        ],
+      }),
+    });
+
+    expect(screen.getByText('Net Buying')).toBeInTheDocument();
+    expect(screen.getByText('2 analyst upgrade(s) (90d)')).toBeInTheDocument();
+    expect(screen.getByText('P-Purchase')).toHaveClass('text-success');
+    expect(screen.getByText('upgrade')).toHaveClass('text-success');
+  });
+
+  test('Insider Activity type cell explains the specific SEC transaction code on hover', async () => {
+    await runToFormatAResult({
+      catalystPipeline: baseCatalystPipeline({
+        recentInsiderTrades: [
+          { transactionDate: '2026-07-01', transactionType: 'M-Exempt', acquisitionOrDisposition: 'A', securitiesTransacted: 500, price: 0, reportingName: 'Jane Doe' },
+          { transactionDate: '2026-07-01', transactionType: 'F-InKind', acquisitionOrDisposition: 'D', securitiesTransacted: 200, price: 50, reportingName: 'Jane Doe' },
+        ],
+      }),
+    });
+
+    expect(screen.getByText('M-Exempt')).toHaveAttribute('title', expect.stringContaining('Exercise of a previously granted option'));
+    expect(screen.getByText('F-InKind')).toHaveAttribute('title', expect.stringContaining('withheld "in kind"'));
   });
 });

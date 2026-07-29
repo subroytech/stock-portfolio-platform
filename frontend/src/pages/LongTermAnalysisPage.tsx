@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
 import { useLongTermAnalysis, type ConvictionResult } from '../api/longTermAnalysis';
 import { ApiError } from '../api/client';
 import { formatCurrency } from '../lib/format';
+import { useIncomingTicker } from '../lib/tickerHandoff';
 import StockPreviewChart from '../components/StockPreviewChart';
 
 const RATING_STYLES: Record<string, string> = {
@@ -65,15 +65,15 @@ export default function LongTermAnalysisPage() {
     analysis.mutate(ticker.trim().toUpperCase());
   }
 
+  useIncomingTicker('long-term-analysis', (symbol) => {
+    setTicker(symbol);
+    analysis.mutate(symbol);
+  });
+
   const data = analysis.data;
 
   return (
-    <div className="min-h-screen bg-bg-primary">
-      <header className="flex items-center justify-between border-b border-border bg-bg-secondary px-4 py-4 shadow-card sm:px-6">
-        <h1 className="text-lg font-semibold text-text-primary">Long-Term Analysis</h1>
-        <Link to="/" className="text-sm text-accent hover:underline">Back to dashboard</Link>
-      </header>
-
+    <>
       <main className="flex flex-col gap-6 p-4 sm:p-6">
         {/* Ticker entry + MT/LT conviction — kept in one card so the
             conviction summary fills the space next to the form instead of
@@ -368,6 +368,6 @@ export default function LongTermAnalysisPage() {
       </main>
 
       {previewSymbol && <StockPreviewChart symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />}
-    </div>
+    </>
   );
 }

@@ -1,10 +1,10 @@
 import { useState, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
 import { useMomentumAnalysis } from '../api/momentum';
 import { useStrengthListCache } from '../api/contrarianFinder';
 import { ApiError } from '../api/client';
 import { calcKellySizing } from '../lib/kelly';
 import { formatCurrency, formatNumber, formatPercent } from '../lib/format';
+import { useTickerHandoff } from '../lib/tickerHandoff';
 import StrengthListTable from '../components/StrengthListTable';
 import StockPreviewChart from '../components/StockPreviewChart';
 
@@ -33,6 +33,7 @@ export default function MomentumPage() {
   // placement of this table inside the Momentum widget, even though a
   // Contrarian Finder scan is what populates it.
   const { data: strengthList = [] } = useStrengthListCache();
+  const { launch } = useTickerHandoff();
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -49,12 +50,7 @@ export default function MomentumPage() {
   const kelly = data ? calcKellySizing(data.rr, capital, data.entryMid, data.score.total) : null;
 
   return (
-    <div className="min-h-screen bg-bg-primary">
-      <header className="flex items-center justify-between border-b border-border bg-bg-secondary px-4 py-4 shadow-card sm:px-6">
-        <h1 className="text-lg font-semibold text-text-primary">Momentum Analysis</h1>
-        <Link to="/" className="text-sm text-accent hover:underline">Back to dashboard</Link>
-      </header>
-
+    <>
       <main className="flex flex-col gap-6 p-4 sm:p-6">
         <form onSubmit={handleSubmit} className="flex flex-wrap items-end gap-3 rounded-card bg-bg-card p-4 shadow-card">
           <label className="flex flex-col gap-1 text-sm text-text-secondary">
@@ -91,6 +87,13 @@ export default function MomentumPage() {
                 {data.signal}
               </span>
               <span className="text-sm text-text-secondary">Score {data.score.total}/10</span>
+              <button
+                type="button"
+                onClick={() => launch('long-term-analysis', analysis.data!.symbol)}
+                className="rounded-btn border border-border px-2 py-1 text-xs font-medium text-text-secondary hover:border-accent hover:text-accent"
+              >
+                Long-Term Analysis
+              </button>
               <span className="ml-auto text-lg font-semibold text-text-primary">{formatCurrency(data.price)}</span>
             </div>
 
@@ -184,12 +187,16 @@ export default function MomentumPage() {
         {strengthList.length > 0 && (
           <div className="flex flex-col gap-3">
             <h2 className="text-sm font-semibold text-text-primary">Strength List (from last Contrarian Finder scan)</h2>
-            <StrengthListTable results={strengthList} onSymbolClick={setPreviewSymbol} />
+            <StrengthListTable
+              results={strengthList}
+              onSymbolClick={setPreviewSymbol}
+              onLongTermAnalysis={(symbol) => launch('long-term-analysis', symbol)}
+            />
           </div>
         )}
       </main>
 
       {previewSymbol && <StockPreviewChart symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />}
-    </div>
+    </>
   );
 }

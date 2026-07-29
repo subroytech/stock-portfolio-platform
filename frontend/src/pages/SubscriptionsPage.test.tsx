@@ -1,19 +1,17 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, test, vi } from 'vitest';
 import * as client from '../api/client';
 import SubscriptionsPage from './SubscriptionsPage';
 
 // A fresh QueryClient per render — the app's shared singleton would leak
 // cached ['subscriptions'] data between these tests.
-function renderPage() {
+function renderPage(onClose: () => void = () => {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
-        <SubscriptionsPage />
-      </MemoryRouter>
+      <SubscriptionsPage onClose={onClose} />
     </QueryClientProvider>,
   );
 }
@@ -36,5 +34,14 @@ describe('SubscriptionsPage', () => {
     });
     renderPage();
     await waitFor(() => expect(screen.getByText(/Key on file: ••••••••wxyz/)).toBeInTheDocument());
+  });
+
+  test('the Close button calls onClose', async () => {
+    vi.spyOn(client, 'apiFetch').mockResolvedValue({ subscriptions: [] });
+    const onClose = vi.fn();
+    renderPage(onClose);
+    await screen.findByText('FMP (Financial Modeling Prep)');
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

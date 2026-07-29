@@ -44,10 +44,10 @@ describe('ContrarianFinderPage', () => {
     sessionStorage.clear();
   });
 
-  test('shows the idle explainer with a link to add an FMP key before any scan runs', () => {
+  test('shows the idle explainer with a button to open the API Keys modal before any scan runs', () => {
     renderPage();
     expect(screen.getByText(/Scans up to 450 stocks/i)).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'API Keys' })).toHaveAttribute('href', '/subscriptions');
+    expect(screen.getByRole('button', { name: /add one under api keys/i })).toBeInTheDocument();
   });
 
   test('Advanced panel is collapsed by default, showing the confirmed defaults once opened', async () => {
@@ -150,12 +150,12 @@ describe('ContrarianFinderPage', () => {
     expect(screen.queryByText(/Last scan used:/)).not.toBeInTheDocument();
   });
 
-  test('missing FMP key shows a 503 message with a link to add one', async () => {
+  test('missing FMP key shows a 503 message with a button to add one', async () => {
     vi.spyOn(client, 'apiFetch').mockRejectedValue(new ApiError(503, 'No fmp API key on file.', null));
     renderPage();
     await userEvent.click(screen.getByRole('button', { name: /run scan/i }));
     expect(await screen.findByText('No fmp API key on file.')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /add your fmp api key/i })).toHaveAttribute('href', '/subscriptions');
+    expect(screen.getByRole('button', { name: /add your fmp api key/i })).toBeInTheDocument();
   });
 
   test('orchestrates multiple batches sequentially and stops at the real totalBatches, not the requested max', async () => {

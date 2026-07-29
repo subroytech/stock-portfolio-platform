@@ -1,7 +1,10 @@
 import { useState, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
 import { useDeleteSubscription, useSubscriptions, useUpsertSubscription } from '../api/subscriptions';
 import { ApiError } from '../api/client';
+
+interface SubscriptionsPageProps {
+  onClose: () => void;
+}
 
 // FMP is required by most features (quotes, contrarian-finder,
 // refresh-prices, momentum, stock-preview, long-term-analysis all resolve
@@ -13,7 +16,7 @@ const PROVIDERS: { id: string; label: string; note: string | null }[] = [
   { id: 'finnhub', label: 'Finnhub', note: 'used by Long-Term Analysis for news' },
 ];
 
-export default function SubscriptionsPage() {
+export default function SubscriptionsPage({ onClose }: SubscriptionsPageProps) {
   const { data: subscriptions, isLoading } = useSubscriptions();
   const upsert = useUpsertSubscription();
   const del = useDeleteSubscription();
@@ -31,13 +34,23 @@ export default function SubscriptionsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-bg-primary">
-      <header className="flex items-center justify-between border-b border-border bg-bg-secondary px-4 py-4 shadow-card sm:px-6">
-        <h1 className="text-lg font-semibold text-text-primary">API Keys</h1>
-        <Link to="/" className="text-sm text-accent hover:underline">Back to dashboard</Link>
-      </header>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={onClose}>
+      <div
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-card bg-bg-card p-6 shadow-card-lg"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <h1 className="text-lg font-semibold text-text-primary">API Keys</h1>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-btn border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-primary"
+          >
+            Close
+          </button>
+        </div>
 
-      <main className="flex flex-col gap-4 p-4 sm:p-6">
+        <div className="flex flex-col gap-4 overflow-y-auto">
         {isLoading && <p className="text-sm text-text-secondary">Loading…</p>}
 
         {PROVIDERS.map((provider) => {
@@ -108,7 +121,8 @@ export default function SubscriptionsPage() {
             </div>
           );
         })}
-      </main>
+        </div>
+      </div>
     </div>
   );
 }
