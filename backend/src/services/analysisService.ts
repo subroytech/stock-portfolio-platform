@@ -6,6 +6,7 @@ import type {
   PeerQuote,
   PriceTarget,
 } from './longTermAnalysisData.service';
+import type { ContrarianComebackData, GradeRecord, InsiderTrade } from './contrarianComebackData.service';
 
 export class AnalysisServiceError extends Error {}
 
@@ -127,4 +128,175 @@ export async function computeLongTermAnalysis(payload: LongTermAnalysisPayload):
   } finally {
     clearTimeout(tid);
   }
+}
+
+// Mirrors analysis-service/app/models/contrarian_comeback.py field-for-field
+// (same hand-maintained-duplicate caveat as the Long-Term Analysis types above).
+export interface ContrarianComebackGateResult {
+  symbol: string;
+  check1Pass: boolean;
+  drawdownPct: number;
+  dd52w: number;
+  dd4y: number;
+  check3Status: 'pass' | 'override_available' | 'hard_block';
+  etfSymbol: string | null;
+  etfReturn6M: number | null;
+  check4Pass: boolean;
+  recentNews: NewsItem[];
+  insiderSignal: string;
+  insiderBuys: number;
+  insiderSells: number;
+  analystUpgrades90d: number;
+  analystDowngrades90d: number;
+  priceTargetAvg: number | null;
+  analystUpsidePct: number | null;
+  failedCheck: string | null;
+  reason: string | null;
+  route: string | null;
+}
+
+export interface ContrarianComebackScoreBreakdown {
+  breakdown: number;
+  sector: number;
+  technical: number;
+  value: number;
+  catalyst: number;
+  total: number;
+  verdict: 'HIGH' | 'MODERATE' | 'SPECULATIVE' | 'AVOID';
+  hybridCapActive: boolean;
+  sectorOverrideCapActive: boolean;
+}
+
+export interface ContrarianComebackWeeklyTechnicals {
+  weeklyRsi: number | null;
+  obvTrend: 'up' | 'down' | 'flat' | 'insufficient_data';
+  volumeDrying: boolean;
+  sma200w: number | null;
+}
+
+export interface ContrarianComebackFibonacciLevels {
+  swingLow: number;
+  athPrice: number;
+  fib382: number;
+  fib618: number;
+  fib100: number;
+}
+
+export interface ContrarianComebackFundamentalMetric {
+  value: number | null;
+  tier: 'green' | 'yellow' | 'red' | null;
+}
+
+export interface ContrarianComebackFundamentalHealth {
+  debtToEquity: ContrarianComebackFundamentalMetric;
+  currentRatio: ContrarianComebackFundamentalMetric;
+  freeCashFlow: ContrarianComebackFundamentalMetric;
+  revenueGrowthPct: ContrarianComebackFundamentalMetric;
+  grossMarginPct: ContrarianComebackFundamentalMetric;
+  cashRunwayMonths: ContrarianComebackFundamentalMetric;
+  positiveFcf: boolean;
+}
+
+export interface ContrarianComebackCatalystPipeline {
+  recentInsiderTrades: InsiderTrade[];
+  recentGrades: GradeRecord[];
+  news: NewsItem[];
+}
+
+export interface ContrarianComebackTrancheEntry {
+  label: string;
+  sizePct: number;
+  priceLow: number;
+  priceHigh: number;
+  trigger: string;
+}
+
+export interface ContrarianComebackStagedEntry {
+  tranches: ContrarianComebackTrancheEntry[];
+  hardStop: number;
+  capLabel: 'Large-Cap' | 'Mid-Cap' | 'Small-Cap';
+  isMidCap: boolean;
+}
+
+export interface ContrarianComebackRecoveryTarget {
+  label: string;
+  horizon: string;
+  price: number;
+  returnPct: number;
+}
+
+export interface ContrarianComebackAnalystConsensusTarget {
+  low: number;
+  high: number;
+  average: number;
+  returnPct: number;
+}
+
+export interface ContrarianComebackRecoveryTargets {
+  conservative: ContrarianComebackRecoveryTarget;
+  baseCase: ContrarianComebackRecoveryTarget;
+  bullCase: ContrarianComebackRecoveryTarget;
+  analystConsensus: ContrarianComebackAnalystConsensusTarget | null;
+  riskRewardRatio: number | null;
+}
+
+export interface ContrarianComebackSubmitResult {
+  symbol: string;
+  format: 'A' | 'B';
+  failedCheck: string | null;
+  reason: string | null;
+  route: string | null;
+  companyName: string | null;
+  sector: string | null;
+  exchange: string | null;
+  price: number | null;
+  drawdownPct: number | null;
+  breakdownTypes: string[];
+  hybridCap: boolean;
+  check3Override: boolean;
+  check3OverrideReason: string | null;
+  etfSymbol: string | null;
+  etfReturn6M: number | null;
+  score: ContrarianComebackScoreBreakdown | null;
+  technicals: ContrarianComebackWeeklyTechnicals | null;
+  fibonacci: ContrarianComebackFibonacciLevels | null;
+  fundamentalHealth: ContrarianComebackFundamentalHealth | null;
+  catalystPipeline: ContrarianComebackCatalystPipeline | null;
+  stagedEntry: ContrarianComebackStagedEntry | null;
+  recoveryTargets: ContrarianComebackRecoveryTargets | null;
+}
+
+export interface ContrarianComebackSubmitPayload extends ContrarianComebackData {
+  breakdownTypes: string[];
+  catalystAnswer: 'yes' | 'no';
+  check3Override: boolean;
+  check3OverrideReason: string | null;
+}
+
+async function postToAnalysisService<T>(path: string, payload: unknown): Promise<T> {
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(`${env.analysisServiceUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new AnalysisServiceError(`Analysis service returned HTTP ${res.status}`);
+    return (await res.json()) as T;
+  } catch (err) {
+    if (err instanceof AnalysisServiceError) throw err;
+    throw new AnalysisServiceError('Analysis service unavailable.');
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
+export function computeContrarianComebackGate(payload: ContrarianComebackData): Promise<ContrarianComebackGateResult> {
+  return postToAnalysisService<ContrarianComebackGateResult>('/contrarian-comeback/gate', payload);
+}
+
+export function computeContrarianComebackSubmit(payload: ContrarianComebackSubmitPayload): Promise<ContrarianComebackSubmitResult> {
+  return postToAnalysisService<ContrarianComebackSubmitResult>('/contrarian-comeback', payload);
 }
