@@ -1,10 +1,20 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn() } }));
+// Partial mock (keeps the real AnalysisServiceError class so `instanceof`
+// checks elsewhere survive) — only computeContrarianFinderScanBatch itself
+// is replaced, same pattern as every other analysisService-consuming test.
+jest.mock('../src/services/analysisService', () => ({
+  ...jest.requireActual('../src/services/analysisService'),
+  computeContrarianFinderScanBatch: jest.fn(),
+}));
 import { pool } from '../src/db/pool';
+import * as analysisService from '../src/services/analysisService';
 import {
   buildBatches, filterCandidates, resolveQuality, assembleUniverse, scanStock, scanBatch,
+  fetchStockData, assembleScanBatch,
 } from '../src/services/contrarianFinder.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
+const mockComputeScanBatch = analysisService.computeContrarianFinderScanBatch as jest.Mock;
 
 // Small fixture standing in for the seeded index_constituent table - enough
 // symbols per index to exercise dedup across tiers (AAPL in both DJ30/XLK)
@@ -232,5 +242,108 @@ describe('scanBatch — sector backfill', () => {
     await scanBatch(stocks, 'key', { minPrice: 10, minMarketCap: 5e9 });
 
     expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('fetchStockData', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+
+  function mockQuoteAndHistory(quote: unknown, historical: unknown) {
+    global.fetch = jest.fn((url: string) => {
+      if (url.includes('historical-price-eod')) {
+        return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(historical) });
+      }
+      return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(quote) });
+    }) as unknown as typeof fetch;
+  }
+
+  test('normalizes a raw FMP quote/history response into RawStockData, with no scoring', async () => {
+    mockQuoteAndHistory(
+      { price: 100, marketCap: 1e10, name: 'Test Co', sector: 'Technology', volume: 1000, avgVolume: 800 },
+      [{ date: '2026-06-20', close: '100.5', low: '99.5' }],
+    );
+    const data = await fetchStockData('TEST', 'key', 7);
+    expect(data.symbol).toBe('TEST');
+    expect(data.quote).toEqual({ price: 100, marketCap: 1e10, name: 'Test Co', sector: 'Technology', volume: 1000, avgVolume: 800 });
+    expect(data.historicalBars).toEqual([{ date: '2026-06-20', close: 100.5, low: 99.5 }]);
+  });
+
+  test('keeps the same bar count even when close/low fail to parse (null, not dropped)', async () => {
+    mockQuoteAndHistory({ price: 100, marketCap: 1e10 }, [{ date: '2026-06-20', close: 'not-a-number', low: null }]);
+    const data = await fetchStockData('BADDATA', 'key', 7);
+    expect(data.historicalBars).toHaveLength(1);
+    expect(data.historicalBars[0]).toEqual({ date: '2026-06-20', close: null, low: null });
+  });
+
+  test('quote is null when the quote fetch fails entirely', async () => {
+    global.fetch = jest.fn((url: string) => (url.includes('historical-price-eod')
+      ? Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve([]) })
+      : Promise.reject(new Error('network error')))) as unknown as typeof fetch;
+    const data = await fetchStockData('NOQUOTE', 'key', 7);
+    expect(data.quote).toBeNull();
+    expect(data.historicalBars).toEqual([]);
+  });
+});
+
+describe('assembleScanBatch', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+
+  beforeEach(() => {
+    mockComputeScanBatch.mockReset();
+    global.fetch = jest.fn().mockResolvedValue({
+      status: 200, ok: true, json: () => Promise.resolve({ price: 100, marketCap: 1e10 }),
+    }) as unknown as typeof fetch;
+  });
+
+  test('sends the whole batch to analysis-service in one call and overlays sector-map fallback + source', async () => {
+    mockQuery.mockResolvedValue({ rows: [{ symbol: 'AAPL', sector: 'Technology' }] });
+    mockComputeScanBatch.mockResolvedValue([
+      { symbol: 'AAPL', filterFail: false, noData: false, changePct: -10, sector: '' },
+      { symbol: 'ZZZZ', filterFail: false, noData: false, changePct: -12, sector: '' },
+    ]);
+
+    const stocks = [
+      { symbol: 'AAPL', tier: 1, source: 'DJ30' },
+      { symbol: 'ZZZZ', tier: 1, source: 'DJ30' },
+    ];
+    const results = await assembleScanBatch(stocks, 'key', { minPrice: 10, minMarketCap: 5e9 });
+
+    expect(mockComputeScanBatch).toHaveBeenCalledTimes(1);
+    expect(results.find((r) => r.symbol === 'AAPL')?.sector).toBe('Technology'); // DB overlay
+    expect(results.find((r) => r.symbol === 'ZZZZ')?.sector).toBeFalsy(); // outside curated set
+    expect(results.every((r) => r.source === 'DJ30')).toBe(true);
+  });
+
+  test('a stock whose FMP calls both fail still gets sent to analysis-service, with a null quote/empty history', async () => {
+    mockQuery.mockResolvedValue({ rows: [] });
+    global.fetch = jest.fn().mockRejectedValue(new Error('network error')) as unknown as typeof fetch;
+    mockComputeScanBatch.mockImplementation(({ stocks: sent }) => Promise.resolve(
+      sent.map((s: { symbol: string }) => ({ symbol: s.symbol, filterFail: true })),
+    ));
+
+    const stocks = [{ symbol: 'DOWN', tier: 1, source: 'TEST' }];
+    await assembleScanBatch(stocks, 'key', { minPrice: 10, minMarketCap: 5e9 });
+
+    expect(mockComputeScanBatch).toHaveBeenCalledTimes(1);
+    const sentStocks = mockComputeScanBatch.mock.calls[0][0].stocks;
+    expect(sentStocks).toEqual([{ symbol: 'DOWN', quote: null, historicalBars: [] }]);
+  });
+
+  test('skips the analysis-service call entirely for an empty batch', async () => {
+    const results = await assembleScanBatch([], 'key', { minPrice: 10, minMarketCap: 5e9 });
+    expect(mockComputeScanBatch).not.toHaveBeenCalled();
+    expect(results).toEqual([]);
+  });
+
+  test('a symbol missing from the analysis-service response falls back to an error result', async () => {
+    mockQuery.mockResolvedValue({ rows: [] });
+    mockComputeScanBatch.mockResolvedValue([]); // Python returned nothing for the one stock sent
+
+    const stocks = [{ symbol: 'DROPPED', tier: 1, source: 'TEST' }];
+    const results = await assembleScanBatch(stocks, 'key', { minPrice: 10, minMarketCap: 5e9 });
+
+    expect(results).toEqual([{ symbol: 'DROPPED', filterFail: true, error: true }]);
   });
 });

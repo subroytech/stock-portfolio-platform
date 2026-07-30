@@ -28,6 +28,7 @@ import env from '../config/env';
 import { pool } from '../db/pool';
 import { fmpGet, HistoricalBar } from './marketData.service';
 import { mwSMA, mwRSI, mwBB } from './momentum.service';
+import * as analysisService from './analysisService';
 
 export const CF_ETF_LIST: string[] = ['XLK', 'XLV', 'XLF', 'XLY', 'XLI', 'XLC', 'XLP', 'XLE', 'XLB', 'XLU', 'XLRE'];
 export const CF_BATCH = 125;
@@ -234,4 +235,103 @@ export function filterCandidates(results: ScanResult[], threshold: number): Scan
   return results
     .filter((r) => !r.filterFail && !r.noData && r.changePct !== undefined && r.changePct <= -threshold)
     .sort((a, b) => (a.changePct as number) - (b.changePct as number));
+}
+
+// ── Python-extraction path (2026-07-29) ─────────────────────────────────────
+// scanStock()/scanBatch() above stay untouched as the rollback path (same
+// precedent as momentum.service.ts's assembleMomentumAnalysis). These new
+// functions split scanStock's fetch (stays here, Node owns all FMP calls)
+// from its scoring (moved to analysis-service/app/scoring/contrarian_finder.py,
+// which reuses the already-ported mw_sma/mw_rsi/mw_bb from momentum.py).
+
+export interface RawQuoteData {
+  price: number | null;
+  marketCap: number | null;
+  name: string | null;
+  sector: string | null;
+  volume: number | null;
+  avgVolume: number | null;
+}
+
+export interface RawHistoricalBar {
+  date: string | null;
+  close: number | null;
+  low: number | null;
+}
+
+export interface RawStockData {
+  symbol: string;
+  quote: RawQuoteData | null;
+  historicalBars: RawHistoricalBar[];
+}
+
+// The FMP-fetch half of today's scanStock() (its two fmpGet calls), with no
+// scoring - just normalizes the raw response into RawStockData. Bars are
+// NOT filtered/dropped here even when close/low fail to parse (kept as
+// null) - the scoring step needs the same array length/order as today's
+// scanStock for its index-based changePct lookups (hist[0], hist[scanDays]).
+export async function fetchStockData(sym: string, key: string, scanDays = 7): Promise<RawStockData> {
+  const limit = Math.max(scanDays + 2, CF_STRENGTH_LOOKBACK);
+  const [qr, hr] = await Promise.allSettled([
+    fmpGet<any>(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${key}`),
+    fmpGet<any>(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${sym}&limit=${limit}&apikey=${key}`),
+  ]);
+
+  const q = (qr.status === 'fulfilled' && qr.value) ? (Array.isArray(qr.value) ? qr.value[0] : qr.value) : null;
+  const histRaw: HistoricalBar[] = (hr.status === 'fulfilled' && hr.value) ? (Array.isArray(hr.value) ? hr.value : (hr.value?.historical || [])) : [];
+
+  const quote: RawQuoteData | null = q ? {
+    price: q.price ?? null,
+    marketCap: q.marketCap ?? null,
+    name: q.name || null,
+    sector: q.sector || null,
+    volume: q.volume ?? null,
+    avgVolume: q.avgVolume ?? null,
+  } : null;
+
+  const parseOrNull = (v: unknown): number | null => {
+    const n = parseFloat(String(v));
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const historicalBars: RawHistoricalBar[] = histRaw.map((h) => ({
+    date: h.date != null ? String(h.date) : null,
+    close: parseOrNull(h.close),
+    low: parseOrNull(h.low),
+  }));
+
+  return { symbol: sym, quote, historicalBars };
+}
+
+// Replaces today's scanBatch() as what the controller actually calls: fetches
+// the sector map (DB, unchanged) and every stock's raw data (FMP, unchanged)
+// in parallel, sends the whole batch's raw data to analysis-service in ONE
+// call, then overlays the sector-map fallback onto Python's results - same
+// `sectorMap[symbol] || result.sector` logic as today, just applied after the
+// Python round-trip instead of after scanStock.
+export async function assembleScanBatch(stocks: UniverseEntry[], key: string, quality: ScanQuality, scanDays?: number): Promise<ScanResult[]> {
+  const sectorMap = await fetchSectorMap(stocks.map((s) => s.symbol));
+
+  // fetchStockData never rejects (same contract as today's scanStock - a
+  // failed FMP call just becomes a null quote/empty history, scored by
+  // Python as a natural filterFail rather than surfaced as an error here),
+  // so a plain Promise.all is enough - no allSettled/error-partitioning needed.
+  const rawData = await Promise.all(stocks.map((stock) => fetchStockData(stock.symbol, key, scanDays)));
+
+  const scored = rawData.length > 0
+    ? await analysisService.computeContrarianFinderScanBatch({ stocks: rawData, quality, scanDays: scanDays ?? 7 })
+    : [];
+
+  const bySymbol = new Map(scored.map((r) => [r.symbol, r]));
+
+  // Defensive, not speculative: this guards against analysis-service
+  // returning fewer rows than requested (e.g. a symbol dropped mid-batch),
+  // not against a failure mode fetchStockData can actually produce.
+  return stocks.map((stock) => {
+    const result = bySymbol.get(stock.symbol);
+    if (!result) return { symbol: stock.symbol, filterFail: true, error: true };
+    result.source = stock.source;
+    result.sector = sectorMap[stock.symbol] || result.sector;
+    return result;
+  });
 }

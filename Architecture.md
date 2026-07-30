@@ -1,6 +1,6 @@
 ## Rebuild Plan — From Single-User Client-Side App to a Scalable Multi-User Platform
 
-**Last updated:** 2026-07-26
+**Last updated:** 2026-07-29
 
 **Why this section exists:** the user identified the single biggest shortcoming of the current app: it's a 100% client-side, single-user project (no backend, no database, no auth — `localStorage` is the only persistence layer) and therefore cannot scale beyond "one person, one browser." This doc started as a forward-looking rebuild plan and has since become a **living status document** — Section 1 tracks what's actually built, Section 2 is the immediate next action, Section 3 is the full ordered backlog. Update it as work lands rather than letting it drift back into a stale one-time plan. For a compact, fast-scan version of Section 1, see `CLAUDE.md`'s "Current Build State" — this doc carries the detail and rationale; that one carries the quick summary.
 
@@ -53,7 +53,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 07-26
+## Section 1 — Accomplished Till 07-29
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -461,20 +461,137 @@ Python / 29 frontend tests still green after the fixes.
 covers Signup→Login→Portfolio, not this feature); revisit once E2E coverage expands beyond
 the single golden path.
 
+### Contrarian Comeback Analysis (Section 3 item 3) ✅ Done
+
+**Built 2026-07-28** — the second full business-logic feature in `analysis-service`, greenfield
+in Python (no legacy JS output to diff against), across 3 formally-planned phases: Phase 1
+(gate/auto-checks + 5-factor score + verdict), Phase 2 (Fundamental Health + Catalyst
+Pipeline), Phase 3 (Staged Entry + Recovery Targets + Thesis Invalidation). Ported from the
+source app's `contrarian-analysis.html`, re-read verbatim rather than assumed from the
+earlier Phase-3 scoping note. Stateless two-endpoint pattern: `POST
+/contrarian-comeback/gate` (auto-check preview) and `POST /contrarian-comeback` (full submit
+with the user's checklist answers) — both independently re-fetch/recompute, same philosophy
+as Contrarian Finder's per-batch `assembleUniverse()`. New `ContrarianComebackPage.tsx`.
+Real bug found and fixed during live validation: `/v4/insider-trading` is a retired FMP
+legacy endpoint (403 on accounts created after 2025-08-31) — switched to
+`/stable/insider-trading/search`. Merged via PR #3.
+
+### Top-Level UI Restructure, Cross-Tab Launchers, and Data Fixes ✅ Done
+
+**Built 2026-07-29.** Three bundled pieces of follow-on work:
+- **Persistent-tabs restructure**: the 5 tools (Dashboard + 4 analysis pages) collapsed from
+  separate React-Router routes into one always-mounted `TabShell.tsx` (single `path="/*"`
+  route) — switching tabs no longer unmounts/resets in-progress state. API Keys became a
+  modal (`SubscriptionsPage.tsx` now takes `onClose`) instead of its own `/subscriptions`
+  route.
+- **Cross-tab analysis launchers**: a new `frontend/src/lib/tickerHandoff.ts` context lets
+  Contrarian Finder's Candidates/Strength List rows and Momentum's Strength List/result
+  header launch Long-Term Analysis or Contrarian Comeback directly for a symbol (Contrarian
+  Comeback auto-runs Check Eligibility only — the checklist step still needs manual input).
+  LT/CC buttons live in their own table column, not inline next to the symbol.
+- **Contrarian Comeback data/UX fixes**: trailing P/E was always `null` (derived from
+  price/EPS instead of FMP's `/stable` fields, which don't carry `pe` — same gap Long-Term
+  Analysis hit); added Volume Ratio %/Volume Climax detection to Technical Indicators;
+  Free Cash Flow now uses compact (M/B/T) currency formatting; added context-aware tooltips
+  (Volume Climax true/false, insider SEC Form 4 transaction codes); merged the header/ticker-
+  form/Contra Score into one card with per-factor score hints and a new Value Dislocation
+  card.
+
+Merged via PR #4. Full detail in this session's own history — see commit `229a169`.
+
+### Momentum Analysis extraction (Section 3 item 4) ✅ Done
+
+**Built 2026-07-29** — the first **extraction** (not greenfield build) of the Python
+microservices work: `momentum.service.ts`'s pure math (SMA/EMA/RSI/MACD/Bollinger Bands, the
+5-factor 0-10 score, entry/stop/target math) ported to `analysis-service/app/scoring/
+momentum.py` as a **faithful line-for-line transliteration**, not a reformulation — TS
+numbers and Python floats are both IEEE 754 doubles, so matching operation order exactly is
+what makes value-for-value parity possible. `calcKellySizing()` was deliberately **not**
+ported — it stays client-side only (`frontend/src/lib/kelly.ts`), unchanged, since capital is
+a live-editable UI input.
+
+**Shadow-test discipline** (this service has a documented history of a subtle bug — the
+Kelly-sizing score-gate — regressing silently, so parity mattered more here than for the
+greenfield features): rather than a live dual-engine comparison (no real production traffic
+to shadow against at this project's scale), parity was proven **statically** — the relevant
+Jest cases from `backend/tests/momentum.service.test.ts` (everything except the
+`calcKellySizing` describe block) were ported 1:1 into `analysis-service/tests/
+test_momentum_scoring.py`, same input fixtures, same already-trusted expected outputs.
+17 new Python tests (139 total).
+
+**Zero frontend changes, zero route/wire-contract changes** — `GET /momentum/:symbol` and
+`frontend/src/api/momentum.ts`'s response shape are byte-identical before and after. Only
+`momentum.controller.ts`'s `analyze()` handler changed internally: it now calls a new
+`analysisService.computeMomentumAnalysis()` (POSTs to `/momentum-analysis`) instead of the
+local `momentum.assembleMomentumAnalysis()` directly — same Node-fetches/Python-computes
+split as Long-Term Analysis/Contrarian Comeback. **`momentum.service.ts` and its 22-test
+Jest file stay in the repo, unmodified and undeleted** — the explicit rollback path (a
+regression only needs the one controller line swapped back); deleting the now-dead TS file
+is an explicit future cleanup, not done here. 1 new backend test (a 503-on-`AnalysisServiceError`
+case, matching the other proxied controllers) — 201 backend tests total. `tsc`/lint clean on
+both sides. Verified live against a real FMP account: `GET /momentum/AAPL` through the new
+Python path returns a fully self-consistent result (score components summing correctly to
+the documented signal threshold).
+
+---
+
+### Contrarian Finder extraction (Section 3 item 5) ✅ Done
+
+**Built 2026-07-29** — the second extraction, and the last backend service still doing
+scan-scoring math in TypeScript. **Data-ownership decision** (via a pros/cons comparison):
+Node stays the sole DB owner — `assembleUniverse()`/`fetchSectorMap()`'s two read-only
+`SELECT`s against static `m_index_constituent`/`m_tickers` reference data (538 rows, rarely
+re-seeded) were judged too small to justify giving Python its own CockroachDB connection,
+credential surface, and pool management for the first time; every other Python feature
+already follows "Node fetches, Python computes," and there was no real technical case to
+break that here.
+
+**The real complexity**: unlike Momentum, `scanStock()` *interleaved* the FMP fetch and the
+scoring math in one function — the fetch/compute split didn't already exist in the code. This
+extraction introduced it: `contrarianFinder.service.ts` gained `fetchStockData()` (the
+FMP-fetch half only, normalizing into `RawStockData` with bars kept unfiltered/null-preserved
+so index-based lookups still line up) and `assembleScanBatch()` (fetches sector map + all
+stocks' raw data in parallel, POSTs the whole batch to Python in **one call**, overlays the
+sector-map fallback afterward). `analysis-service/app/scoring/contrarian_finder.py`
+(`compute_scan_result`/`assemble_scan_batch`) is a faithful port of `scanStock()`'s post-fetch
+logic, **reusing `mw_sma`/`mw_rsi`/`mw_bb` from the already-ported `momentum.py`** — no
+re-porting needed, the direct payoff of having done Momentum first. New
+`POST /contrarian-finder/scan-batch` endpoint.
+
+**Today's `scanStock()`/`scanBatch()`/`filterCandidates()` stay in the file, unmodified and
+undeleted** — same rollback-path precedent as `momentum.service.ts`
+(`filterCandidates()` was already dead-server-side before this, from the 2026-07-27
+gap-fix work — pre-existing, not something this extraction changed).
+
+**Shadow-test discipline**: the 6 relevant `scanStock` Jest cases ported 1:1 into
+`test_contrarian_finder_scoring.py` (filterFail thresholds, noData, changePct/changeSinceDate
+math including the mktClosed branch, the strength-screen qualification case), plus a new
+null-quote case (the real shape a failed FMP fetch takes, since `fetchStockData` never
+rejects) — 10 new Python tests (149 total). 8 new backend tests (209 total) — 1 controller
+503-on-`AnalysisServiceError` case, 6 new `fetchStockData`/`assembleScanBatch` unit tests
+(after discovering and fixing a design mistake: an initial `Promise.allSettled`/error-branch
+in `assembleScanBatch` was dead code, since `fetchStockData` can't actually reject — simplified
+to a plain `Promise.all`, with the real defensive case being "Python returns fewer rows than
+requested," not "a raw fetch failed"). `tsc`/lint clean. **Zero frontend/route changes** —
+verified live against a real FMP account: a real 15-symbol batch scan through the new path
+returned correct sector overlays, pricing, and strength scoring.
+
+This was the last Section 3 backlog item before Phase 4.
+
 ---
 
 ## Section 2 — Next Step
 
-Item 3 — **Contrarian Comeback Analysis**, built greenfield in Python (same
-proxy/data-ownership pattern as Long-Term Analysis above). Open `/plan` mode with the user
-to scope it before starting.
+**Phase 4 — Shared quote cache** (Redis or a TTL table, behind `GET /quotes`) is next. This is
+the first Phase 4-6 item — no more Python extractions remain in Section 3. Open `/plan` mode
+with the user to scope it before starting.
 
 ---
 
 ## Section 3 — Backlog (serial, in order)
 
 1. **First E2E test suite — Playwright + Cucumber (`playwright-bdd`), single pilot golden-path
-   scenario.** New top-level `e2e/` directory (its own npm project, matching `backend/`/
+   scenario. ✅ Done.** New top-level `e2e/` directory (its own npm project, matching `backend/`/
    `frontend/`'s split — no workspaces exist to join). Gherkin `.feature` files for BDD
    readability, Playwright's engine underneath for speed/reliability — originally proposed as
    Selenium+Cucumber, switched to Playwright when presented with the tradeoff (auto-waiting vs.
@@ -496,14 +613,22 @@ to scope it before starting.
    value as a regression net is available through the riskiest upcoming work (items 4-5's
    Momentum/Contrarian TS→Python extractions) and so Long-Term Analysis / Contrarian Comeback
    Analysis (items 2-3, both new pages) get E2E coverage as they're built rather than retrofitted
-   later. Test gate: the pilot scenario passing locally and green in CI is the bar — no page
-   coverage expansion happens until this lands and proves stable. Scaffolded 2026-07-21;
-   provisioning the actual CockroachDB Cloud test database and the `E2E_DATABASE_URL` GitHub
-   secret are pending (need the user's cloud console / repo admin access).
+   later. Scaffolded 2026-07-21. **Confirmed done 2026-07-29**: the dedicated CockroachDB Cloud
+   test database and the `E2E_DATABASE_URL` GitHub secret are both provisioned and working —
+   verified via GitHub Actions history, the `e2e` job (which fails fast if `DATABASE_URL` is
+   unset, per `migrate-test-db.ts`'s own guard) has passed on every run since at least
+   2026-07-23. **Tab-shell mechanics now covered, 2026-07-29**: new
+   `e2e/features/tab-navigation.feature` (2 scenarios — tab-switch state preservation, API
+   Keys modal open/close), reusing `TabShell.tsx`'s existing `data-testid`s so zero new
+   `data-testid`s were needed anywhere. All 3 scenarios (golden path + both new) verified
+   live against the real test DB. **Deliberately still deferred**: the actual analysis tools
+   (Momentum/Contrarian Finder/Long-Term Analysis/Contrarian Comeback returning real results)
+   and the cross-tab launchers need either a live FMP test key in CI or Playwright
+   route-mocking to exercise meaningfully — neither decided yet.
 2. **Long-Term Analysis — built greenfield in Python. ✅ Done 2026-07-26** — see Section 1 for full detail. No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this was new logic, not an extraction — proved the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself was the correctness bar, since there was no legacy JS output to diff against.
-3. **Contrarian Comeback Analysis — built greenfield in Python**, deferred from Phase 3 (see above): the full gate-check/fundamental-health/scoring/thesis workflow from `contrarian-analysis.html`, ~500+ lines of logic with zero backend equivalent today. Sized like item 1, not a quick port — same rationale for going straight to Python rather than a throwaway Node version. Test gate: same as item 1, `pytest` coverage is the correctness bar.
-4. **Momentum Analysis — extracted from `momentum.service.ts`.** Port the RSI/SMA/Bollinger Band/Kelly-sizing math to Python (`pandas`/`numpy`/`ta`). Test gate: shadow-test the Python port against the existing Jest fixtures value-for-value before the gateway cuts over; keep the TS version in place as a rollback path until confidence is high. (This service has a documented history of a subtle bug — the Kelly-sizing score-gate — slipping through silently, so the shadow-test discipline matters more here than it might elsewhere.)
-5. **Contrarian Analysis — extracted from `contrarianFinder.service.ts`**, once a data-ownership call is made: Node stays the sole DB owner and passes the pre-fetched universe + price data into Python as a request payload (recommended, keeps Python purely computational), vs. giving the Python service its own CockroachDB connection. Test gate: same shadow-test discipline as item 3.
+3. **Contrarian Comeback Analysis — built greenfield in Python. ✅ Done 2026-07-28** — see Section 1 for full detail. Deferred from Phase 3: the full gate-check/fundamental-health/scoring/thesis workflow from `contrarian-analysis.html`, ~500+ lines of logic with zero backend equivalent today. Sized like item 1 (this doc's item numbering, not the E2E item above), not a quick port — same rationale for going straight to Python rather than a throwaway Node version. Test gate: same as item 2, `pytest` coverage is the correctness bar.
+4. **Momentum Analysis — extracted from `momentum.service.ts`. ✅ Done 2026-07-29** — see Section 1 for full detail. `calcKellySizing` was not ported (stays client-side). Test gate: the relevant Jest fixtures ported 1:1 into pytest, value-for-value — the TS version stays in place, unmodified, as the rollback path.
+5. **Contrarian Finder — extracted from `contrarianFinder.service.ts`. ✅ Done 2026-07-29** — see Section 1 for full detail. Node stayed the sole DB owner (pros/cons comparison favored consistency with every other Python feature over Python getting its own CockroachDB connection). Test gate: the relevant Jest fixtures ported 1:1 into pytest, value-for-value — the TS version stays in place, unmodified, as the rollback path.
 6. **Phase 4 — Shared quote cache.** Redis or a TTL table, behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30–60 seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history tracking into the DB.
 7. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from Section 2), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
 8. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.

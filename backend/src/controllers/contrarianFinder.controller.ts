@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import * as cf from '../services/contrarianFinder.service';
+import * as analysisService from '../services/analysisService';
 import * as userSubscription from '../services/userSubscription.service';
 
 // This route sits behind requireAuth (see app.ts), so req.user is always
@@ -47,10 +48,14 @@ export async function scanBatch(req: Request, res: Response, next: NextFunction)
     }
 
     const quality = cf.resolveQuality(qualityPreset);
-    const results = await cf.scanBatch(batches[idx], key, quality, clampedScanDays);
+    const results = await cf.assembleScanBatch(batches[idx], key, quality, clampedScanDays);
     res.json({ batchIndex: idx, totalBatches: batches.length, universeSize: universe.length, results });
   } catch (err) {
     if (err instanceof userSubscription.MissingUserApiKeyError) {
+      res.status(503).json({ error: err.message });
+      return;
+    }
+    if (err instanceof analysisService.AnalysisServiceError) {
       res.status(503).json({ error: err.message });
       return;
     }

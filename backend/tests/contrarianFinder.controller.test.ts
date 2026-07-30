@@ -2,7 +2,7 @@ jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn(
 jest.mock('../src/services/contrarianFinder.service', () => ({
   ...jest.requireActual('../src/services/contrarianFinder.service'),
   assembleUniverse: jest.fn(),
-  scanBatch: jest.fn(),
+  assembleScanBatch: jest.fn(),
 }));
 jest.mock('../src/services/userSubscription.service', () => ({
   ...jest.requireActual('../src/services/userSubscription.service'),
@@ -11,12 +11,13 @@ jest.mock('../src/services/userSubscription.service', () => ({
 
 import request from 'supertest';
 import * as cf from '../src/services/contrarianFinder.service';
+import * as analysisService from '../src/services/analysisService';
 import * as userSubscription from '../src/services/userSubscription.service';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
 
 const mockAssembleUniverse = cf.assembleUniverse as jest.Mock;
-const mockScanBatch = cf.scanBatch as jest.Mock;
+const mockAssembleScanBatch = cf.assembleScanBatch as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
 
 const authCookie = `auth_token=${signToken('user-1')}`;
@@ -28,11 +29,11 @@ const fakeUniverse = Array.from({ length: 250 }, (_, i) => ({ symbol: `S${i}`, t
 
 beforeEach(() => {
   mockAssembleUniverse.mockReset();
-  mockScanBatch.mockReset();
+  mockAssembleScanBatch.mockReset();
   mockGetDecryptedKey.mockReset();
   mockGetDecryptedKey.mockResolvedValue('fake-fmp-key');
   mockAssembleUniverse.mockResolvedValue(fakeUniverse);
-  mockScanBatch.mockImplementation((stocks: { symbol: string }[]) => Promise.resolve(
+  mockAssembleScanBatch.mockImplementation((stocks: { symbol: string }[]) => Promise.resolve(
     stocks.map((s) => ({ symbol: s.symbol, filterFail: false, noData: false, changePct: -10 })),
   ));
 });
@@ -47,7 +48,14 @@ describe('POST /contrarian-finder/scan-batch', () => {
     mockGetDecryptedKey.mockRejectedValue(new userSubscription.MissingUserApiKeyError('No fmp API key on file.'));
     const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
     expect(res.status).toBe(503);
-    expect(mockScanBatch).not.toHaveBeenCalled();
+    expect(mockAssembleScanBatch).not.toHaveBeenCalled();
+  });
+
+  test('503 when the analysis-service is unavailable', async () => {
+    mockAssembleScanBatch.mockRejectedValue(new analysisService.AnalysisServiceError('Analysis service unavailable.'));
+    const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('Analysis service unavailable.');
   });
 
   test('200 scans exactly the requested batch, reports totalBatches and universeSize', async () => {
@@ -58,9 +66,9 @@ describe('POST /contrarian-finder/scan-batch', () => {
     expect(res.body.totalBatches).toBe(2); // 250 symbols / 125 per batch = exactly 2, not the requested 3
     expect(res.body.universeSize).toBe(250);
     expect(res.body.results).toHaveLength(125);
-    expect(mockScanBatch).toHaveBeenCalledTimes(1);
-    expect(mockScanBatch.mock.calls[0][0]).toHaveLength(125);
-    expect(mockScanBatch.mock.calls[0][0][0].symbol).toBe('S0'); // first batch = first 125 symbols
+    expect(mockAssembleScanBatch).toHaveBeenCalledTimes(1);
+    expect(mockAssembleScanBatch.mock.calls[0][0]).toHaveLength(125);
+    expect(mockAssembleScanBatch.mock.calls[0][0][0].symbol).toBe('S0'); // first batch = first 125 symbols
   });
 
   test('scans the second batch (the real, non-truncated slice) when batchIndex=1', async () => {
@@ -68,7 +76,7 @@ describe('POST /contrarian-finder/scan-batch', () => {
       .send({ batchIndex: 1, batchSize: 125, maxBatches: 3 });
     expect(res.status).toBe(200);
     expect(res.body.results).toHaveLength(125);
-    expect(mockScanBatch.mock.calls[0][0][0].symbol).toBe('S125');
+    expect(mockAssembleScanBatch.mock.calls[0][0][0].symbol).toBe('S125');
   });
 
   test('400 when batchIndex is beyond the real (server-computed) totalBatches, not just the requested maxBatches', async () => {
@@ -77,7 +85,7 @@ describe('POST /contrarian-finder/scan-batch', () => {
     const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie)
       .send({ batchIndex: 2, batchSize: 125, maxBatches: 3 });
     expect(res.status).toBe(400);
-    expect(mockScanBatch).not.toHaveBeenCalled();
+    expect(mockAssembleScanBatch).not.toHaveBeenCalled();
   });
 
   test('400 for a negative or non-numeric batchIndex', async () => {
@@ -91,11 +99,11 @@ describe('POST /contrarian-finder/scan-batch', () => {
     await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie)
       .send({ batchIndex: 0, batchSize: 5, maxBatches: 999, scanDays: 0 });
     // batchSize clamps up to 10 -> ceil(250/10) batches exist, batchIndex 0 is always valid
-    expect(mockScanBatch.mock.calls[0][0]).toHaveLength(10);
+    expect(mockAssembleScanBatch.mock.calls[0][0]).toHaveLength(10);
   });
 
   test('missing batchSize/maxBatches/scanDays fall back to the service defaults', async () => {
     await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
-    expect(mockScanBatch.mock.calls[0][0]).toHaveLength(cf.CF_BATCH);
+    expect(mockAssembleScanBatch.mock.calls[0][0]).toHaveLength(cf.CF_BATCH);
   });
 });

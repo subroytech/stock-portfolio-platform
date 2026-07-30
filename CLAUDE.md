@@ -46,7 +46,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 07-26)
+# Current Build State (as of 07-29)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -138,16 +138,21 @@ is **not** kept in sync with this one.
   writes — confirmed via direct row-count checks) + a new `/portfolios/:id/import-preview`
   page. Surfaces the parser's per-row `errors` to a user for the first time ever.
 
-## Section 3 Backlog — reordered 2026-07-21, item 1 scaffolded
-Section 3 of `Architecture.md` now opens with a new item 1: a Playwright + Cucumber
-(`playwright-bdd`) E2E pilot suite, inserted ahead of Long-Term Analysis/Contrarian Comeback
-Analysis/the Python extraction items so it's in place as a regression net before that riskier
-work. New `e2e/` project scaffolded (config, feature file, step definitions, `data-testid`
-additions to 6 frontend files) — verified locally that `bddgen` generates the single scenario
-correctly and Playwright's test list resolves all 8 Gherkin steps. **Not yet done**:
-provisioning the dedicated CockroachDB Cloud test database, running the suite against a real
-DB, and wiring the CI job + `E2E_DATABASE_URL` secret — all need the user's cloud console /
-GitHub repo admin access. See Architecture.md Section 3 item 1 for full detail.
+## Section 3 Backlog Item 1 — E2E pilot suite ✅ Done
+Scaffolded 2026-07-21 (Playwright + Cucumber `playwright-bdd`, single golden-path scenario:
+Signup→Login→Portfolio→Import→Dashboard KPIs), positioned ahead of Long-Term
+Analysis/Contrarian Comeback/the Python extraction items so it's a regression net through
+that riskier work. **Confirmed fully done 2026-07-29**: the dedicated CockroachDB Cloud test
+database and `E2E_DATABASE_URL` GitHub secret are both provisioned and working — verified via
+GitHub Actions history (the `e2e` job, which fails fast on a missing `DATABASE_URL`, has
+passed on every run since at least 2026-07-23). **Tab-shell mechanics now covered too,
+2026-07-29**: new `e2e/features/tab-navigation.feature` (2 scenarios — tab-switch state
+preservation, API Keys modal open/close), reusing `TabShell.tsx`'s existing `data-testid`s
+(zero new ones needed). All 3 scenarios verified live against the real test DB. **Still
+deliberately deferred**: the actual analysis tools (Momentum/Contrarian Finder/Long-Term
+Analysis/Contrarian Comeback) and the cross-tab launchers need either a live FMP test key in
+CI or Playwright route-mocking to exercise meaningfully — neither decided yet. See
+Architecture.md Section 3 item 1.
 
 ## Python Service Scaffolding — analysis-service ✅ Done
 Built 2026-07-24 — Section 2's "Next Step" is now landed. New `analysis-service/` (FastAPI,
@@ -188,8 +193,68 @@ peer P/E was always null (`/stable/quote` has no `pe` field — fixed by derivin
 `1/earningsYield`, already fetched via `key-metrics`). **Confirmed real, not a bug**:
 Forward P/E stays `null` because `/stable/financial-estimates` returns `[]` on this
 account's plan tier — degrades gracefully exactly as designed. Full detail in
-`Architecture.md` Section 1. Section 2 is now an open placeholder — next Section 3 item is
-item 3 (Contrarian Comeback Analysis), TBD-scoped via `/plan`.
+`Architecture.md` Section 1.
+
+## Contrarian Comeback Analysis (Section 3 item 3) ✅ Done
+Built 2026-07-28 across 3 formally-planned phases (gate/auto-checks + 5-factor score +
+verdict; Fundamental Health + Catalyst Pipeline; Staged Entry + Recovery Targets + Thesis
+Invalidation) — greenfield in Python, ported from the source app's `contrarian-analysis.html`
+(re-read verbatim, not assumed from the earlier Phase-3 scoping note). Stateless two-endpoint
+pattern (`POST /contrarian-comeback/gate` preview, `POST /contrarian-comeback` full submit).
+New `ContrarianComebackPage.tsx`. Real bug found+fixed live: `/v4/insider-trading` is a
+retired FMP legacy endpoint (403 on accounts created after 2025-08-31) — switched to
+`/stable/insider-trading/search`. Merged via PR #3. Full detail in `Architecture.md` Section 1.
+
+## Top-Level UI Restructure, Cross-Tab Launchers, and Data Fixes ✅ Done
+Built 2026-07-29. Persistent-tabs restructure: the 5 tools collapsed into one always-mounted
+`TabShell.tsx` (single `path="/*"` route) so switching tabs no longer resets in-progress
+state; API Keys became a modal instead of its own route. New `frontend/src/lib/
+tickerHandoff.ts` context lets Contrarian Finder/Momentum rows launch Long-Term Analysis or
+Contrarian Comeback directly for a symbol (own table column, not inline with the symbol).
+Contrarian Comeback fixes: trailing P/E was always `null` (same FMP `/stable` `pe`-field gap
+Long-Term Analysis hit — fixed via price/EPS derivation), added Volume Ratio %/Volume Climax
+detection, compact (M/B/T) Free Cash Flow formatting, context-aware tooltips. Merged via
+PR #4. Full detail in `Architecture.md` Section 1.
+
+## Momentum Analysis extraction (Section 3 item 4) ✅ Done
+Built 2026-07-29 — the first **extraction** (not greenfield build) of the Python
+microservices work. `momentum.service.ts`'s pure math (SMA/EMA/RSI/MACD/Bollinger Bands, the
+5-factor score) ported to `analysis-service/app/scoring/momentum.py` as a faithful
+line-for-line transliteration (TS/Python floats are both IEEE 754 doubles, so exact operation
+order is what makes parity possible). `calcKellySizing` NOT ported — stays client-side only
+(`frontend/src/lib/kelly.ts`). Shadow-test discipline: the relevant Jest fixtures ported 1:1
+into `test_momentum_scoring.py` (17 new Python tests, 139 total), same inputs/expected
+outputs, rather than a live dual-engine comparison (no real production traffic to shadow at
+this project's scale). Zero frontend/route changes — `GET /momentum/:symbol`'s response
+shape is byte-identical; only `momentum.controller.ts` internally swapped to
+`analysisService.computeMomentumAnalysis()`. `momentum.service.ts`/its 22-test Jest file stay
+in the repo undeleted as the rollback path. 1 new backend test (201 total), `tsc`/lint clean.
+Verified live against a real FMP account. Full detail in `Architecture.md` Section 1.
+
+**Correction discovered same day**: `contrarianFinder.service.ts` imports `mwSMA`/`mwRSI`/
+`mwBB` directly from `momentum.service.ts` for its own Strength List scoring — that file was
+never fully dead code even before its own extraction below, so "delete momentum.service.ts
+once confident" (mentioned above) would only ever be a partial trim (`assembleMomentumAnalysis`/
+`calcKellySizing` only), never a whole-file deletion.
+
+## Contrarian Finder extraction (Section 3 item 4) ✅ Done
+Built 2026-07-29 — the last Section 3 backlog item. Data-ownership decision (pros/cons
+comparison): Node stays the sole DB owner — `assembleUniverse()`/`fetchSectorMap()`'s two
+read-only `SELECT`s against static reference data were too small to justify Python getting its
+own CockroachDB connection for the first time. Real complexity vs. Momentum: `scanStock()`
+interleaved the FMP fetch and scoring in one function, so this extraction had to introduce
+the fetch/compute split, not just relocate an already-separated function — new
+`fetchStockData()`/`assembleScanBatch()` in `contrarianFinder.service.ts`, new
+`analysis-service/app/scoring/contrarian_finder.py` **reusing `mw_sma`/`mw_rsi`/`mw_bb` from
+the already-ported `momentum.py`** (the direct payoff of doing Momentum first). Today's
+`scanStock()`/`scanBatch()`/`filterCandidates()` stay undeleted as the rollback path.
+Shadow-test: 6 relevant Jest cases + 1 new null-quote case ported to pytest (149 Python tests
+total). 8 new backend tests (209 total, including a design fix — an initial dead
+`Promise.allSettled` error-branch was simplified out after discovering `fetchStockData` can
+never actually reject). `tsc`/lint clean. Verified live: a real 15-symbol batch scan through
+the new path returned correct sector overlays, pricing, and strength scoring. Full detail in
+`Architecture.md` Section 1. **No more Python extractions remain in Section 3** — Section 2's
+next item is Phase 4 (shared quote cache), TBD-scoped via its own `/plan`.
 
 ## Phases 4–6 — Not Started
 - Phase 4: Shared quote cache (Redis / Postgres TTL table)
