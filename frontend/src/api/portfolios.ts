@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from './client';
+import type { PerformanceBar } from '../lib/performanceMath';
 
 export interface PortfolioSummary {
   id: string;
@@ -24,6 +25,13 @@ export interface PortfolioHolding {
   returnPct: number;
   allocationPct: number | null;
   priceUpdatedAt: string | null;
+  // Position-level (quantity * per-share) dollar/percent change for the day,
+  // persisted in tx_holdings alongside priceUpdatedAt (backend migration
+  // 014) - null until the holding's first refresh. Unlike the mutation-only
+  // RefreshedHolding fields below, this is DB-backed: available on every
+  // GET /portfolios/:id, surviving a portfolio switch or a page reload.
+  todayChangeDollar: number | null;
+  todayChangePercent: number | null;
 }
 
 export interface PortfolioDetail extends PortfolioSummary {
@@ -33,6 +41,28 @@ export interface PortfolioDetail extends PortfolioSummary {
   totalCostBasis: number;
   totalGainLoss: number;
   totalPortfolioValue: number;
+}
+
+// Mirrors backend/src/services/portfolio.service.ts's RefreshedHolding/
+// RefreshPricesResult field-for-field. todayChangeDollar/todayChangePercent
+// and performanceHistory only ever reflect the most recent refresh - there's
+// no auto-refresh hook, matching the source app's "Today ($)" precondition.
+export interface RefreshedHolding {
+  id: string;
+  symbol: string;
+  currentPrice: number;
+  currentValue: number;
+  gainLoss: number;
+  returnPct: number;
+  allocationPct: number | null;
+  priceUpdatedAt: string | null;
+  todayChangeDollar: number | null;
+  todayChangePercent: number | null;
+}
+
+export interface RefreshPricesResult {
+  holdings: RefreshedHolding[];
+  performanceHistory: Record<string, PerformanceBar[]>;
 }
 
 export interface ImportResult {
@@ -148,7 +178,7 @@ export function usePreviewImport(portfolioId: string) {
 export function useRefreshPrices(portfolioId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => apiFetch<{ holdings: unknown[] }>(`/portfolios/${portfolioId}/refresh-prices`, { method: 'POST' }),
+    mutationFn: () => apiFetch<RefreshPricesResult>(`/portfolios/${portfolioId}/refresh-prices`, { method: 'POST' }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['portfolios', portfolioId] }),
   });
 }

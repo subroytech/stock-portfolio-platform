@@ -4,9 +4,20 @@
 
 import { pool } from '../db/pool';
 import * as marketData from './marketData.service';
+import type { HistoricalBar } from './marketData.service';
 import * as userSubscription from './userSubscription.service';
 import { applyLivePrices, HoldingLike } from './livePrices.service';
 import { ParseResult } from './parser.service';
+
+// Ported from the source app's isPerfSkipped() (portfolio-performance.js) -
+// BTC/ETH-style holdings don't work with trading-day EOD history math
+// (Robinhood exports bare BTC/ETH; FMP expects BTCUSD), so they're excluded
+// from performanceHistory - the current-quote refresh above is unaffected,
+// they still show up in KPIs/Holdings as normal.
+function isPerfSkipped(symbol: string, sector: string | null): boolean {
+  if (sector === 'Crypto') return true;
+  return /USD$|-USD$|USDT$/.test(symbol);
+}
 
 export class PortfolioNotFoundError extends Error {}
 export class PortfolioNameConflictError extends Error {}
@@ -36,6 +47,11 @@ export interface PortfolioDetailHolding {
   returnPct: number;
   allocationPct: number | null;
   priceUpdatedAt: string | null;
+  // Position-level (quantity * per-share) dollar/percent change for the day,
+  // persisted by refreshPrices() alongside price_updated_at (migration 014) -
+  // null until the holding's first refresh, same as priceUpdatedAt.
+  todayChangeDollar: number | null;
+  todayChangePercent: number | null;
 }
 
 export interface PortfolioDetail extends PortfolioSummary {
@@ -97,6 +113,8 @@ interface HoldingRow {
   return_pct: string;
   allocation_pct: string | null;
   price_updated_at: string | null;
+  today_change_dollar: string | null;
+  today_change_percent: string | null;
 }
 
 function mapHoldingRow(r: HoldingRow): PortfolioDetailHolding {
@@ -115,6 +133,8 @@ function mapHoldingRow(r: HoldingRow): PortfolioDetailHolding {
     returnPct: parseFloat(r.return_pct),
     allocationPct: r.allocation_pct == null ? null : parseFloat(r.allocation_pct),
     priceUpdatedAt: r.price_updated_at,
+    todayChangeDollar: r.today_change_dollar == null ? null : parseFloat(r.today_change_dollar),
+    todayChangePercent: r.today_change_percent == null ? null : parseFloat(r.today_change_percent),
   };
 }
 
@@ -127,7 +147,8 @@ export async function getPortfolio(userId: string, portfolioId: string): Promise
 
   const { rows: holdingRows } = await pool.query<HoldingRow>(
     `SELECT id, symbol, name, quantity, purchase_price, current_price, sector, purchase_date,
-            cost_basis, current_value, gain_loss, return_pct, allocation_pct, price_updated_at
+            cost_basis, current_value, gain_loss, return_pct, allocation_pct, price_updated_at,
+            today_change_dollar, today_change_percent
      FROM tx_holdings WHERE portfolio_id = $1 ORDER BY symbol`,
     [portfolioId],
   );
@@ -322,6 +343,22 @@ export interface RefreshedHolding {
   returnPct: number;
   allocationPct: number | null;
   priceUpdatedAt: string | null;
+  // Both null when this holding had no fresh quote this refresh (same
+  // partial-failure tolerance as every other field above) - driven by the
+  // Dashboard's Performance/Allocation "Today ($)" modes, which only ever
+  // read the most recent refresh's values, never re-fetch on their own.
+  // todayChangeDollar is the POSITION's dollar change (quantity * FMP's
+  // per-share change), matching the source app's getTodayDollarChanges() -
+  // NOT the raw per-share change FMP's quote endpoint returns.
+  todayChangeDollar: number | null;
+  todayChangePercent: number | null;
+}
+
+export interface RefreshPricesResult {
+  holdings: RefreshedHolding[];
+  // keyed by symbol, ~130-day EOD bars, crypto-excluded, only successfully-
+  // fetched symbols included - the Performance widget's period-return math.
+  performanceHistory: Record<string, HistoricalBar[]>;
 }
 
 function toHoldingLike(r: HoldingRow): HoldingLike {
@@ -346,22 +383,39 @@ function toHoldingLike(r: HoldingRow): HoldingLike {
 // keep their old price_updated_at untouched, honestly reflecting that
 // they're still stale, rather than a portfolio-wide timestamp falsely
 // claiming everything was refreshed.
-export async function refreshPrices(userId: string, portfolioId: string): Promise<RefreshedHolding[]> {
+//
+// Also fetches each held (non-crypto) symbol's ~130-day EOD history in
+// parallel with the quote refresh - one unified "Refresh Prices" drives both
+// the current-price numbers above AND the Dashboard's Performance/Allocation
+// widgets' period-return/Today's-$ modes, rather than a second independent
+// refresh action like the source app has.
+export async function refreshPrices(userId: string, portfolioId: string): Promise<RefreshPricesResult> {
   const { rows: ownerRows } = await pool.query('SELECT id FROM tx_portfolios WHERE id = $1 AND user_id = $2', [portfolioId, userId]);
   if (!ownerRows[0]) throw new PortfolioNotFoundError('Portfolio not found.');
 
   const { rows: holdingRows } = await pool.query<HoldingRow>(
     `SELECT id, symbol, name, quantity, purchase_price, current_price, sector, purchase_date,
-            cost_basis, current_value, gain_loss, return_pct, allocation_pct, price_updated_at
+            cost_basis, current_value, gain_loss, return_pct, allocation_pct, price_updated_at,
+            today_change_dollar, today_change_percent
      FROM tx_holdings WHERE portfolio_id = $1`,
     [portfolioId],
   );
-  if (holdingRows.length === 0) return [];
+  if (holdingRows.length === 0) return { holdings: [], performanceHistory: {} };
 
   const apiKey = await userSubscription.getDecryptedKey(userId, 'fmp');
   const holdings = holdingRows.map(toHoldingLike);
-  const priceMap = await marketData.getQuotes(holdings.map((h) => h.symbol), apiKey);
+  const historySymbols = [...new Set(holdingRows.filter((r) => !isPerfSkipped(r.symbol, r.sector)).map((r) => r.symbol))];
+
+  const [priceMap, historyResults] = await Promise.all([
+    marketData.getQuotes(holdings.map((h) => h.symbol), apiKey),
+    Promise.allSettled(historySymbols.map((symbol) => marketData.getHistorical(symbol, apiKey, 130))),
+  ]);
   applyLivePrices(holdings, priceMap);
+
+  const performanceHistory: Record<string, HistoricalBar[]> = {};
+  historyResults.forEach((r, i) => {
+    if (r.status === 'fulfilled' && r.value.length > 0) performanceHistory[historySymbols[i]] = r.value;
+  });
 
   const results: RefreshedHolding[] = [];
   for (let i = 0; i < holdingRows.length; i++) {
@@ -375,18 +429,28 @@ export async function refreshPrices(userId: string, portfolioId: string): Promis
         returnPct: parseFloat(row.return_pct),
         allocationPct: row.allocation_pct == null ? null : parseFloat(row.allocation_pct),
         priceUpdatedAt: row.price_updated_at,
+        // Same honesty principle as priceUpdatedAt above: no fresh quote this
+        // refresh keeps whatever was last persisted, rather than blanking a
+        // holding that DID have a real today's-$ value from an earlier refresh.
+        todayChangeDollar: row.today_change_dollar == null ? null : parseFloat(row.today_change_dollar),
+        todayChangePercent: row.today_change_percent == null ? null : parseFloat(row.today_change_percent),
       });
       continue;
     }
 
+    const todayChangeDollar = priceMap[row.symbol].changeDollar * updatedHolding.quantity;
+    const todayChangePercent = priceMap[row.symbol].changePercent ?? null;
+
     const { rows: updatedRows } = await pool.query<{ price_updated_at: string }>(
       `UPDATE tx_holdings
-       SET current_price = $1, current_value = $2, gain_loss = $3, return_pct = $4, allocation_pct = $5, price_updated_at = now()
-       WHERE id = $6
+       SET current_price = $1, current_value = $2, gain_loss = $3, return_pct = $4, allocation_pct = $5,
+           price_updated_at = now(), today_change_dollar = $6, today_change_percent = $7
+       WHERE id = $8
        RETURNING price_updated_at`,
       [
         updatedHolding.currentPrice, updatedHolding.currentValue, updatedHolding.gainLoss,
-        updatedHolding.returnPct, updatedHolding.allocation ?? null, row.id,
+        updatedHolding.returnPct, updatedHolding.allocation ?? null,
+        todayChangeDollar, todayChangePercent, row.id,
       ],
     );
 
@@ -395,7 +459,8 @@ export async function refreshPrices(userId: string, portfolioId: string): Promis
       currentValue: updatedHolding.currentValue, gainLoss: updatedHolding.gainLoss,
       returnPct: updatedHolding.returnPct, allocationPct: updatedHolding.allocation ?? null,
       priceUpdatedAt: updatedRows[0].price_updated_at,
+      todayChangeDollar, todayChangePercent,
     });
   }
-  return results;
+  return { holdings: results, performanceHistory };
 }

@@ -18,6 +18,7 @@ import app from '../src/app';
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockConnect = pool.connect as unknown as jest.Mock;
 const mockGetQuotes = marketData.getQuotes as jest.Mock;
+const mockGetHistorical = marketData.getHistorical as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
 
 // A real, validly-signed cookie so requests pass through the real
@@ -29,6 +30,8 @@ beforeEach(() => {
   mockQuery.mockReset();
   mockConnect.mockReset();
   mockGetQuotes.mockReset();
+  mockGetHistorical.mockReset();
+  mockGetHistorical.mockResolvedValue([]); // refreshPrices now also fetches history in parallel
   mockGetDecryptedKey.mockReset();
   mockGetDecryptedKey.mockResolvedValue('fake-fmp-key');
 });
@@ -160,10 +163,15 @@ describe('POST /portfolios/:id/refresh-prices', () => {
       })
       .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
     mockGetQuotes.mockResolvedValue({ AAPL: { price: 150, changeDollar: 50, changePercent: 50, name: 'Apple' } });
+    mockGetHistorical.mockResolvedValue([{ date: '2026-07-01', close: 145, low: 140 }]);
 
     const res = await request(app).post('/portfolios/1/refresh-prices').set('Cookie', authCookie);
     expect(res.status).toBe(200);
-    expect(res.body.holdings[0]).toMatchObject({ symbol: 'AAPL', currentPrice: 150, priceUpdatedAt: '2026-07-12T00:00:00Z' });
+    expect(res.body.holdings[0]).toMatchObject({
+      symbol: 'AAPL', currentPrice: 150, priceUpdatedAt: '2026-07-12T00:00:00Z',
+      todayChangeDollar: 500, todayChangePercent: 50, // quantity (10) * per-share change (50)
+    });
+    expect(res.body.performanceHistory.AAPL).toEqual([{ date: '2026-07-01', close: 145, low: 140 }]);
   });
 
   test('404 for a portfolio that does not exist or is not owned', async () => {

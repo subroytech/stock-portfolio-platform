@@ -20,12 +20,15 @@ import { ParseResult, HoldingEntry } from '../src/services/parser.service';
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockConnect = pool.connect as unknown as jest.Mock;
 const mockGetQuotes = marketData.getQuotes as jest.Mock;
+const mockGetHistorical = marketData.getHistorical as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
 
 beforeEach(() => {
   mockQuery.mockReset();
   mockConnect.mockReset();
   mockGetQuotes.mockReset();
+  mockGetHistorical.mockReset();
+  mockGetHistorical.mockResolvedValue([]); // refreshPrices now also fetches history in parallel - most tests here don't care about it
   mockGetDecryptedKey.mockReset();
   mockGetDecryptedKey.mockResolvedValue('fake-fmp-key'); // refreshPrices tests: real key resolution isn't under test here
 });
@@ -75,6 +78,36 @@ describe('getPortfolio', () => {
     expect(result?.totalGainLoss).toBe(200);
     expect(result?.cashAmount).toBe(500);
     expect(result?.totalPortfolioValue).toBe(1700);
+  });
+
+  test('returns todayChangeDollar/todayChangePercent from tx_holdings (DB-persisted, not just the refresh-prices mutation response)', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1', name: 'Fidelity', broker: null, created_at: 't1', updated_at: 't1' }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'h1', symbol: 'AAPL', name: 'Apple', quantity: '10', purchase_price: '100', current_price: '120',
+            sector: 'Tech', purchase_date: null, cost_basis: '1000', current_value: '1200', gain_loss: '200',
+            return_pct: '20', allocation_pct: null, price_updated_at: '2026-07-20T10:00:00Z',
+            today_change_dollar: '15.5', today_change_percent: '1.25',
+          },
+          {
+            id: 'h2', symbol: 'MSFT', name: 'Microsoft', quantity: '5', purchase_price: '200', current_price: '200',
+            sector: 'Tech', purchase_date: null, cost_basis: '1000', current_value: '1000', gain_loss: '0',
+            return_pct: '0', allocation_pct: null, price_updated_at: null,
+            today_change_dollar: null, today_change_percent: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const result = await getPortfolio('user-1', '1');
+    const aapl = result?.holdings.find((h) => h.symbol === 'AAPL');
+    const msft = result?.holdings.find((h) => h.symbol === 'MSFT');
+    expect(aapl?.todayChangeDollar).toBe(15.5);
+    expect(aapl?.todayChangePercent).toBe(1.25);
+    expect(msft?.todayChangeDollar).toBeNull(); // never refreshed
+    expect(msft?.todayChangePercent).toBeNull();
   });
 
   test('cashAmount defaults to 0 when there is no cash_positions row', async () => {
@@ -239,21 +272,92 @@ describe('refreshPrices', () => {
     mockGetQuotes.mockResolvedValue({ AAPL: { price: 150, changeDollar: 50, changePercent: 50, name: 'Apple' } }); // MSFT absent
 
     const result = await refreshPrices('user-1', '1');
-    const aapl = result.find((r) => r.symbol === 'AAPL');
-    const msft = result.find((r) => r.symbol === 'MSFT');
+    const aapl = result.holdings.find((r) => r.symbol === 'AAPL');
+    const msft = result.holdings.find((r) => r.symbol === 'MSFT');
 
     expect(aapl?.currentPrice).toBe(150);
     expect(aapl?.priceUpdatedAt).toBe('2026-07-12T00:00:00Z');
+    expect(aapl?.todayChangeDollar).toBe(500); // quantity (10) * per-share change (50), not the raw per-share change
+    expect(aapl?.todayChangePercent).toBe(50);
     expect(msft?.currentPrice).toBe(200); // unchanged, stale
     expect(msft?.priceUpdatedAt).toBeNull(); // left untouched
+    expect(msft?.todayChangeDollar).toBeNull(); // no quote match this refresh
   });
 
-  test('returns an empty array when the portfolio has no holdings (skips key resolution entirely)', async () => {
+  test('a holding with no fresh quote this refresh keeps its previously-persisted today_change_dollar/percent, same honesty principle as price_updated_at', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'h1', symbol: 'MSFT', name: 'Microsoft', quantity: '5', purchase_price: '200', current_price: '200',
+          sector: 'Tech', purchase_date: null, cost_basis: '1000', current_value: '1000', gain_loss: '0',
+          return_pct: '0', allocation_pct: '50', price_updated_at: '2026-07-10T00:00:00Z',
+          today_change_dollar: '25', today_change_percent: '1.5',
+        }],
+      });
+    mockGetQuotes.mockResolvedValue({}); // MSFT absent this refresh
+
+    const result = await refreshPrices('user-1', '1');
+    const msft = result.holdings.find((r) => r.symbol === 'MSFT');
+    expect(msft?.todayChangeDollar).toBe(25); // stale but real - not blanked to null
+    expect(msft?.todayChangePercent).toBe(1.5);
+  });
+
+  test('todayChangeDollar is the POSITION dollar change (quantity * per-share change), not the raw per-share change', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'h1', symbol: 'AAPL', name: 'Apple', quantity: '2.5', purchase_price: '100', current_price: '100',
+          sector: 'Tech', purchase_date: null, cost_basis: '250', current_value: '250', gain_loss: '0',
+          return_pct: '0', allocation_pct: '100', price_updated_at: null,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
+    mockGetQuotes.mockResolvedValue({ AAPL: { price: 150, changeDollar: 4, changePercent: 2.7, name: 'Apple' } });
+
+    const result = await refreshPrices('user-1', '1');
+    const aapl = result.holdings.find((r) => r.symbol === 'AAPL');
+    expect(aapl?.todayChangeDollar).toBe(10); // 2.5 shares * $4/share, not $4
+    expect(aapl?.todayChangePercent).toBe(2.7); // percent is a ratio - unaffected by quantity
+  });
+
+  test('returns empty holdings/performanceHistory when the portfolio has no holdings (skips key resolution entirely)', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ id: '1' }] }).mockResolvedValueOnce({ rows: [] });
     const result = await refreshPrices('user-1', '1');
-    expect(result).toEqual([]);
+    expect(result).toEqual({ holdings: [], performanceHistory: {} });
     expect(mockGetDecryptedKey).not.toHaveBeenCalled();
     expect(mockGetQuotes).not.toHaveBeenCalled();
+  });
+
+  test('fetches ~130-day history in parallel for each held symbol, keyed by symbol, excluding crypto', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'h1', symbol: 'AAPL', name: 'Apple', quantity: '10', purchase_price: '100', current_price: '100',
+            sector: 'Tech', purchase_date: null, cost_basis: '1000', current_value: '1000', gain_loss: '0',
+            return_pct: '0', allocation_pct: '50', price_updated_at: null,
+          },
+          {
+            id: 'h2', symbol: 'BTC', name: 'Bitcoin', quantity: '1', purchase_price: '30000', current_price: '30000',
+            sector: 'Crypto', purchase_date: null, cost_basis: '30000', current_value: '30000', gain_loss: '0',
+            return_pct: '0', allocation_pct: '50', price_updated_at: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
+
+    mockGetQuotes.mockResolvedValue({ AAPL: { price: 150, changeDollar: 5, changePercent: 3 } });
+    mockGetHistorical.mockResolvedValue([{ date: '2026-07-01', close: 145, low: 140 }]);
+
+    const result = await refreshPrices('user-1', '1');
+
+    expect(mockGetHistorical).toHaveBeenCalledTimes(1); // only AAPL, not the crypto holding
+    expect(mockGetHistorical).toHaveBeenCalledWith('AAPL', 'fake-fmp-key', 130);
+    expect(result.performanceHistory).toEqual({ AAPL: [{ date: '2026-07-01', close: 145, low: 140 }] });
+    expect(result.performanceHistory.BTC).toBeUndefined();
   });
 
   test('propagates MissingUserApiKeyError when the user has no FMP key on file', async () => {

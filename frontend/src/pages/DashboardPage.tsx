@@ -1,10 +1,13 @@
 import { useState } from 'react';
 import { usePortfolio, useRefreshPrices } from '../api/portfolios';
+import type { RefreshPricesResult } from '../api/portfolios';
 import { ApiError } from '../api/client';
+import { formatAsOf } from '../lib/format';
 import PortfolioSelector from '../components/PortfolioSelector';
 import UploadImportDialog from '../components/UploadImportDialog';
 import KpiCards from '../components/KpiCards';
-import AllocationChart from '../components/AllocationChart';
+import AllocationChart, { AllocationModeToggle } from '../components/AllocationChart';
+import type { AllocationMode } from '../components/AllocationChart';
 import PerformanceChart from '../components/PerformanceChart';
 import HoldingsTable from '../components/HoldingsTable';
 import StockPreviewChart from '../components/StockPreviewChart';
@@ -12,8 +15,36 @@ import StockPreviewChart from '../components/StockPreviewChart';
 export default function DashboardPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
+  const [allocationMode, setAllocationMode] = useState<AllocationMode>('todayDollar');
   const { data: portfolio, isLoading } = usePortfolio(selectedId);
   const refreshPrices = useRefreshPrices(selectedId ?? '');
+
+  // Keyed by portfolio ID, not the mutation's own single `.data` slot -
+  // DashboardPage never unmounts when switching portfolios via the
+  // PortfolioSelector pills (just a selectedId change), so a single un-keyed
+  // `refreshPrices.data` would leak one portfolio's period-return history
+  // into another's view whenever their symbols happened to overlap. Only
+  // the period-tabs (performanceHistory) need this - Today's-$ is DB-backed
+  // (todayChangeDollar on `portfolio.holdings` itself, see AllocationChart/
+  // PerformanceChart) and doesn't have this problem.
+  const [resultsByPortfolio, setResultsByPortfolio] = useState<Record<string, RefreshPricesResult>>({});
+  const refreshResult = selectedId ? resultsByPortfolio[selectedId] : undefined;
+
+  const handleRefresh = () => {
+    if (!selectedId) return;
+    const portfolioId = selectedId;
+    refreshPrices.mutate(undefined, {
+      onSuccess: (result) => setResultsByPortfolio((prev) => ({ ...prev, [portfolioId]: result })),
+    });
+  };
+
+  // The oldest price_updated_at across holdings, not the newest - same
+  // honesty principle as refreshPrices() itself: a holding that didn't get
+  // a fresh quote keeps its old timestamp, so the aggregate "as of" banner
+  // shouldn't overclaim freshness for a partially-succeeded refresh.
+  const oldestPriceUpdate = portfolio
+    ? portfolio.holdings.map((h) => h.priceUpdatedAt).filter((t): t is string => t != null).sort()[0] ?? null
+    : null;
 
   return (
     <>
@@ -33,7 +64,7 @@ export default function DashboardPage() {
               <div className="flex flex-col items-end gap-1">
                 <button
                   type="button"
-                  onClick={() => refreshPrices.mutate()}
+                  onClick={handleRefresh}
                   disabled={refreshPrices.isPending}
                   className="rounded-btn bg-accent px-3 py-1.5 text-sm text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
                 >
@@ -44,6 +75,9 @@ export default function DashboardPage() {
                     {refreshPrices.error instanceof ApiError ? refreshPrices.error.message : 'Refresh failed.'}
                   </p>
                 )}
+                {oldestPriceUpdate && (
+                  <p className="text-xs text-text-muted">Prices as of {formatAsOf(oldestPriceUpdate)}</p>
+                )}
               </div>
             </div>
 
@@ -51,20 +85,26 @@ export default function DashboardPage() {
 
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div className="rounded-card bg-bg-card p-4 shadow-card">
-                <h2 className="mb-3 text-sm font-semibold text-text-primary">Allocation by Sector</h2>
-                {/* Chart.js needs an explicitly height-constrained parent to
-                    reflow correctly on viewport shrink — without one, the
-                    canvas can hold onto a wider desktop-measured size and
-                    push the whole page into horizontal scroll until
-                    something forces a remount. */}
-                <div className="h-64">
-                  <AllocationChart holdings={portfolio.holdings} />
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-sm font-semibold text-text-primary">Allocation</h2>
+                  <AllocationModeToggle mode={allocationMode} onChange={setAllocationMode} />
+                </div>
+                {/* Fixed, not min - this is the reference height every mode
+                    (Sector/Stock/Today's $) fills via AllocationChart's
+                    PieBox, so the card's vertical size stays constant when
+                    switching modes instead of jumping around. */}
+                <div className="h-96">
+                  <AllocationChart holdings={portfolio.holdings} mode={allocationMode} />
                 </div>
               </div>
-              <div className="rounded-card bg-bg-card p-4 shadow-card">
-                <h2 className="mb-3 text-sm font-semibold text-text-primary">Gain / Loss by Holding</h2>
-                <div className="h-64">
-                  <PerformanceChart holdings={portfolio.holdings} />
+              {/* flex column so the Performance card - stretched by the grid
+                  row to match Allocation's fixed h-96 above - passes that
+                  extra height down into the chart itself (flex-1) instead of
+                  leaving it as blank space below a short, fixed-height chart. */}
+              <div className="flex flex-col rounded-card bg-bg-card p-4 shadow-card">
+                <h2 className="mb-3 shrink-0 text-sm font-semibold text-text-primary">Performance</h2>
+                <div className="min-h-0 flex-1">
+                  <PerformanceChart holdings={portfolio.holdings} refreshResult={refreshResult} />
                 </div>
               </div>
             </div>

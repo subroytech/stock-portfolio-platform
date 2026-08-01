@@ -18,6 +18,18 @@ export function formatCompactCurrency(value: number): string {
   return `$${new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(value)}`;
 }
 
+// Full (non-abbreviated) dollar amount, rounded to the nearest whole dollar -
+// for totals where "$1.2K" is too imprecise but cents aren't meaningful.
+export function formatWholeCurrency(value: number): string {
+  return `$${Math.round(value).toLocaleString('en-US')}`;
+}
+
+// Shared by DashboardPage's staleness banner and both charts' Today's-$
+// "as of" captions - all three read the same DB-persisted priceUpdatedAt.
+export function formatAsOf(isoTimestamp: string): string {
+  return new Date(isoTimestamp).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
 // Ported from the source app's 4-tier decline severity scale (index.html's
 // .cf-chg-15/20/25/35 classes, contrarian-finder.js's chgCls ternary) —
 // mapped onto this app's warning/danger tokens (no dedicated "orange" token

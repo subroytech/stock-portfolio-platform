@@ -139,6 +139,7 @@ one portfolio name per user, e.g. can't have two "Fidelity" portfolios for the s
 | `allocation_pct` | `DECIMAL(7,4)` | nullable |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
 | `price_updated_at` | `TIMESTAMPTZ` | nullable; added by migration `011`, 2026-07-12. Stamped by `POST /portfolios/:id/refresh-prices` **per holding**, only for holdings that actually got a fresh quote — see `tx_portfolio_action_hist` section below for why this is per-holding, not per-portfolio |
+| `today_change_dollar` / `today_change_percent` | `DECIMAL` (unconstrained) | nullable; added by migration `014`, 2026-07-31. Position-level (quantity × per-share) dollar change and percent change for the day, set alongside `price_updated_at` on every refresh — persisted so `GET /portfolios/:id` can drive the Dashboard's "Today's $" views directly from DB state, not just the ephemeral refresh-prices response |
 
 Indexes: `holdings_pkey` (PK), `idx_holdings_portfolio_id`, `idx_holdings_symbol`.
 

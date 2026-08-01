@@ -147,8 +147,8 @@ export async function importHoldings(req: Request, res: Response, next: NextFunc
 
 export async function refreshPrices(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const holdings = await portfolioService.refreshPrices(getUserId(req), getIdParam(req));
-    res.json({ holdings });
+    const result = await portfolioService.refreshPrices(getUserId(req), getIdParam(req));
+    res.json(result);
   } catch (err) {
     if (err instanceof portfolioService.PortfolioNotFoundError) {
       res.status(404).json({ error: err.message });
