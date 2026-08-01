@@ -3,6 +3,7 @@ import * as analysisService from '../services/analysisService';
 import * as longTermAnalysisData from '../services/longTermAnalysisData.service';
 import * as contrarianComebackData from '../services/contrarianComebackData.service';
 import * as userSubscription from '../services/userSubscription.service';
+import { InvalidTickerError } from '../utils/errors';
 
 // Thin proxy round-trip: Node (auth-checked) -> Python analysis-service ->
 // back through Node. No real analysis logic yet — see Architecture.md
@@ -65,6 +66,10 @@ export async function longTermAnalysis(req: Request, res: Response, next: NextFu
       res.status(503).json({ error: err.message });
       return;
     }
+    if (err instanceof InvalidTickerError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
     next(err);
   }
 }
@@ -111,6 +116,10 @@ export async function contrarianComebackGate(req: Request, res: Response, next: 
       res.status(503).json({ error: err.message });
       return;
     }
+    if (err instanceof InvalidTickerError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
     next(err);
   }
 }
@@ -154,6 +163,10 @@ export async function contrarianComebackSubmit(req: Request, res: Response, next
     }
     if (err instanceof analysisService.AnalysisServiceError) {
       res.status(503).json({ error: err.message });
+      return;
+    }
+    if (err instanceof InvalidTickerError) {
+      res.status(404).json({ error: err.message });
       return;
     }
     next(err);

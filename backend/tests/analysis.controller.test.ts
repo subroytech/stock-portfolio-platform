@@ -23,6 +23,7 @@ import * as analysisService from '../src/services/analysisService';
 import * as longTermAnalysisData from '../src/services/longTermAnalysisData.service';
 import * as contrarianComebackData from '../src/services/contrarianComebackData.service';
 import * as userSubscription from '../src/services/userSubscription.service';
+import { InvalidTickerError } from '../src/utils/errors';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
 
@@ -123,6 +124,13 @@ describe('GET /analysis/long-term/:symbol', () => {
     expect(res.status).toBe(200);
     expect(mockFetchLongTermAnalysisData).toHaveBeenCalledWith('AAPL', 'fake-fmp-key', undefined);
   });
+
+  test('404 when the ticker does not exist', async () => {
+    mockFetchLongTermAnalysisData.mockRejectedValue(new InvalidTickerError('No data returned for ZZZZ. Check the ticker symbol or your API key.'));
+    const res = await request(app).get('/analysis/long-term/ZZZZ').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'No data returned for ZZZZ. Check the ticker symbol or your API key.' });
+  });
 });
 
 describe('GET /analysis/contrarian-comeback/:symbol/gate', () => {
@@ -158,6 +166,13 @@ describe('GET /analysis/contrarian-comeback/:symbol/gate', () => {
     const res = await request(app).get('/analysis/contrarian-comeback/AAPL/gate').set('Cookie', authCookie);
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: 'Analysis service unavailable.' });
+  });
+
+  test('404 when the ticker does not exist', async () => {
+    mockFetchContrarianComebackData.mockRejectedValue(new InvalidTickerError('No data returned for ZZZZ. Check the ticker symbol or your API key.'));
+    const res = await request(app).get('/analysis/contrarian-comeback/ZZZZ/gate').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'No data returned for ZZZZ. Check the ticker symbol or your API key.' });
   });
 });
 
@@ -219,5 +234,12 @@ describe('POST /analysis/contrarian-comeback/:symbol', () => {
     const res = await request(app).post('/analysis/contrarian-comeback/AAPL').set('Cookie', authCookie).send(validBody);
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: 'Analysis service unavailable.' });
+  });
+
+  test('404 when the ticker does not exist', async () => {
+    mockFetchContrarianComebackData.mockRejectedValue(new InvalidTickerError('No data returned for ZZZZ. Check the ticker symbol or your API key.'));
+    const res = await request(app).post('/analysis/contrarian-comeback/ZZZZ').set('Cookie', authCookie).send(validBody);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'No data returned for ZZZZ. Check the ticker symbol or your API key.' });
   });
 });

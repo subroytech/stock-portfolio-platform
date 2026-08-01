@@ -19,6 +19,10 @@ function renderShell(initialPath = '/') {
 
 describe('TabShell', () => {
   beforeEach(() => {
+    // Long-Term Analysis/Contrarian Comeback's sub-tab history persists to
+    // sessionStorage (see lib/tickerHistory.ts) - clear it so one test's
+    // launched ticker can't leak into another as an already-cached sub-tab.
+    sessionStorage.clear();
     // Dashboard's PortfolioSelector fires an unconditional /portfolios list
     // query the moment it mounts - every other tab only fetches on explicit
     // user action (useMutation), so a generic empty fallback covers the rest.
