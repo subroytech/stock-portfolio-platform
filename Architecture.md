@@ -582,9 +582,12 @@ This was the last Section 3 backlog item before Phase 4.
 
 ## Section 2 — Next Step
 
-**Phase 4 — Shared quote cache** (Redis or a TTL table, behind `GET /quotes`) is next. This is
-the first Phase 4-6 item — no more Python extractions remain in Section 3. Open `/plan` mode
-with the user to scope it before starting.
+**Open placeholder.** Phase 4 (shared quote cache) was discussed — data-ownership-style
+question (Redis vs. a Postgres/CockroachDB TTL table) resolved in favor of the TTL table (see
+Section 3 item 6 below for the reasoning and design) — but the user chose to **hold off on
+starting it** rather than proceed straight to `/plan`. No Python extractions remain in Section
+3, so whenever work resumes, it's either Phase 4 (now pre-scoped) or a reordering the user
+decides at that time.
 
 ---
 
@@ -629,7 +632,34 @@ with the user to scope it before starting.
 3. **Contrarian Comeback Analysis — built greenfield in Python. ✅ Done 2026-07-28** — see Section 1 for full detail. Deferred from Phase 3: the full gate-check/fundamental-health/scoring/thesis workflow from `contrarian-analysis.html`, ~500+ lines of logic with zero backend equivalent today. Sized like item 1 (this doc's item numbering, not the E2E item above), not a quick port — same rationale for going straight to Python rather than a throwaway Node version. Test gate: same as item 2, `pytest` coverage is the correctness bar.
 4. **Momentum Analysis — extracted from `momentum.service.ts`. ✅ Done 2026-07-29** — see Section 1 for full detail. `calcKellySizing` was not ported (stays client-side). Test gate: the relevant Jest fixtures ported 1:1 into pytest, value-for-value — the TS version stays in place, unmodified, as the rollback path.
 5. **Contrarian Finder — extracted from `contrarianFinder.service.ts`. ✅ Done 2026-07-29** — see Section 1 for full detail. Node stayed the sole DB owner (pros/cons comparison favored consistency with every other Python feature over Python getting its own CockroachDB connection). Test gate: the relevant Jest fixtures ported 1:1 into pytest, value-for-value — the TS version stays in place, unmodified, as the rollback path.
-6. **Phase 4 — Shared quote cache.** Redis or a TTL table, behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30–60 seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history tracking into the DB.
+6. **Phase 4 — Shared quote cache. ⏸ On hold (deferred by the user 2026-07-29, not started).**
+   Behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30-60
+   seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history
+   tracking into the DB. **Design already discussed and settled, ready to resume from when
+   picked back up:**
+   - **Redis vs. Postgres/CockroachDB TTL table → TTL table wins.** CockroachDB Cloud is
+     already provisioned/battle-tested in this build; a TTL table adds zero new
+     infrastructure, secrets, or failure modes (Redis would mean a whole new service to
+     provision, host, and handle "unreachable" for). CockroachDB's native row-level TTL
+     (`WITH (ttl_expire_after = '60s')`) is a first-class feature, not a workaround. The one
+     real tradeoff (DB read latency vs. in-memory Redis) doesn't matter here — the cache only
+     needs to beat a live FMP call, which it does easily either way. Redis's raw throughput
+     advantage isn't needed at this project's actual traffic scale.
+   - **Structure: UPSERT-keyed by `symbol` (a cache, not an append-only log)** — `CREATE TABLE
+     ... (symbol STRING PRIMARY KEY, price DECIMAL, ..., fetched_at TIMESTAMPTZ) WITH
+     (ttl_expire_after = '60s')`. Every fresh FMP fetch `UPSERT`s the existing row rather than
+     inserting a new one, so table size is bounded by the *count of distinct symbols ever
+     looked up* (a few hundred to low thousands, given Contrarian Finder's own `CF_MAX = 450`
+     universe cap), never by time or request volume — no unbounded growth to worry about.
+   - **Retention rule: the TTL window itself is the whole rule** — no separate cleanup logic
+     needed. The read path should still filter on `fetched_at` freshness explicitly
+     (`WHERE fetched_at > now() - interval '60 seconds'`) rather than trusting "row exists =
+     fresh," since CockroachDB's TTL deletion job runs on its own cron cadence, not instantly
+     at the expiry second — it's storage housekeeping, not the correctness mechanism.
+   - **Open decision, not yet resolved**: table naming. This doesn't fit the existing
+     `m_`/`tx_`/`sys_`/unprefixed convention (`backend/src/db/SCHEMA.md`) — it's shared,
+     ephemeral, cross-user cache data, a genuinely new category. A `cache_` prefix was
+     floated but not committed to; settle this when `/plan` actually starts.
 7. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from Section 2), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
 8. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.
 

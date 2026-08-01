@@ -253,11 +253,14 @@ total). 8 new backend tests (209 total, including a design fix — an initial de
 `Promise.allSettled` error-branch was simplified out after discovering `fetchStockData` can
 never actually reject). `tsc`/lint clean. Verified live: a real 15-symbol batch scan through
 the new path returned correct sector overlays, pricing, and strength scoring. Full detail in
-`Architecture.md` Section 1. **No more Python extractions remain in Section 3** — Section 2's
-next item is Phase 4 (shared quote cache), TBD-scoped via its own `/plan`.
+`Architecture.md` Section 1. **No more Python extractions remain in Section 3.**
 
 ## Phases 4–6 — Not Started
-- Phase 4: Shared quote cache (Redis / Postgres TTL table)
+- Phase 4: Shared quote cache — **⏸ on hold, deferred by the user 2026-07-29** before
+  `/plan` started. Design already settled though (CockroachDB TTL table over Redis, UPSERT-
+  keyed by symbol, TTL window = the retention rule) — see `Architecture.md` Section 3 item 6
+  for the full reasoning, ready to resume from whenever this gets picked back up. Table
+  naming (doesn't fit `m_`/`tx_`/`sys_`/unprefixed) is the one still-open decision.
 - Phase 5: Production hardening (Docker, Sentry, staging/prod split)
 - Phase 6: Migration tool + cutover from current app
 
