@@ -43,8 +43,9 @@ describe('HoldingsTable', () => {
   test('desktop table renders one row per holding with all 10 columns', () => {
     render(<HoldingsTable holdings={[holding]} />);
     const headers = screen.getAllByRole('columnheader').map((th) => th.textContent);
+    // "Value▼" - Value is the default sort column (descending) - see the dedicated sort-default test.
     expect(headers).toEqual([
-      'Symbol', 'Name', 'Sector', 'Qty', 'Avg Cost', 'Price', 'Value', 'Gain/Loss', 'Return %', 'Alloc %',
+      'Symbol', 'Name', 'Sector', 'Qty', 'Avg Cost', 'Price', 'Value▼', 'Gain/Loss', 'Return %', 'Alloc %',
     ]);
   });
 
@@ -52,14 +53,14 @@ describe('HoldingsTable', () => {
     return screen.getAllByRole('row').slice(1).map((r) => r.getAttribute('data-testid'));
   }
 
-  test('unsorted by default: rows render in the original insertion order', () => {
+  test('sorted by Value descending by default (not insertion order)', () => {
     const holdings = [
       { ...holding, id: 'h1', symbol: 'MSFT', currentValue: 500 },
       { ...holding, id: 'h2', symbol: 'AAPL', currentValue: 1500 },
       { ...holding, id: 'h3', symbol: 'GOOG', currentValue: 1000 },
     ];
     render(<HoldingsTable holdings={holdings} />);
-    expect(rowOrder()).toEqual(['holdings-row-MSFT', 'holdings-row-AAPL', 'holdings-row-GOOG']);
+    expect(rowOrder()).toEqual(['holdings-row-AAPL', 'holdings-row-GOOG', 'holdings-row-MSFT']);
   });
 
   test('clicking a column header sorts ascending; clicking it again reverses to descending', async () => {
@@ -104,5 +105,45 @@ describe('HoldingsTable', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Sector' })); // descending
     expect(rowOrder()).toEqual(['holdings-row-AAA', 'holdings-row-CCC', 'holdings-row-BBB']); // null still last
+  });
+
+  describe('Major/Minor Holdings tabs', () => {
+    function sizedHoldings() {
+      return [
+        { ...holding, id: 'h1', symbol: 'BIG', allocationPct: 40 },
+        { ...holding, id: 'h2', symbol: 'SMALL', allocationPct: 1 },
+        { ...holding, id: 'h3', symbol: 'EDGE', allocationPct: 2.5 }, // exactly at the threshold - minor, not major
+        { ...holding, id: 'h4', symbol: 'UNKNOWN', allocationPct: null }, // no price refresh yet - defaults to minor
+      ];
+    }
+
+    test('defaults to the Major tab, showing only allocations > 2.5% with a correct count and $ total', () => {
+      render(<HoldingsTable holdings={sizedHoldings()} />);
+      expect(screen.getByRole('button', { name: 'MAJOR ($1,500.00) in #1 Stocks' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'MINOR ($4,500.00) in #3 Stocks' })).toBeInTheDocument();
+      expect(screen.getAllByText('BIG').length).toBeGreaterThan(0);
+      expect(screen.queryByText('SMALL')).not.toBeInTheDocument();
+      expect(screen.queryByText('EDGE')).not.toBeInTheDocument();
+      expect(screen.queryByText('UNKNOWN')).not.toBeInTheDocument();
+    });
+
+    test('switching to Minor shows allocations <= 2.5%, including exactly-2.5% and null allocations', async () => {
+      render(<HoldingsTable holdings={sizedHoldings()} />);
+      await userEvent.click(screen.getByRole('button', { name: /^MINOR/ }));
+
+      expect(screen.getAllByText('SMALL').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('EDGE').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('UNKNOWN').length).toBeGreaterThan(0);
+      expect(screen.queryByText('BIG')).not.toBeInTheDocument();
+    });
+
+    test('shows a tab-specific empty state when the active tab has no matching holdings', async () => {
+      render(<HoldingsTable holdings={[{ ...holding, id: 'h1', symbol: 'BIG', allocationPct: 40 }]} />);
+      expect(screen.queryByText(/No holdings/)).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', { name: /^MINOR/ }));
+      expect(screen.getByText(/No holdings at or below the 2.5% allocation threshold/)).toBeInTheDocument();
+      expect(screen.queryByRole('table')).not.toBeInTheDocument();
+    });
   });
 });

@@ -26,7 +26,7 @@
 
 import env from '../config/env';
 import { pool } from '../db/pool';
-import { fmpGet, HistoricalBar } from './marketData.service';
+import { fmpGet, HistoricalBar, getProfiles } from './marketData.service';
 import { mwSMA, mwRSI, mwBB } from './momentum.service';
 import * as analysisService from './analysisService';
 
@@ -92,6 +92,116 @@ export async function assembleUniverse(): Promise<UniverseEntry[]> {
   }
 
   return universe;
+}
+
+export interface UniverseIndexInfo {
+  id: string;
+  description: string;
+}
+
+export interface UniverseStockRow {
+  symbol: string;
+  name: string | null;
+  sector: string | null;
+  marketCap: number | null;
+  indices: string[];
+}
+
+export interface UniverseTable {
+  indices: UniverseIndexInfo[];
+  stocks: UniverseStockRow[];
+}
+
+// Fixed display order (not DB row order, which Postgres/CockroachDB doesn't
+// guarantee) - matches the seed script's INDEX_DESCRIPTIONS ordering.
+const UNIVERSE_INDEX_ORDER = ['DJ30', 'NDX100', 'SP500', ...CF_ETF_LIST];
+
+// A reference table for the Contrarian Finder page's "Stock Universe" section
+// - distinct from assembleUniverse() above, which stays capped/dedup'd/single
+// -tier for the actual scan orchestration. This one shows EVERY index a stock
+// belongs to (many stocks are in more than one - e.g. AAPL is in DJ30, S&P
+// 500, and XLK), which assembleUniverse()'s "first index it matched" tier
+// can't represent.
+export async function getUniverseTable(): Promise<UniverseTable> {
+  const { rows: indexRows } = await pool.query<{ index_id: string; index_description: string }>(
+    'SELECT index_id, index_description FROM m_index_master',
+  );
+  const indices = UNIVERSE_INDEX_ORDER
+    .map((id) => indexRows.find((r) => r.index_id === id))
+    .filter((r): r is { index_id: string; index_description: string } => !!r)
+    .map((r) => ({ id: r.index_id, description: r.index_description }));
+
+  const { rows } = await pool.query<{ symbol: string; name: string | null; sector: string | null; market_cap: string | null; index_ids: string[] }>(`
+    SELECT ic.symbol, t.name, t.sector, t.market_cap, array_agg(ic.index_id ORDER BY ic.index_id) AS index_ids
+    FROM m_index_constituent ic
+    LEFT JOIN m_tickers t ON t.symbol = ic.symbol
+    GROUP BY ic.symbol, t.name, t.sector, t.market_cap
+  `);
+
+  const stocks = rows
+    .map((r) => ({
+      symbol: r.symbol, name: r.name, sector: r.sector,
+      marketCap: r.market_cap != null ? Number(r.market_cap) : null, // NUMERIC comes back as a string from pg
+      indices: r.index_ids,
+    }))
+    .sort((a, b) => b.indices.length - a.indices.length || a.symbol.localeCompare(b.symbol));
+
+  return { indices, stocks };
+}
+
+export interface TickerRefreshResult {
+  updated: number;
+  skipped: number;
+}
+
+// Shared by two consumers: "Run Scan (+ Mkt Cap)" (mode 'all' - piggybacks on
+// a real scan's own batch, refreshing every symbol in it regardless of
+// current state) and the Admin Console's Master Data "Delta Update" (mode
+// 'missing' - a lighter, standalone action that only touches gaps). Uses
+// getProfiles() (FMP /profile) as a single consistent source for all three
+// fields, rather than mixing in the scan's own /quote-sourced name/marketCap
+// - "+ Mkt Cap" is deliberately a heavier variant with its own progress bar,
+// so the extra FMP calls this costs are an accepted tradeoff, not an oversight.
+export async function refreshTickerDataBatch(
+  stocks: UniverseEntry[], apiKey: string, mode: 'missing' | 'all',
+): Promise<TickerRefreshResult> {
+  const symbols = stocks.map((s) => s.symbol);
+  let targetSymbols = symbols;
+
+  if (mode === 'missing') {
+    // LEFT JOIN (via unnest), not just "WHERE some column IS NULL" - a symbol
+    // with NO m_tickers row at all must also count as missing (exactly what
+    // portfolio-import's bare-insert path and brand-new universe symbols
+    // produce), not just an existing row with a null field.
+    const { rows } = await pool.query<{ symbol: string }>(
+      `SELECT s.symbol FROM unnest($1::text[]) AS s(symbol)
+       LEFT JOIN m_tickers t ON t.symbol = s.symbol
+       WHERE t.symbol IS NULL OR t.name IS NULL OR t.sector IS NULL OR t.market_cap IS NULL`,
+      [symbols],
+    );
+    targetSymbols = rows.map((r) => r.symbol);
+  }
+
+  if (targetSymbols.length === 0) return { updated: 0, skipped: symbols.length };
+
+  const profiles = await getProfiles(targetSymbols, apiKey);
+  const entries = Object.entries(profiles).filter(([, p]) => p.name || p.sector || p.marketCap != null);
+
+  if (entries.length > 0) {
+    const values = entries.map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`).join(', ');
+    const params = entries.flatMap(([symbol, p]) => [symbol, p.name || null, p.sector || null, p.marketCap]);
+    await pool.query(
+      `INSERT INTO m_tickers (symbol, name, sector, market_cap) VALUES ${values}
+       ON CONFLICT (symbol) DO UPDATE SET
+         name = COALESCE(excluded.name, m_tickers.name),
+         sector = COALESCE(excluded.sector, m_tickers.sector),
+         market_cap = COALESCE(excluded.market_cap, m_tickers.market_cap),
+         updated_at = now()`,
+      params,
+    );
+  }
+
+  return { updated: entries.length, skipped: symbols.length - entries.length };
 }
 
 export interface ScanQuality {

@@ -4,19 +4,38 @@
 
 import { pool } from '../db/pool';
 import * as marketData from './marketData.service';
-import type { HistoricalBar } from './marketData.service';
+import type { HistoricalBar, Quote } from './marketData.service';
 import * as userSubscription from './userSubscription.service';
 import { applyLivePrices, HoldingLike } from './livePrices.service';
 import { ParseResult } from './parser.service';
 
+// Matches an already-pair-formatted symbol (BTCUSD, BTC-USD, a USDT pair) -
+// shared by isPerfSkipped below and toFmpQuoteSymbol, so a symbol that's
+// already in FMP's pair format doesn't get USD appended a second time.
+const USD_PAIR_SUFFIX = /USD$|-USD$|USDT$/;
+
 // Ported from the source app's isPerfSkipped() (portfolio-performance.js) -
 // BTC/ETH-style holdings don't work with trading-day EOD history math
 // (Robinhood exports bare BTC/ETH; FMP expects BTCUSD), so they're excluded
-// from performanceHistory - the current-quote refresh above is unaffected,
-// they still show up in KPIs/Holdings as normal.
+// from performanceHistory.
 function isPerfSkipped(symbol: string, sector: string | null): boolean {
   if (sector === 'Crypto') return true;
-  return /USD$|-USD$|USDT$/.test(symbol);
+  return USD_PAIR_SUFFIX.test(symbol);
+}
+
+// FMP's stock-quote endpoint (getQuotes below) doesn't resolve bare crypto
+// tickers - BTC/ETH need the pair format BTCUSD/ETHUSD. Robinhood exports
+// (parser.service.ts) store the bare symbol, and the DB/rest of the app keeps
+// using that bare symbol throughout - this mapping only exists for the live
+// FMP quote request itself, and gets reversed on the way back (see
+// refreshPrices) so applyLivePrices' lookup by the holding's own symbol still
+// matches. Found live: BTC/ETH holdings' prices were silently never updating
+// on Refresh Prices, frozen at whatever price the original import captured,
+// since FMP had no match for the bare symbol and applyLivePrices treats "no
+// quote returned" as "leave this one alone."
+function toFmpQuoteSymbol(symbol: string, sector: string | null): string {
+  if (sector === 'Crypto' && !USD_PAIR_SUFFIX.test(symbol)) return `${symbol}USD`;
+  return symbol;
 }
 
 export class PortfolioNotFoundError extends Error {}
@@ -291,6 +310,21 @@ export async function importHoldings(
          VALUES ${values.join(', ')}`,
         params,
       );
+
+      // m_tickers is the single source of truth for ticker name/sector
+      // (2026-08-02) - fed from both this import path and the Contrarian
+      // Finder universe's own seed/backfill script. A real import is real
+      // evidence a symbol exists; insert a bare row (sector from whatever
+      // parser.service.ts already resolved) for anything m_tickers doesn't
+      // know yet. ON CONFLICT DO NOTHING - never overwrites a symbol already
+      // enriched (e.g. by backfillTickerData.ts's FMP-sourced name/sector).
+      const uniqueSymbols = [...new Map(parsed.data.map((h) => [h.symbol, h.sector])).entries()];
+      const tickerValues = uniqueSymbols.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(', ');
+      const tickerParams = uniqueSymbols.flatMap(([symbol, sector]) => [symbol, sector || null]);
+      await client.query(
+        `INSERT INTO m_tickers (symbol, sector) VALUES ${tickerValues} ON CONFLICT (symbol) DO NOTHING`,
+        tickerParams,
+      );
     }
 
     await client.query(
@@ -406,10 +440,18 @@ export async function refreshPrices(userId: string, portfolioId: string): Promis
   const holdings = holdingRows.map(toHoldingLike);
   const historySymbols = [...new Set(holdingRows.filter((r) => !isPerfSkipped(r.symbol, r.sector)).map((r) => r.symbol))];
 
-  const [priceMap, historyResults] = await Promise.all([
-    marketData.getQuotes(holdings.map((h) => h.symbol), apiKey),
+  const fmpQuoteSymbols = holdingRows.map((r) => toFmpQuoteSymbol(r.symbol, r.sector));
+  const [rawPriceMap, historyResults] = await Promise.all([
+    marketData.getQuotes(fmpQuoteSymbols, apiKey),
     Promise.allSettled(historySymbols.map((symbol) => marketData.getHistorical(symbol, apiKey, 130))),
   ]);
+  // Map the FMP pair-format keys (e.g. BTCUSD) back to each holding's own bare
+  // symbol (e.g. BTC) - applyLivePrices looks quotes up by stock.symbol.
+  const priceMap: Record<string, Quote> = {};
+  holdingRows.forEach((r, i) => {
+    const quote = rawPriceMap[fmpQuoteSymbols[i]];
+    if (quote) priceMap[r.symbol] = quote;
+  });
   applyLivePrices(holdings, priceMap);
 
   const performanceHistory: Record<string, HistoricalBar[]> = {};

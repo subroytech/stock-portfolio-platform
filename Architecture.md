@@ -582,12 +582,13 @@ This was the last Section 3 backlog item before Phase 4.
 
 ## Section 2 — Next Step
 
-**Open placeholder.** Phase 4 (shared quote cache) was discussed — data-ownership-style
-question (Redis vs. a Postgres/CockroachDB TTL table) resolved in favor of the TTL table (see
-Section 3 item 6 below for the reasoning and design) — but the user chose to **hold off on
-starting it** rather than proceed straight to `/plan`. No Python extractions remain in Section
-3, so whenever work resumes, it's either Phase 4 (now pre-scoped) or a reordering the user
-decides at that time.
+**Two new items queued ahead of Phase 4, neither planned for implementation yet.** The user
+named two functional enhancements while looking ahead to a paid/subscription version of the
+app — **Functional Authorization (RBAC) + Usage Tracking** (Section 3 item 6) and a
+**Contrarian Finder stock universe overhaul** (item 7) — both discussed at the functional/
+design level but not yet run through a dedicated `/plan` session. Phase 4 (shared quote cache,
+item 8) stays on hold behind them — its own design (Redis vs. a Postgres/CockroachDB TTL
+table, resolved in favor of the TTL table) is unchanged, just deprioritized.
 
 ---
 
@@ -632,7 +633,48 @@ decides at that time.
 3. **Contrarian Comeback Analysis — built greenfield in Python. ✅ Done 2026-07-28** — see Section 1 for full detail. Deferred from Phase 3: the full gate-check/fundamental-health/scoring/thesis workflow from `contrarian-analysis.html`, ~500+ lines of logic with zero backend equivalent today. Sized like item 1 (this doc's item numbering, not the E2E item above), not a quick port — same rationale for going straight to Python rather than a throwaway Node version. Test gate: same as item 2, `pytest` coverage is the correctness bar.
 4. **Momentum Analysis — extracted from `momentum.service.ts`. ✅ Done 2026-07-29** — see Section 1 for full detail. `calcKellySizing` was not ported (stays client-side). Test gate: the relevant Jest fixtures ported 1:1 into pytest, value-for-value — the TS version stays in place, unmodified, as the rollback path.
 5. **Contrarian Finder — extracted from `contrarianFinder.service.ts`. ✅ Done 2026-07-29** — see Section 1 for full detail. Node stayed the sole DB owner (pros/cons comparison favored consistency with every other Python feature over Python getting its own CockroachDB connection). Test gate: the relevant Jest fixtures ported 1:1 into pytest, value-for-value — the TS version stays in place, unmodified, as the rollback path.
-6. **Phase 4 — Shared quote cache. ⏸ On hold (deferred by the user 2026-07-29, not started).**
+6. **Functional Authorization (RBAC) + Usage Tracking Module. Scoping — design discussed,
+   not yet planned for implementation.** Two goals: gate specific features by role (concrete
+   first example: Contrarian Finder's "Run Scan" should be admin-only, not open to every
+   signed-in user) and measure per-user usage across analysis features, to eventually classify
+   users into subscription tiers as this moves toward a paid product. Discussion (2026-07-31)
+   surfaced a real pre-existing gap — there is no `GET /auth/me` endpoint; `frontend/src/api/
+   auth.ts`'s `useSession()` deliberately probes `/portfolios` and catches 401 to infer "logged
+   in," with the actual user object cached in a page-load-scoped JS variable that's lost on
+   reload — and worked through the table design in detail without yet approving an
+   implementation plan: full RBAC rather than a single `role` column (`m_roles` — role catalog,
+   master/reference data, same bucket as `m_index_master`; `m_role_permissions` — which
+   permissions each role grants, child of `m_roles` mirroring `m_index_constituent`;
+   `users_roles` — which roles each user has, per-account data, unprefixed like
+   `users_subscriptions`); a new `user_evt_` naming bucket for usage tracking since it fits
+   none of the existing four (`m_`/`tx_`/`sys_`/unprefixed) — `tx_` is explicitly
+   portfolio-scoped and `sys_` is explicitly internal-not-app-data, neither describes a
+   per-user event log — with two tables, `user_evt_usage` (raw event log, `WITH
+   (ttl_expire_after = '35 days')`, CockroachDB's native TTL auto-deleting old rows with no
+   cron job needed) and `user_evt_usage_summary_monthly` (one row per user+feature+month,
+   incremented via `ON CONFLICT ... DO UPDATE` on every event write rather than a batch rollup
+   job, `WITH (ttl_expire_after = '366 days')` for the ~12-month retention cap); and a real
+   `PUT /users/:id/role` admin-promotion endpoint (itself permission-gated) rather than a
+   manual DB update, with no admin UI to call it yet. Confirmed `users_subscriptions` (existing
+   since 2026-07-12) does **not** double as a billing/tier table — it's per-*provider*
+   (FMP/Finnhub) API-key + that provider's own plan info, a different concept from what tier
+   the user pays this app for; a future `users_platform_subscription`-style table would be
+   needed separately if/when actual billing is built. **Next step**: a dedicated `/plan`
+   session to turn this into a real implementation plan (migration, `requirePermission`
+   middleware, the `/auth/me` fix, usage-logging call sites in the 5 analysis-triggering
+   controllers, frontend role-awareness).
+7. **Contrarian Finder stock universe overhaul. Early discussion, not yet planned.**
+   `m_tickers`/`m_index_master`/`m_index_constituent` already exist and ARE the live source
+   `assembleUniverse()` queries (`backend/src/services/contrarianFinder.service.ts`), capped at
+   `CF_MAX = 450` symbols, built from DJ30 → NDX100 → SP500 → 11 sector SPDR ETFs in that
+   priority order — but the underlying data was never re-sourced when the DB arrived.
+   `backend/src/db/seedTickerData.ts` is a one-time idempotent script that just copies two
+   hardcoded pre-DB-era files (`cf_static_universe.ts`, `ticker_sectors.ts`) into those tables
+   verbatim; moving the universe into a DB table didn't make it any less crude, just relocated
+   it. Open question, not yet resolved: keep hand-curating the static lists (simple, same
+   manual-maintenance burden) vs. sourcing live index membership from FMP's own endpoints or
+   another feed (bigger lift, stops the universe from going stale).
+8. **Phase 4 — Shared quote cache. ⏸ On hold (deferred by the user 2026-07-29, not started).**
    Behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30-60
    seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history
    tracking into the DB. **Design already discussed and settled, ready to resume from when
@@ -660,7 +702,7 @@ decides at that time.
      `m_`/`tx_`/`sys_`/unprefixed convention (`backend/src/db/SCHEMA.md`) — it's shared,
      ephemeral, cross-user cache data, a genuinely new category. A `cache_` prefix was
      floated but not committed to; settle this when `/plan` actually starts.
-7. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from Section 2), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
-8. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.
+9. **Phase 5 — Production hardening.** Docker for the rest of the stack (Python services are already containerized from Section 2), structured logging + Sentry, staging/prod environment + database separation, per-IP rate limits on auth endpoints.
+10. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.
 
 **How to apply:** before starting any item above, open with `/plan` mode to walk through that item's decisions with the user first.

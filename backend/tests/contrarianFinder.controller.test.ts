@@ -3,22 +3,31 @@ jest.mock('../src/services/contrarianFinder.service', () => ({
   ...jest.requireActual('../src/services/contrarianFinder.service'),
   assembleUniverse: jest.fn(),
   assembleScanBatch: jest.fn(),
+  getUniverseTable: jest.fn(),
+  refreshTickerDataBatch: jest.fn(),
 }));
 jest.mock('../src/services/userSubscription.service', () => ({
   ...jest.requireActual('../src/services/userSubscription.service'),
   getDecryptedKey: jest.fn(),
 }));
+jest.mock('../src/services/usageTracking.service');
 
 import request from 'supertest';
+import { pool } from '../src/db/pool';
 import * as cf from '../src/services/contrarianFinder.service';
 import * as analysisService from '../src/services/analysisService';
 import * as userSubscription from '../src/services/userSubscription.service';
+import * as usageTracking from '../src/services/usageTracking.service';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
 
 const mockAssembleUniverse = cf.assembleUniverse as jest.Mock;
 const mockAssembleScanBatch = cf.assembleScanBatch as jest.Mock;
+const mockGetUniverseTable = cf.getUniverseTable as jest.Mock;
+const mockRefreshTickerDataBatch = cf.refreshTickerDataBatch as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
+const mockQuery = pool.query as unknown as jest.Mock;
+const mockLogUsage = usageTracking.logUsage as jest.Mock;
 
 const authCookie = `auth_token=${signToken('user-1')}`;
 
@@ -36,12 +45,51 @@ beforeEach(() => {
   mockAssembleScanBatch.mockImplementation((stocks: { symbol: string }[]) => Promise.resolve(
     stocks.map((s) => ({ symbol: s.symbol, filterFail: false, noData: false, changePct: -10 })),
   ));
+  mockQuery.mockReset();
+  // scan-batch is admin-only (requirePermission) - default every test here to
+  // an "admin" caller (a matching role_permissions row) so the existing tests
+  // below still exercise the controller itself, not the permission gate.
+  mockQuery.mockResolvedValue({ rows: [{ '?column?': 1 }] });
+  mockLogUsage.mockReset();
+  mockLogUsage.mockResolvedValue(undefined);
+  mockGetUniverseTable.mockReset();
+  mockRefreshTickerDataBatch.mockReset();
+  mockRefreshTickerDataBatch.mockResolvedValue({ updated: 5, skipped: 1 });
+});
+
+describe('GET /contrarian-finder/universe', () => {
+  const fakeUniverseTable = {
+    indices: [{ id: 'DJ30', description: 'Dow Jones Industrial Average' }],
+    stocks: [{ symbol: 'AAPL', name: 'Apple Inc.', sector: 'Technology', indices: ['DJ30'] }],
+  };
+
+  test('401 without a session cookie', async () => {
+    const res = await request(app).get('/contrarian-finder/universe');
+    expect(res.status).toBe(401);
+  });
+
+  test('200 for a signed-in user with NO contrarian_finder:scan permission - genuinely ungated, unlike scan-batch', async () => {
+    mockGetUniverseTable.mockResolvedValue(fakeUniverseTable);
+    const res = await request(app).get('/contrarian-finder/universe').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(fakeUniverseTable);
+    // No requirePermission DB check ran at all for this route (unlike scan-batch's 403 test
+    // below, which needs a `mockQuery.mockResolvedValueOnce({ rows: [] })` to prove the gate).
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /contrarian-finder/scan-batch', () => {
   test('401 without a session cookie', async () => {
     const res = await request(app).post('/contrarian-finder/scan-batch').send({ batchIndex: 0 });
     expect(res.status).toBe(401);
+  });
+
+  test('403 for a signed-in user without the contrarian_finder:scan permission (not an admin)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
+    expect(res.status).toBe(403);
+    expect(mockAssembleUniverse).not.toHaveBeenCalled();
   });
 
   test('503 when the caller has no FMP key on file', async () => {
@@ -105,5 +153,83 @@ describe('POST /contrarian-finder/scan-batch', () => {
   test('missing batchSize/maxBatches/scanDays fall back to the service defaults', async () => {
     await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
     expect(mockAssembleScanBatch.mock.calls[0][0]).toHaveLength(cf.CF_BATCH);
+  });
+
+  test('logs usage on a successful batch scan', async () => {
+    const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
+    expect(res.status).toBe(200);
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'contrarian_finder_scan');
+  });
+
+  test('a failed usage log does not turn a successful response into a 500 (fire-and-forget)', async () => {
+    mockLogUsage.mockRejectedValue(new Error('usage log db exploded'));
+    const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
+    expect(res.status).toBe(200);
+  });
+
+  test('tickerRefresh is omitted (undefined) when updateAllTickerData is not set - a normal "Run Scan" response shape is unchanged', async () => {
+    const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
+    expect(res.status).toBe(200);
+    expect(res.body.tickerRefresh).toBeUndefined();
+    expect(mockRefreshTickerDataBatch).not.toHaveBeenCalled();
+  });
+
+  test('"Run Scan (+ Mkt Cap)" (updateAllTickerData: true) piggybacks refreshTickerDataBatch in "all" mode on the same batch, and includes its result', async () => {
+    const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie)
+      .send({ batchIndex: 0, updateAllTickerData: true });
+    expect(res.status).toBe(200);
+    expect(res.body.tickerRefresh).toEqual({ updated: 5, skipped: 1 });
+    expect(mockRefreshTickerDataBatch).toHaveBeenCalledTimes(1);
+    const [batchStocks, key, mode] = mockRefreshTickerDataBatch.mock.calls[0];
+    expect(batchStocks).toHaveLength(125); // same batch assembleScanBatch got
+    expect(key).toBe('fake-fmp-key');
+    expect(mode).toBe('all');
+  });
+});
+
+describe('POST /contrarian-finder/ticker-data-refresh-batch', () => {
+  test('401 without a session cookie', async () => {
+    const res = await request(app).post('/contrarian-finder/ticker-data-refresh-batch').send({ batchIndex: 0 });
+    expect(res.status).toBe(401);
+  });
+
+  test('403 for a signed-in user without the contrarian_finder:scan permission', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).post('/contrarian-finder/ticker-data-refresh-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
+    expect(res.status).toBe(403);
+    expect(mockRefreshTickerDataBatch).not.toHaveBeenCalled();
+  });
+
+  test('503 when the caller has no FMP key on file', async () => {
+    mockGetDecryptedKey.mockRejectedValue(new userSubscription.MissingUserApiKeyError('No fmp API key on file.'));
+    const res = await request(app).post('/contrarian-finder/ticker-data-refresh-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
+    expect(res.status).toBe(503);
+    expect(mockRefreshTickerDataBatch).not.toHaveBeenCalled();
+  });
+
+  test('200 refreshes exactly the requested batch in "missing" mode, no scan/scoring involved at all', async () => {
+    const res = await request(app).post('/contrarian-finder/ticker-data-refresh-batch').set('Cookie', authCookie)
+      .send({ batchIndex: 0, batchSize: 125, maxBatches: 3 });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ batchIndex: 0, totalBatches: 2, universeSize: 250, updated: 5, skipped: 1 });
+    expect(mockAssembleScanBatch).not.toHaveBeenCalled(); // the lighter sibling never runs a real scan
+    const [batchStocks, key, mode] = mockRefreshTickerDataBatch.mock.calls[0];
+    expect(batchStocks).toHaveLength(125);
+    expect(key).toBe('fake-fmp-key');
+    expect(mode).toBe('missing');
+  });
+
+  test('400 when batchIndex is beyond the real (server-computed) totalBatches', async () => {
+    const res = await request(app).post('/contrarian-finder/ticker-data-refresh-batch').set('Cookie', authCookie)
+      .send({ batchIndex: 2, batchSize: 125, maxBatches: 3 });
+    expect(res.status).toBe(400);
+    expect(mockRefreshTickerDataBatch).not.toHaveBeenCalled();
+  });
+
+  test('400 for a negative or non-numeric batchIndex', async () => {
+    const res1 = await request(app).post('/contrarian-finder/ticker-data-refresh-batch').set('Cookie', authCookie).send({ batchIndex: -1 });
+    expect(res1.status).toBe(400);
+    const res2 = await request(app).post('/contrarian-finder/ticker-data-refresh-batch').set('Cookie', authCookie).send({ batchIndex: 'nope' });
+    expect(res2.status).toBe(400);
   });
 });

@@ -35,6 +35,14 @@ export interface BatchScanInput {
   maxBatches?: number;
   qualityPreset?: 'standard' | 'relaxed';
   scanDays?: number;
+  // "Run Scan (+ Mkt Cap)" - piggybacks a full ("all", not just missing)
+  // m_tickers name/sector/market-cap refresh onto this same scan/batch.
+  updateAllTickerData?: boolean;
+}
+
+interface TickerRefreshBatchResult {
+  updated: number;
+  skipped: number;
 }
 
 interface BatchScanResponse {
@@ -42,6 +50,12 @@ interface BatchScanResponse {
   totalBatches: number;
   universeSize: number;
   results: ScanResult[];
+  tickerRefresh?: TickerRefreshBatchResult;
+}
+
+export interface TickerRefreshProgress {
+  completed: number;
+  total: number;
 }
 
 // The parameters a scan actually ran with — captured once when the scan
@@ -156,6 +170,9 @@ export function useContrarianBatchScan() {
   const [progress, setProgress] = useState<BatchScanProgress>({
     phase: 'idle', currentBatch: 0, totalBatches: null, waitRemaining: 0,
   });
+  // null for a normal "Run Scan" (no second progress bar shown); populated
+  // only for a "+ Mkt Cap" run, accumulating each batch's tickerRefresh count.
+  const [tickerRefreshProgress, setTickerRefreshProgress] = useState<TickerRefreshProgress | null>(null);
 
   const setData = useCallback((next: BatchScanData | undefined) => {
     setDataState(next);
@@ -190,10 +207,12 @@ export function useContrarianBatchScan() {
     setError(null);
     setData(undefined);
     setProgress({ phase: 'scanning', currentBatch: 1, totalBatches: null, waitRemaining: 0 });
+    setTickerRefreshProgress(input.updateAllTickerData ? { completed: 0, total: 0 } : null);
 
     const allResults: ScanResult[] = [];
     let totalBatches = Infinity; // unknown until the first response tells us
     let batchIndex = 0;
+    let tickerRefreshTotal = 0;
 
     try {
       while (batchIndex < totalBatches) {
@@ -210,6 +229,10 @@ export function useContrarianBatchScan() {
         allResults.push(...res.results);
         setData({ universeSize: res.universeSize, scanned: allResults.length, results: [...allResults], params });
         setProgress((p) => ({ ...p, totalBatches, currentBatch: batchIndex + 1 }));
+        if (input.updateAllTickerData) {
+          tickerRefreshTotal += (res.tickerRefresh?.updated ?? 0) + (res.tickerRefresh?.skipped ?? 0);
+          setTickerRefreshProgress({ completed: tickerRefreshTotal, total: res.universeSize });
+        }
 
         batchIndex += 1;
         if (batchIndex < totalBatches) {
@@ -229,7 +252,7 @@ export function useContrarianBatchScan() {
     }
   }, [setData]);
 
-  return { run, isPending, isError, error, data, progress };
+  return { run, isPending, isError, error, data, progress, tickerRefreshProgress };
 }
 
 // Shared cache slot for the last scan's Strength List — ContrarianFinderPage
@@ -246,4 +269,130 @@ export function useStrengthListCache() {
     queryFn: () => Promise.resolve([]),
     enabled: false,
   });
+}
+
+export interface UniverseIndexInfo {
+  id: string;
+  description: string;
+}
+
+export interface UniverseStockRow {
+  symbol: string;
+  name: string | null;
+  sector: string | null;
+  marketCap: number | null;
+  indices: string[];
+}
+
+export interface UniverseTable {
+  indices: UniverseIndexInfo[];
+  stocks: UniverseStockRow[];
+}
+
+// GET /contrarian-finder/universe - read-only reference data (what a scan's
+// universe actually contains), not gated behind contrarian_finder:scan since
+// viewing it isn't an action. `enabled` lets the page defer the fetch until
+// the section is actually expanded, rather than firing on every page load.
+export function useStockUniverse(enabled: boolean) {
+  return useQuery<UniverseTable>({
+    queryKey: ['contrarianFinder', 'universe'],
+    queryFn: () => apiFetch<UniverseTable>('/contrarian-finder/universe'),
+    enabled,
+    staleTime: Infinity, // static reference data - doesn't change mid-session
+  });
+}
+
+interface TickerDataRefreshBatchResponse {
+  batchIndex: number;
+  totalBatches: number;
+  universeSize: number;
+  updated: number;
+  skipped: number;
+}
+
+export interface DeltaUpdateProgress {
+  phase: 'idle' | 'running' | 'waiting' | 'done';
+  currentBatch: number;
+  totalBatches: number | null;
+  waitRemaining: number;
+}
+
+export interface DeltaUpdateResult {
+  updated: number;
+  skipped: number;
+  universeSize: number;
+}
+
+// Admin Console "Master Data" Delta Update - the lighter, missing-only
+// sibling of "Run Scan (+ Mkt Cap)". Same batch/pacing shape as
+// useContrarianBatchScan() above (reusing WAIT_SECONDS/waitWithCountdown),
+// but simpler: no threshold/quality/scanDays, and each batch call hits
+// POST /contrarian-finder/ticker-data-refresh-batch instead of scan-batch.
+export function useTickerDataDeltaUpdate() {
+  const [isPending, setIsPending] = useState(false);
+  const [isError, setIsError] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [result, setResult] = useState<DeltaUpdateResult | null>(null);
+  const [progress, setProgress] = useState<DeltaUpdateProgress>({
+    phase: 'idle', currentBatch: 0, totalBatches: null, waitRemaining: 0,
+  });
+
+  const runIdRef = useRef(0);
+  useEffect(() => () => { runIdRef.current += 1; }, []);
+
+  const run = useCallback(async () => {
+    const myRunId = (runIdRef.current += 1);
+    const isCancelled = () => runIdRef.current !== myRunId;
+
+    setIsPending(true);
+    setIsError(false);
+    setError(null);
+    setResult(null);
+    setProgress({ phase: 'running', currentBatch: 1, totalBatches: null, waitRemaining: 0 });
+
+    let totalBatches = Infinity;
+    let batchIndex = 0;
+    let updated = 0;
+    let skipped = 0;
+    let universeSize = 0;
+
+    try {
+      while (batchIndex < totalBatches) {
+        if (isCancelled()) return;
+        setProgress((p) => ({ ...p, phase: 'running', currentBatch: batchIndex + 1 }));
+
+        const res = await apiFetch<TickerDataRefreshBatchResponse>('/contrarian-finder/ticker-data-refresh-batch', {
+          method: 'POST',
+          body: JSON.stringify({ batchIndex }),
+        });
+        if (isCancelled()) return;
+
+        totalBatches = res.totalBatches;
+        universeSize = res.universeSize;
+        updated += res.updated;
+        skipped += res.skipped;
+        setProgress((p) => ({ ...p, totalBatches, currentBatch: batchIndex + 1 }));
+
+        batchIndex += 1;
+        if (batchIndex < totalBatches) {
+          setProgress((p) => ({ ...p, phase: 'waiting' }));
+          await waitWithCountdown(
+            WAIT_SECONDS,
+            (remaining) => setProgress((p) => ({ ...p, waitRemaining: remaining })),
+            isCancelled,
+          );
+        }
+      }
+      if (!isCancelled()) {
+        setProgress((p) => ({ ...p, phase: 'done', waitRemaining: 0 }));
+        setResult({ updated, skipped, universeSize });
+      }
+    } catch (err) {
+      if (!isCancelled()) { setIsError(true); setError(err); }
+    } finally {
+      if (!isCancelled()) setIsPending(false);
+    }
+  }, []);
+
+  return { run, isPending, isError, error, result, progress };
 }

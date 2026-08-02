@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { useLogout } from '../api/auth';
+import { hasAdminConsoleAccess, useLogout, useSession } from '../api/auth';
 import { ApiKeysModalContext } from '../lib/apiKeysModal';
 import { TickerHandoffContext, type HandoffTarget, type TickerHandoff } from '../lib/tickerHandoff';
 import DashboardPage from '../pages/DashboardPage';
@@ -27,6 +27,17 @@ export default function TabShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const logout = useLogout();
+  const { data: session } = useSession();
+  // Permission-based, not a hardcoded roles.includes('admin') check - a superset role like
+  // admin-master holds every admin-console permission without literally being named "admin".
+  const isAdmin = hasAdminConsoleAccess(session);
+  // Real permission check (Admin Console Phase 8), not just "not admin" - own API key
+  // management is no longer open to every signed-in user by default (api_keys:manage_own,
+  // migration 018). Hidden entirely (not just disabled) when absent.
+  const canManageOwnKeys = session?.permissions?.includes('api_keys:manage_own') ?? false;
+  // Non-admin's API Keys entry point - SubscriptionsPage itself no longer owns any modal
+  // chrome (Admin Console Phase 7: it's also embedded plain, unwrapped, as AdminPage's "My
+  // API(s)" tab), so the overlay lives here instead, the only remaining caller that needs it.
   const [showApiKeys, setShowApiKeys] = useState(false);
   const [handoff, setHandoff] = useState<TickerHandoff | null>(null);
   const requestIdRef = useRef(0);
@@ -59,13 +70,24 @@ export default function TabShell() {
             })}
           </nav>
 
-          <button
-            type="button"
-            onClick={() => setShowApiKeys(true)}
-            className="ml-auto text-sm text-text-secondary hover:text-accent"
-          >
-            API Keys
-          </button>
+          {/* ml-auto here (not on Log out) is what keeps Admin/API Keys pinned to the
+              right edge, immediately before Log out, even when this div renders empty. */}
+          <div className="ml-auto flex items-center gap-3">
+            {isAdmin && (
+              <Link to="/admin" className="text-sm text-text-secondary hover:text-accent">
+                Admin
+              </Link>
+            )}
+            {!isAdmin && canManageOwnKeys && (
+              <button
+                type="button"
+                onClick={() => setShowApiKeys(true)}
+                className="text-sm text-text-secondary hover:text-accent"
+              >
+                API Keys
+              </button>
+            )}
+          </div>
 
           <button
             type="button"
@@ -83,7 +105,28 @@ export default function TabShell() {
         <div data-testid="tab-panel-momentum" className={location.pathname === '/momentum' ? '' : 'hidden'}><MomentumPage /></div>
       </div>
 
-      {showApiKeys && <SubscriptionsPage onClose={() => setShowApiKeys(false)} />}
+      {showApiKeys && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={() => setShowApiKeys(false)}>
+          <div
+            className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-card bg-bg-card p-6 shadow-card-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <h1 className="text-lg font-semibold text-text-primary">API Keys</h1>
+              <button
+                type="button"
+                onClick={() => setShowApiKeys(false)}
+                className="rounded-btn border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-primary"
+              >
+                Close
+              </button>
+            </div>
+            <div className="overflow-y-auto">
+              <SubscriptionsPage />
+            </div>
+          </div>
+        </div>
+      )}
     </TickerHandoffContext.Provider>
     </ApiKeysModalContext.Provider>
   );

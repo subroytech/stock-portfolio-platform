@@ -9,6 +9,14 @@ interface HoldingsTableProps {
 
 type SortKey = 'symbol' | 'name' | 'sector' | 'quantity' | 'purchasePrice' | 'currentPrice' | 'currentValue' | 'gainLoss' | 'returnPct' | 'allocationPct';
 type SortDirection = 'asc' | 'desc';
+type SizeTab = 'major' | 'minor';
+
+// Splits the holdings list by allocation weight so the user can focus on the
+// set that actually moves the portfolio, instead of scrolling past a long
+// tail of small positions to find them. A null allocationPct (holdings
+// haven't had a price refresh yet) defaults to the minor bucket rather than
+// major, since "definitely a significant position" can't be claimed for it.
+const MAJOR_THRESHOLD_PCT = 2.5;
 
 const COLUMNS: { key: SortKey; label: string; align?: 'right' }[] = [
   { key: 'symbol', label: 'Symbol' },
@@ -32,12 +40,27 @@ const COLUMNS: { key: SortKey; label: string; align?: 'right' }[] = [
 // `hidden md:table` just toggle which one is visible, no JS viewport
 // detection needed.
 export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTableProps) {
-  const [sortKey, setSortKey] = useState<SortKey | null>(null);
-  const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
+  // Defaults to Value, descending, in both tabs - the largest positions (by $, not just
+  // count) are what the Major/Minor split is meant to surface first.
+  const [sortKey, setSortKey] = useState<SortKey | null>('currentValue');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [sizeTab, setSizeTab] = useState<SizeTab>('major');
+
+  const majorHoldings = useMemo(
+    () => holdings.filter((h) => (h.allocationPct ?? 0) > MAJOR_THRESHOLD_PCT),
+    [holdings],
+  );
+  const minorHoldings = useMemo(
+    () => holdings.filter((h) => (h.allocationPct ?? 0) <= MAJOR_THRESHOLD_PCT),
+    [holdings],
+  );
+  const visibleHoldings = sizeTab === 'major' ? majorHoldings : minorHoldings;
+  const majorValue = useMemo(() => majorHoldings.reduce((sum, h) => sum + h.currentValue, 0), [majorHoldings]);
+  const minorValue = useMemo(() => minorHoldings.reduce((sum, h) => sum + h.currentValue, 0), [minorHoldings]);
 
   const sortedHoldings = useMemo(() => {
-    if (!sortKey) return holdings;
-    const withOriginalIndex = holdings.map((h, index) => ({ h, index }));
+    if (!sortKey) return visibleHoldings;
+    const withOriginalIndex = visibleHoldings.map((h, index) => ({ h, index }));
     withOriginalIndex.sort((a, b) => {
       const av = a.h[sortKey];
       const bv = b.h[sortKey];
@@ -51,7 +74,7 @@ export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTable
       return a.index - b.index; // stable tiebreak
     });
     return withOriginalIndex.map((e) => e.h);
-  }, [holdings, sortKey, sortDirection]);
+  }, [visibleHoldings, sortKey, sortDirection]);
 
   if (holdings.length === 0) {
     return <p className="text-sm text-text-secondary">No holdings yet — import a CSV to get started.</p>;
@@ -77,8 +100,32 @@ export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTable
 
   return (
     <div>
+      <div className="mb-3 flex gap-4 border-b border-border">
+        <button
+          type="button"
+          onClick={() => setSizeTab('major')}
+          className={`border-b-2 px-1 pb-2 text-sm font-medium ${sizeTab === 'major' ? 'border-accent text-text-primary' : 'border-transparent text-text-secondary'}`}
+        >
+          MAJOR ({formatCurrency(majorValue)}) in #{majorHoldings.length} Stocks
+        </button>
+        <button
+          type="button"
+          onClick={() => setSizeTab('minor')}
+          className={`border-b-2 px-1 pb-2 text-sm font-medium ${sizeTab === 'minor' ? 'border-accent text-text-primary' : 'border-transparent text-text-secondary'}`}
+        >
+          MINOR ({formatCurrency(minorValue)}) in #{minorHoldings.length} Stocks
+        </button>
+      </div>
+
+      {visibleHoldings.length === 0 && (
+        <p className="text-sm text-text-secondary">
+          {sizeTab === 'major' ? 'No holdings above the 2.5% allocation threshold.' : 'No holdings at or below the 2.5% allocation threshold.'}
+        </p>
+      )}
+
       {/* Mobile: card list — reflects whichever sort is active on the
           desktop table below (no separate mobile sort control). */}
+      {visibleHoldings.length > 0 && (
       <div className="flex flex-col gap-3 md:hidden">
         {sortedHoldings.map((h) => (
           <div key={h.id} className="rounded-card border border-border bg-bg-card p-4 shadow-card">
@@ -102,8 +149,10 @@ export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTable
           </div>
         ))}
       </div>
+      )}
 
       {/* Desktop: table */}
+      {visibleHoldings.length > 0 && (
       <div className="hidden overflow-x-auto rounded-card border border-border bg-bg-card shadow-card md:block">
         <table className="w-full text-sm" data-testid="holdings-table">
           <thead>
@@ -140,6 +189,7 @@ export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTable
           </tbody>
         </table>
       </div>
+      )}
     </div>
   );
 }

@@ -14,15 +14,25 @@ counts and can show 0 even when tables exist (see `SHOW TABLES`/SQL Shell instea
 ## Naming convention
 
 Tables are prefixed by category (settled 2026-07-10):
-- **`m_`** — master/reference data (`m_tickers`, `m_index_master`, `m_index_constituent`).
+- **`m_`** — master/reference data (`m_tickers`, `m_index_master`, `m_index_constituent`,
+  `m_roles`, `m_role_permissions`, `m_function_master`).
 - **`tx_`** — transactional, portfolio-scoped data (`tx_portfolios`, `tx_holdings`,
   `tx_cash_positions`, `tx_uploads`).
 - **`sys_`** — internal bookkeeping, not app data (`sys_schema_migrations`).
-- **unprefixed** — `users`, `users_subscriptions`. Deliberately left out of the `tx_`
-  bucket (they're account-level, not portfolio-scoped transactional data) and don't fit
-  `m_`/`sys_` either. `users_subscriptions` (added 2026-07-12) is grouped with `users`
-  rather than given its own prefix, at the user's explicit request, since it's a child of
-  the account itself.
+- **unprefixed** — `users`, `users_subscriptions`, `users_roles`. Deliberately left out of the
+  `tx_` bucket (they're account-level, not portfolio-scoped transactional data) and don't fit
+  `m_`/`sys_` either. `users_subscriptions` (added 2026-07-12) and `users_roles` (added
+  2026-07-31) are grouped with `users` rather than given their own prefix, since both are a
+  child of the account itself — per-user assignment data, not reference/static data (that's
+  what keeps `users_roles` out of `m_`, even though it's *about* roles).
+- **`user_evt_`** — per-user event/log data (added 2026-07-31: `user_evt_usage`,
+  `user_evt_usage_summary_monthly`). A new bucket, added when usage tracking didn't fit any of
+  the other three: `tx_` is explicitly portfolio-scoped (usage events are user-scoped, not
+  portfolio-scoped), `sys_` is explicitly internal-bookkeeping-not-app-data (usage events are
+  real business data), and `m_`/unprefixed are both for relatively static, non-growing data
+  (the opposite of an append-only event log). Does **not** apply to non-user-scoped event/cache
+  data (e.g. a future shared quote cache, keyed by symbol not by user) — that would need its
+  own bucket if/when it's built.
 
 Tables were originally created unprefixed (migrations 001–008) and renamed in two follow-up
 migrations: `009_rename_master_tables.sql` (the 3 `m_` tables) and
@@ -43,7 +53,10 @@ users (1) ──< tx_portfolios (many)
      │            ├──< tx_uploads (many)
      │            └──< tx_portfolio_action_hist (many)
      │
-     └──< users_subscriptions (many, one per provider e.g. fmp/finnhub)
+     ├──< users_subscriptions (many, one per provider e.g. fmp/finnhub)
+     ├──< users_roles (many) >── m_roles (1) ──< m_role_permissions (many) >── m_function_master (1, via FK on permission_key)
+     ├──< user_evt_usage (many)
+     └──< user_evt_usage_summary_monthly (many)
 
 m_index_master (1) ──< m_index_constituent (many)
 
@@ -86,12 +99,19 @@ the plaintext key in their result. Requires `API_KEY_ENCRYPTION_KEY` (32-byte he
 from `JWT_SECRET`) in the environment — validated eagerly at module load, same as
 `pool.ts`'s fail-fast pattern for `DATABASE_URL`.
 
-**Wired into every FMP call site as of 2026-07-12** — `quotes.controller.ts`,
-`contrarianFinder.controller.ts`, and `portfolio.service.ts`'s `refreshPrices` all resolve
-+ decrypt the calling user's own key from this table via `userSubscription.service
-.getDecryptedKey()`, instead of the global `env.fmpApiKey`. A user with no row here for a
-given provider gets a `MissingUserApiKeyError` → `503` from all three surfaces (no silent
-fallback). See Architecture.md Section 1.
+**Wired into every FMP/Finnhub call site as of 2026-07-12** — `quotes.controller.ts`,
+`contrarianFinder.controller.ts`, `momentum.controller.ts`, `analysis.controller.ts`,
+`stockPreview.controller.ts`, and `portfolio.service.ts`'s `refreshPrices` all resolve +
+decrypt the calling user's own key from this table via `userSubscription.service
+.getDecryptedKey()`, instead of the global `env.fmpApiKey`. See Architecture.md Section 1.
+
+**Admin-Master Fallback API Key (User Manual.md, added 2026-08-02)**: a user with no row here
+for a given provider no longer always gets a hard `503` — `getDecryptedKey()` now falls back
+to the single `admin-master`-role account's own key first, for callers whose role is `user`,
+`admin`, or `user-contra-wokey` (not `user-contra-withkey`, whose entire purpose is bring-
+your-own). Only if that fallback source ALSO has no key does the caller finally get a
+`MissingUserApiKeyError` → `503`, with a message pointed at "contact an admin" rather than
+"add your own key," since a fallback-eligible role may not even have `api_keys:manage_own`.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -107,6 +127,120 @@ fallback). See Architecture.md Section 1.
 Indexes: `users_subscriptions_pkey` (PK), `users_subscriptions_user_id_provider_key`
 (unique on `user_id, provider` — this is what makes `upsertSubscription()`'s
 `ON CONFLICT (user_id, provider) DO UPDATE` update-in-place instead of erroring/duplicating).
+
+### `m_roles`
+Added by migration `015`, 2026-07-31 (Architecture.md Section 3 item 6 — Functional
+Authorization). Role catalog — master/reference data, same bucket as `m_index_master`.
+Seeded with exactly two rows, `'user'` (every existing account was backfilled into this role
+by the same migration) and `'admin'`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `name` | `VARCHAR(50)` | `NOT NULL`, unique |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_roles_pkey` (PK), `m_roles_name_key` (unique).
+
+### `users_roles`
+Added by migration `015`. Which role(s) each user has — per-account assignment data, so
+unprefixed like `users_subscriptions` rather than `m_`-prefixed (it's not itself reference
+data, even though it's *about* a reference table). Schema supports many-to-many (a user could
+have multiple roles), but `roles.service.ts`'s `setUserRole()` enforces a single-role-per-user
+business rule for now — it replaces, not appends.
+
+| Column | Type | Notes |
+|---|---|---|
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE`, part of composite PK |
+| `role_id` | `INT8` | FK → `m_roles(id)`, `ON DELETE CASCADE`, part of composite PK |
+
+Indexes: `users_roles_pkey` (composite PK on `user_id, role_id`).
+
+### `m_role_permissions`
+Added by migration `015`. Which permissions each role grants — static configuration, child of
+`m_roles`, mirroring how `m_index_constituent` is the child of `m_index_master`.
+`permission_key` is free-text (app-enforced vocabulary, e.g. `'contrarian_finder:scan'`,
+`'roles:manage'`) rather than a DB enum, so gating a new feature never needs a schema change —
+just a new `INSERT`. Checked by `requirePermission(key)` middleware.
+
+| Column | Type | Notes |
+|---|---|---|
+| `role_id` | `INT8` | FK → `m_roles(id)`, `ON DELETE CASCADE`, part of composite PK |
+| `permission_key` | `VARCHAR(100)` | `NOT NULL`, part of composite PK |
+
+Indexes: `m_role_permissions_pkey` (composite PK on `role_id, permission_key`).
+`permission_key` also carries a **FK** to `m_function_master(permission_key)` as of migration
+`016` — a role can never be granted a permission key that isn't a real registered function.
+
+### `m_function_master`
+Added by migration `016`, 2026-08-01 (Admin Console, Architecture.md Section 3 item 6
+follow-up). Catalogs only the app "functions" that are genuine **exceptions** to the default
+"any signed-in user can use it" rule — deliberately **not** a row for every application
+function (Momentum, Long-Term Analysis, Contrarian Comeback, and Portfolio Refresh Prices have
+no row here and no `requirePermission` gate, since none of them are exceptions). Feeds the
+"View/Edit Permission" screen's fixed-dropdown picker (filtered to `active`+`QA-Test` —
+`Dev-WIP`/`inactive` hidden since granting those wouldn't do anything yet) and the "View/Manage
+Functions" admin screen. `status` lifecycle is app-enforced (`functionMaster.service.ts`'s
+`isValidStatus()`), not a DB check constraint.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `permission_key` | `VARCHAR(100)` | `NOT NULL`, unique — referenced by `m_role_permissions.permission_key`'s FK |
+| `name` | `VARCHAR(100)` | `NOT NULL` |
+| `description` | `TEXT`/`STRING` | nullable |
+| `status` | `VARCHAR(20)` | `NOT NULL`, default `'active'` — `'active'`\|`'inactive'`\|`'Dev-WIP'`\|`'QA-Test'` |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_function_master_pkey` (PK), `m_function_master_permission_key_key` (unique).
+
+Seeded with exactly 5 rows: `contrarian_finder:scan` (pre-existing, migration 015) plus the 4
+new admin-capability keys this migration introduces — `roles:manage` (**re-keyed** here: used
+to gate `PUT /users/:id/role`, now gates `POST /roles` instead — the existing `admin` grant row
+from migration 015 didn't move, its *meaning* just shifted), `permissions:manage`,
+`users:manage_roles` (takes over gating `PUT /users/:id/role`), `functions:manage`.
+
+### `user_evt_usage`
+Added by migration `015`. Raw per-user usage event log — one row per tracked action
+(Momentum run, Contrarian Finder scan, Long-Term Analysis, Contrarian Comeback, portfolio
+Refresh Prices), written by `usageTracking.service.ts`'s `logUsage()`. Retained via
+CockroachDB's native row-level TTL (`WITH (ttl_expire_after = '35 days')`) — rows are deleted
+automatically by CockroachDB's background TTL job, no cron/application cleanup code needed.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` |
+| `feature` | `VARCHAR(50)` | `NOT NULL` — free text (app-enforced vocabulary, not a DB enum) |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `user_evt_usage_pkey` (PK).
+
+### `user_evt_usage_summary_monthly`
+Added by migration `015`. One row per `(user_id, feature, month)`, incremented via
+`INSERT ... ON CONFLICT ... DO UPDATE SET event_count = event_count + 1` on every single
+`logUsage()` call — a real-time running total, not a periodic batch rollup. Retained via TTL
+(`WITH (ttl_expire_after = '366 days')`) for the ~12-month cap. **Note on how the TTL actually
+behaves**: CockroachDB's TTL clock resets on every row `UPDATE` (confirmed live via
+`SHOW CREATE TABLE`: `ON UPDATE current_timestamp() + '366 days'`), not just at row creation —
+in practice this is still correct for this table's purpose, since a given month's row only
+gets updated while events for *that* month are still arriving; once the month ends, that row
+stops being touched and its TTL naturally starts counting down from its last update, which is
+effectively "~12 months after that month's activity finished," not "~12 months after the row
+was first created."
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` |
+| `feature` | `VARCHAR(50)` | `NOT NULL` — free text, same vocabulary as `user_evt_usage.feature` |
+| `month` | `DATE` | `NOT NULL` — first of the month, e.g. `2026-08-01` |
+| `event_count` | `INT8` | `NOT NULL`, default `0` |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `user_evt_usage_summary_monthly_pkey` (PK),
+`user_evt_usage_summary_monthly_user_id_feature_month_key` (unique on `user_id, feature,
+month` — this is what makes the `ON CONFLICT` upsert work).
 
 ### `tx_portfolios`
 | Column | Type | Notes |
@@ -190,18 +324,32 @@ unlike the other `tx_`/`m_` tables its constraint name actually matches the live
 name), `idx_portfolio_action_hist_portfolio_id`.
 
 ### `m_tickers`
-Stock/ETF metadata reference table. Seeded 2026-07-10 from
-`backend/src/db/seed/ticker_sectors.js` (218 rows) via `npm run seed:tickers`
-(`backend/src/db/seedTickerData.js`). Not yet queried by any service — `parser.service.js`
-still reads `ticker_sectors.js` directly for CSV-import sector fallback; only
-`contrarianFinder.service.js`'s index-composition path was switched over (see
-`m_index_constituent` below).
+Stock/ETF metadata reference table — **the single source of truth for ticker
+name/sector** (confirmed 2026-08-02), fed continuously from two independent paths, not just
+the one-time seed:
+1. **`portfolio.service.ts`'s `importHoldings()`** — every real CSV/TXT import inserts a bare
+   `(symbol, sector)` row (sector from whatever `parser.service.ts` already resolved) for any
+   symbol `m_tickers` doesn't know yet, `ON CONFLICT (symbol) DO NOTHING` — never overwrites a
+   symbol already enriched by path 2 below.
+2. **`backend/src/db/backfillTickerData.ts`** (`npm run backfill:ticker-data -- <fmp-key>`) —
+   re-runnable, fetches name+sector from FMP's `/profile` endpoint
+   (`marketData.service.ts`'s `getProfiles()`) for every symbol currently in
+   `m_index_constituent` (the Contrarian Finder scan universe) and upserts both fields,
+   `COALESCE`d so a `null` FMP response never blanks out an already-good value.
+
+Originally seeded 2026-07-10 from `backend/src/db/seed/ticker_sectors.js` (218 rows, still
+read directly by `parser.service.js` for CSV-import sector fallback — a separate, unrelated
+list from the scan universe's own `cf_static_universe.js`). Confirmed 2026-08-02 these two
+seed files are two independently hand-typed datasets with no enforced relationship: of the
+scan universe's 348 symbols, 208 had zero `m_tickers` row at all, and 78 `m_tickers` rows
+were for symbols not even in the current universe — paths 1/2 above are what closes that gap
+going forward, rather than a one-time fix.
 
 | Column | Type | Notes |
 |---|---|---|
 | `symbol` | `VARCHAR(15)` | PK |
-| `name` | `VARCHAR(200)` | nullable, currently unpopulated by the seed script |
-| `sector` | `VARCHAR(50)` | nullable |
+| `name` | `VARCHAR(200)` | nullable — see the two population paths above |
+| `sector` | `VARCHAR(50)` | nullable — see the two population paths above |
 | `is_etf` | `BOOLEAN` | default `false`, currently unpopulated (no rows flagged `true` yet) |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
 

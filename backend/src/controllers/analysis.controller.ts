@@ -3,6 +3,7 @@ import * as analysisService from '../services/analysisService';
 import * as longTermAnalysisData from '../services/longTermAnalysisData.service';
 import * as contrarianComebackData from '../services/contrarianComebackData.service';
 import * as userSubscription from '../services/userSubscription.service';
+import * as usageTracking from '../services/usageTracking.service';
 import { InvalidTickerError } from '../utils/errors';
 
 // Thin proxy round-trip: Node (auth-checked) -> Python analysis-service ->
@@ -56,6 +57,7 @@ export async function longTermAnalysis(req: Request, res: Response, next: NextFu
 
     const rawData = await longTermAnalysisData.fetchLongTermAnalysisData(symbol, fmpKey, finnhubKey);
     const result = await analysisService.computeLongTermAnalysis(rawData);
+    usageTracking.logUsage(userId, 'long_term_analysis').catch((e) => console.error('usage log failed', e));
     res.json(result);
   } catch (err) {
     if (err instanceof userSubscription.MissingUserApiKeyError) {
@@ -146,7 +148,8 @@ export async function contrarianComebackSubmit(req: Request, res: Response, next
   }
 
   try {
-    const { fmpKey, finnhubKey } = await resolveKeys(getUserId(req));
+    const userId = getUserId(req);
+    const { fmpKey, finnhubKey } = await resolveKeys(userId);
     const data = await contrarianComebackData.fetchContrarianComebackData(symbol, fmpKey, finnhubKey);
     const result = await analysisService.computeContrarianComebackSubmit({
       ...data,
@@ -155,6 +158,7 @@ export async function contrarianComebackSubmit(req: Request, res: Response, next
       check3Override: Boolean(check3Override),
       check3OverrideReason: check3OverrideReason ?? null,
     });
+    usageTracking.logUsage(userId, 'contrarian_comeback').catch((e) => console.error('usage log failed', e));
     res.json(result);
   } catch (err) {
     if (err instanceof userSubscription.MissingUserApiKeyError) {

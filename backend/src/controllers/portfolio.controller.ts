@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import * as portfolioService from '../services/portfolio.service';
 import { parseFile, isRobinhoodTxt } from '../services/parser.service';
 import * as userSubscription from '../services/userSubscription.service';
+import * as usageTracking from '../services/usageTracking.service';
 
 // Every route this controller serves sits behind requireAuth (see app.ts), so
 // req.user is always populated by the time a handler runs.
@@ -147,7 +148,9 @@ export async function importHoldings(req: Request, res: Response, next: NextFunc
 
 export async function refreshPrices(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const result = await portfolioService.refreshPrices(getUserId(req), getIdParam(req));
+    const userId = getUserId(req);
+    const result = await portfolioService.refreshPrices(userId, getIdParam(req));
+    usageTracking.logUsage(userId, 'portfolio_refresh').catch((e) => console.error('usage log failed', e));
     res.json(result);
   } catch (err) {
     if (err instanceof portfolioService.PortfolioNotFoundError) {

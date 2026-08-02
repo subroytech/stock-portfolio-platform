@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import * as marketData from '../services/marketData.service';
 import * as analysisService from '../services/analysisService';
 import * as userSubscription from '../services/userSubscription.service';
+import * as usageTracking from '../services/usageTracking.service';
 
 // This route sits behind requireAuth (see app.ts), so req.user is always
 // populated by the time this handler runs.
@@ -45,6 +46,7 @@ export async function analyze(req: Request, res: Response, next: NextFunction): 
     const price = quote?.price ?? closes[0];
 
     const analysis = await analysisService.computeMomentumAnalysis({ closes, lows, volumes, price });
+    usageTracking.logUsage(getUserId(req), 'momentum').catch((e) => console.error('usage log failed', e));
     res.json({ symbol, name: quote?.name ?? null, analysis });
   } catch (err) {
     if (err instanceof userSubscription.MissingUserApiKeyError) {

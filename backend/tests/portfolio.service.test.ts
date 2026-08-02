@@ -183,6 +183,10 @@ function actionHistCall(client: { query: jest.Mock }) {
   return client.query.mock.calls.find((c: unknown[]) => (c[0] as string).startsWith('INSERT INTO tx_portfolio_action_hist'));
 }
 
+function tickerInsertCall(client: { query: jest.Mock }) {
+  return client.query.mock.calls.find((c: unknown[]) => (c[0] as string).startsWith('INSERT INTO m_tickers'));
+}
+
 describe('importHoldings', () => {
   test('throws PortfolioNotFoundError and rolls back when not owned', async () => {
     const client = makeMockClient({ ownerFound: false });
@@ -229,6 +233,37 @@ describe('importHoldings', () => {
     mockConnect.mockResolvedValue(client);
     const result = await importHoldings('user-1', 'portfolio-1', parseResult([holding({ symbol: 'AAPL', quantity: 10, currentPrice: 150 })]), 'f.csv', 'csv');
     expect(result.actionsLogged).toBe(0);
+  });
+
+  test('inserts a bare m_tickers row (symbol + resolved sector) for each imported symbol, ON CONFLICT DO NOTHING so an already-enriched row is never overwritten', async () => {
+    const client = makeMockClient({ existingHoldings: [] });
+    mockConnect.mockResolvedValue(client);
+    await importHoldings(
+      'user-1', 'portfolio-1',
+      parseResult([holding({ symbol: 'AAPL', sector: 'Technology' }), holding({ symbol: 'ZZZ', sector: 'Unknown' })]),
+      'f.csv', 'csv',
+    );
+    const call = tickerInsertCall(client);
+    expect(call?.[0]).toContain('ON CONFLICT (symbol) DO NOTHING');
+    expect(call?.[1]).toEqual(['AAPL', 'Technology', 'ZZZ', 'Unknown']);
+  });
+
+  test('a duplicate symbol in one import only produces one m_tickers row (deduped, not one insert per holding row)', async () => {
+    const client = makeMockClient({ existingHoldings: [] });
+    mockConnect.mockResolvedValue(client);
+    await importHoldings(
+      'user-1', 'portfolio-1',
+      parseResult([holding({ symbol: 'AAPL' }), holding({ symbol: 'AAPL' })]),
+      'f.csv', 'csv',
+    );
+    expect(tickerInsertCall(client)?.[1]).toEqual(['AAPL', 'Tech']);
+  });
+
+  test('no m_tickers insert at all when the import has zero holdings (e.g. a fully-cash portfolio)', async () => {
+    const client = makeMockClient({ existingHoldings: [] });
+    mockConnect.mockResolvedValue(client);
+    await importHoldings('user-1', 'portfolio-1', parseResult([]), 'f.csv', 'csv');
+    expect(tickerInsertCall(client)).toBeUndefined();
   });
 
   test('rolls back and rethrows on a mid-transaction failure', async () => {
@@ -358,6 +393,46 @@ describe('refreshPrices', () => {
     expect(mockGetHistorical).toHaveBeenCalledWith('AAPL', 'fake-fmp-key', 130);
     expect(result.performanceHistory).toEqual({ AAPL: [{ date: '2026-07-01', close: 145, low: 140 }] });
     expect(result.performanceHistory.BTC).toBeUndefined();
+  });
+
+  test('maps a bare crypto symbol to FMP\'s pair format for the quote fetch, then applies the result back under the original bare symbol', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'h1', symbol: 'BTC', name: 'Bitcoin', quantity: '0.02', purchase_price: '60000', current_price: '60000',
+          sector: 'Crypto', purchase_date: null, cost_basis: '1200', current_value: '1200', gain_loss: '0',
+          return_pct: '0', allocation_pct: '100', price_updated_at: null,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
+
+    mockGetQuotes.mockResolvedValue({ BTCUSD: { price: 71393, changeDollar: 1000, changePercent: 1.4, name: 'Bitcoin' } });
+
+    const result = await refreshPrices('user-1', '1');
+
+    expect(mockGetQuotes).toHaveBeenCalledWith(['BTCUSD'], 'fake-fmp-key');
+    const btc = result.holdings.find((r) => r.symbol === 'BTC');
+    expect(btc?.currentPrice).toBe(71393); // live price applied under the bare symbol, not left stale
+    expect(btc?.priceUpdatedAt).toBe('2026-07-12T00:00:00Z');
+  });
+
+  test('a symbol already in FMP pair format (e.g. imported as BTCUSD) is queried as-is, not double-suffixed', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'h1', symbol: 'BTCUSD', name: 'Bitcoin', quantity: '0.02', purchase_price: '60000', current_price: '60000',
+          sector: 'Crypto', purchase_date: null, cost_basis: '1200', current_value: '1200', gain_loss: '0',
+          return_pct: '0', allocation_pct: '100', price_updated_at: null,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
+
+    mockGetQuotes.mockResolvedValue({ BTCUSD: { price: 71393, changeDollar: 1000, changePercent: 1.4, name: 'Bitcoin' } });
+
+    await refreshPrices('user-1', '1');
+    expect(mockGetQuotes).toHaveBeenCalledWith(['BTCUSD'], 'fake-fmp-key'); // not BTCUSDUSD
   });
 
   test('propagates MissingUserApiKeyError when the user has no FMP key on file', async () => {

@@ -46,18 +46,28 @@ export interface User {
 
 export interface UserWithHash extends User {
   passwordHash: string;
+  status: string;
 }
+
+// Shared across every login-rejection path (unknown email, wrong password, non-active status)
+// so they stay textually identical - a single constant is what actually guarantees that, not
+// three separately-typed copies of the same literal. Deliberately does not distinguish *why*
+// login failed (anti-enumeration), confirmed with the user 2026-08-01.
+const LOGIN_ERROR_MESSAGE = 'Invalid email or password combination, or no account exists.';
 
 // Race-condition backstop: the controller checks for an existing email first,
 // but a concurrent signup for the same address could still slip past that
 // check before this INSERT runs — the DB's own UNIQUE constraint is the real
 // guarantee, this just turns its violation into the same typed error the
 // controller already expects from the pre-check.
-export async function createUser(email: string, passwordHash: string): Promise<User> {
+// status defaults to 'active' for the public signup path (auth.controller.ts's signup() calls
+// this with no third arg) - only the admin-only create-user path (users.service.ts's
+// createUserAccount) ever passes something else.
+export async function createUser(email: string, passwordHash: string, status: string = 'active'): Promise<User> {
   try {
     const { rows } = await pool.query<{ id: string; email: string }>(
-      'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
-      [email, passwordHash],
+      'INSERT INTO users (email, password_hash, status) VALUES ($1, $2, $3) RETURNING id, email',
+      [email, passwordHash, status],
     );
     return rows[0];
   } catch (err) {
@@ -69,13 +79,22 @@ export async function createUser(email: string, passwordHash: string): Promise<U
 }
 
 export async function findUserByEmail(email: string): Promise<UserWithHash | null> {
-  const { rows } = await pool.query<{ id: string; email: string; password_hash: string }>(
-    'SELECT id, email, password_hash FROM users WHERE email = $1',
+  const { rows } = await pool.query<{ id: string; email: string; password_hash: string; status: string }>(
+    'SELECT id, email, password_hash, status FROM users WHERE email = $1',
     [email],
   );
   if (!rows[0]) return null;
-  const { id, email: rowEmail, password_hash: passwordHash } = rows[0];
-  return { id, email: rowEmail, passwordHash };
+  const { id, email: rowEmail, password_hash: passwordHash, status } = rows[0];
+  return { id, email: rowEmail, passwordHash, status };
+}
+
+// For GET /auth/me (req.user only has the id from the JWT, never the email).
+export async function findUserById(id: string): Promise<User | null> {
+  const { rows } = await pool.query<{ id: string; email: string }>(
+    'SELECT id, email FROM users WHERE id = $1',
+    [id],
+  );
+  return rows[0] ?? null;
 }
 
 // Same InvalidCredentialsError/message whether the email doesn't exist or the
@@ -84,8 +103,12 @@ export async function findUserByEmail(email: string): Promise<UserWithHash | nul
 // bypassed by a future call site handling the two cases differently.
 export async function login(email: string, password: string): Promise<User> {
   const user = await findUserByEmail(email);
-  if (!user) throw new InvalidCredentialsError('Invalid email or password.');
+  if (!user) throw new InvalidCredentialsError(LOGIN_ERROR_MESSAGE);
   const valid = await verifyPassword(password, user.passwordHash);
-  if (!valid) throw new InvalidCredentialsError('Invalid email or password.');
+  if (!valid) throw new InvalidCredentialsError(LOGIN_ERROR_MESSAGE);
+  // Checked last, only once the password is already confirmed correct - a wrong password
+  // against a non-active account gets the exact same rejection as a wrong password against
+  // an active one, so status is never distinguishable from a credentials guess.
+  if (user.status !== 'active') throw new InvalidCredentialsError(LOGIN_ERROR_MESSAGE);
   return { id: user.id, email: user.email };
 }

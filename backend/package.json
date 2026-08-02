@@ -14,7 +14,8 @@
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "lint": "eslint src tests",
     "migrate": "ts-node src/db/migrate.ts",
-    "seed:tickers": "ts-node src/db/seedTickerData.ts"
+    "seed:tickers": "ts-node src/db/seedTickerData.ts",
+    "backfill:ticker-data": "ts-node src/db/backfillTickerData.ts"
   },
   "keywords": [],
   "author": "",

@@ -7,11 +7,13 @@ jest.mock('../src/services/userSubscription.service', () => ({
   ...jest.requireActual('../src/services/userSubscription.service'),
   getDecryptedKey: jest.fn(),
 }));
+jest.mock('../src/services/usageTracking.service');
 
 import request from 'supertest';
 import { pool } from '../src/db/pool';
 import * as marketData from '../src/services/marketData.service';
 import * as userSubscription from '../src/services/userSubscription.service';
+import * as usageTracking from '../src/services/usageTracking.service';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
 
@@ -20,6 +22,7 @@ const mockConnect = pool.connect as unknown as jest.Mock;
 const mockGetQuotes = marketData.getQuotes as jest.Mock;
 const mockGetHistorical = marketData.getHistorical as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
+const mockLogUsage = usageTracking.logUsage as jest.Mock;
 
 // A real, validly-signed cookie so requests pass through the real
 // requireAuth middleware — this suite is testing portfolio.controller.ts,
@@ -34,6 +37,8 @@ beforeEach(() => {
   mockGetHistorical.mockResolvedValue([]); // refreshPrices now also fetches history in parallel
   mockGetDecryptedKey.mockReset();
   mockGetDecryptedKey.mockResolvedValue('fake-fmp-key');
+  mockLogUsage.mockReset();
+  mockLogUsage.mockResolvedValue(undefined);
 });
 
 describe('auth gating', () => {
@@ -172,6 +177,25 @@ describe('POST /portfolios/:id/refresh-prices', () => {
       todayChangeDollar: 500, todayChangePercent: 50, // quantity (10) * per-share change (50)
     });
     expect(res.body.performanceHistory.AAPL).toEqual([{ date: '2026-07-01', close: 145, low: 140 }]);
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'portfolio_refresh');
+  });
+
+  test('a failed usage log does not turn a successful response into a 500 (fire-and-forget)', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'h1', symbol: 'AAPL', name: 'Apple', quantity: '10', purchase_price: '100', current_price: '100',
+          sector: 'Tech', purchase_date: null, cost_basis: '1000', current_value: '1000', gain_loss: '0',
+          return_pct: '0', allocation_pct: '100', price_updated_at: null,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
+    mockGetQuotes.mockResolvedValue({ AAPL: { price: 150, changeDollar: 50, changePercent: 50, name: 'Apple' } });
+    mockLogUsage.mockRejectedValue(new Error('usage log db exploded'));
+
+    const res = await request(app).post('/portfolios/1/refresh-prices').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
   });
 
   test('404 for a portfolio that does not exist or is not owned', async () => {

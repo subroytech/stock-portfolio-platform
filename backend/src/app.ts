@@ -11,6 +11,9 @@ import userSubscriptionRoutes from './routes/userSubscription.routes';
 import momentumRoutes from './routes/momentum.routes';
 import stockPreviewRoutes from './routes/stockPreview.routes';
 import analysisRoutes from './routes/analysis.routes';
+import usersRoutes from './routes/users.routes';
+import rolesRoutes from './routes/roles.routes';
+import functionMasterRoutes from './routes/functionMaster.routes';
 import errorHandler from './middleware/errorHandler';
 import rateLimiters from './middleware/rateLimit';
 import requireAuth from './middleware/requireAuth';
@@ -52,6 +55,15 @@ app.use('/stock-preview', requireAuth, rateLimiters, stockPreviewRoutes);
 // like every other route here since it'll eventually sit in front of real
 // paid analysis logic (Section 3 items 2-3), not just the health check it is today.
 app.use('/analysis', requireAuth, rateLimiters, analysisRoutes);
+// Admin-promotion (PUT /users/:id/role), Architecture.md Section 3 item 6 -
+// requireAuth here just confirms a session exists; requirePermission on the
+// route itself (users.routes.ts) is what actually restricts this to admins.
+app.use('/users', requireAuth, rateLimiters, usersRoutes);
+// View/Create Role + View/Edit Permission (Admin Console Phase 1 backend) - requireAuth just
+// confirms a session; requirePermission on each route (roles.routes.ts) restricts to admins.
+app.use('/roles', requireAuth, rateLimiters, rolesRoutes);
+// View/Manage Functions (Admin Console Phase 1 backend) - same pattern as /roles above.
+app.use('/functions', requireAuth, rateLimiters, functionMasterRoutes);
 
 app.use(errorHandler);
 

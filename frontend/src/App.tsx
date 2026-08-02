@@ -6,6 +6,7 @@ import TabShell from './components/TabShell';
 import LoginPage from './pages/LoginPage';
 import SignupPage from './pages/SignupPage';
 import ImportPreviewPage from './pages/ImportPreviewPage';
+import AdminPage from './pages/AdminPage';
 
 export default function App() {
   return (
@@ -16,6 +17,10 @@ export default function App() {
           <Route path="/signup" element={<SignupPage />} />
           <Route element={<ProtectedRoute />}>
             <Route path="/portfolios/:id/import-preview" element={<ImportPreviewPage />} />
+            {/* Static segments like /admin rank above the /* splat below regardless of
+                declaration order (React Router v6), so this is safely matched first. A
+                dedicated full-screen route, not nested in TabShell - Admin Console Phase 7. */}
+            <Route path="/admin" element={<AdminPage />} />
             {/* Single route match for every tab (/, /momentum, /contrarian-finder,
                 /long-term-analysis, /contrarian-comeback) - TabShell itself never
                 unmounts across these, only the visible tab panel changes, which is

@@ -26,21 +26,27 @@ describe('TabShell', () => {
     // Dashboard's PortfolioSelector fires an unconditional /portfolios list
     // query the moment it mounts - every other tab only fetches on explicit
     // user action (useMutation), so a generic empty fallback covers the rest.
+    // Default session: a regular (non-admin) user who HAS been granted
+    // api_keys:manage_own - the realistic baseline for tests that aren't
+    // specifically about permission gating, so the "API Keys" button they
+    // rely on is actually present.
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['api_keys:manage_own'] });
       if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
       if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
       return Promise.resolve({});
     });
   });
 
-  test('renders all 5 tab links, the API Keys button, and Log out', () => {
+  test('renders all 5 tab links, the API Keys button, and Log out', async () => {
     renderShell();
     expect(screen.getByRole('link', { name: 'Stock Portfolio' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Long-Term Analysis' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Contrarian Finder' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Contrarian Comeback' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Momentum Analysis' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'API Keys' })).toBeInTheDocument();
+    // API Keys only renders once the session (and canManageOwnKeys) has loaded.
+    expect(await screen.findByRole('button', { name: 'API Keys' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Log out' })).toBeInTheDocument();
   });
 
@@ -85,11 +91,55 @@ describe('TabShell', () => {
     expect(screen.getByRole('link', { name: 'Momentum Analysis' })).not.toHaveClass('bg-accent');
   });
 
+  test('a non-admin session with api_keys:manage_own sees plain "API Keys", not an "Admin" link', async () => {
+    renderShell();
+    await screen.findByRole('button', { name: 'API Keys' });
+    expect(screen.queryByRole('link', { name: 'Admin' })).not.toBeInTheDocument();
+  });
+
+  test('a non-admin session WITHOUT api_keys:manage_own sees neither "API Keys" nor "Admin"', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: [] });
+      if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+      return Promise.resolve({});
+    });
+    renderShell();
+    await screen.findByRole('button', { name: 'Log out' }); // wait for session to resolve
+    expect(screen.queryByRole('button', { name: 'API Keys' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Admin' })).not.toBeInTheDocument();
+  });
+
+  test('an admin session sees an "Admin" link (to /admin) instead of a standalone API Keys button', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'admin@b.com', roles: ['admin'], permissions: ['api_keys:manage_own', 'users:manage_roles'] });
+      if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+      if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
+      return Promise.resolve({});
+    });
+    renderShell();
+    expect(await screen.findByRole('link', { name: 'Admin' })).toHaveAttribute('href', '/admin');
+    expect(screen.queryByRole('button', { name: 'API Keys' })).not.toBeInTheDocument();
+  });
+
+  test('a session with a differently-named role (e.g. admin-master) still sees "Admin" if it holds an admin-console permission', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'master@b.com', roles: ['admin-master'], permissions: ['api_keys:manage_own', 'functions:manage'] });
+      if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+      if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
+      return Promise.resolve({});
+    });
+    renderShell();
+    expect(await screen.findByRole('link', { name: 'Admin' })).toHaveAttribute('href', '/admin');
+    expect(screen.queryByRole('button', { name: 'API Keys' })).not.toBeInTheDocument();
+  });
+
   test('API Keys button opens the modal, and Close dismisses it', async () => {
     renderShell();
     expect(screen.queryByRole('button', { name: 'Close' })).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    // The button only renders once the session (and canManageOwnKeys) has loaded - findBy
+    // waits for that, unlike getBy which would run before the async /auth/me fetch resolves.
+    await userEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     expect(await screen.findByText('FMP (Financial Modeling Prep)')).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -105,6 +155,7 @@ describe('TabShell', () => {
 
   test("a Contrarian Finder candidate row's LT button launches Long-Term Analysis with that ticker", async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['admin'], permissions: ['contrarian_finder:scan'] }); // scan-batch requires this permission
       if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
       if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
       if (url === '/contrarian-finder/scan-batch') return mockScanBatch();
@@ -113,7 +164,9 @@ describe('TabShell', () => {
     });
 
     renderShell('/contrarian-finder');
-    await userEvent.click(screen.getByRole('button', { name: /run scan/i }));
+    // The scan form only renders once the session (and its permissions) has loaded - findBy
+    // waits for that, unlike getBy which would run before the async /auth/me fetch resolves.
+    await userEvent.click(await screen.findByRole('button', { name: 'Run scan' }));
     await screen.findAllByTitle('Long-Term Analysis');
 
     await userEvent.click(screen.getAllByTitle('Long-Term Analysis')[0]);
@@ -125,6 +178,7 @@ describe('TabShell', () => {
 
   test("a Contrarian Finder candidate row's CC button launches Contrarian Comeback and auto-runs Check Eligibility", async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['admin'], permissions: ['contrarian_finder:scan'] }); // scan-batch requires this permission
       if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
       if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
       if (url === '/contrarian-finder/scan-batch') return mockScanBatch();
@@ -133,7 +187,9 @@ describe('TabShell', () => {
     });
 
     renderShell('/contrarian-finder');
-    await userEvent.click(screen.getByRole('button', { name: /run scan/i }));
+    // The scan form only renders once the session (and its permissions) has loaded - findBy
+    // waits for that, unlike getBy which would run before the async /auth/me fetch resolves.
+    await userEvent.click(await screen.findByRole('button', { name: 'Run scan' }));
     await screen.findAllByTitle('Contrarian Comeback');
 
     await userEvent.click(screen.getAllByTitle('Contrarian Comeback')[0]);

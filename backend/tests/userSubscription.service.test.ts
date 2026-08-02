@@ -2,7 +2,7 @@ jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn() } }));
 
 import { pool } from '../src/db/pool';
 import { encrypt, decrypt } from '../src/utils/encryption';
-import { listSubscriptions, upsertSubscription, deleteSubscription } from '../src/services/userSubscription.service';
+import { listSubscriptions, upsertSubscription, deleteSubscription, getDecryptedKey, MissingUserApiKeyError } from '../src/services/userSubscription.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
 
@@ -76,5 +76,52 @@ describe('deleteSubscription', () => {
   test('returns false when nothing matched', async () => {
     mockQuery.mockResolvedValue({ rows: [] });
     expect(await deleteSubscription('user-1', 'fmp')).toBe(false);
+  });
+});
+
+// Admin-Master Fallback API Key (User Manual.md) - a caller with no key of their own falls
+// back to the single admin-master account's key, but only for fallback-eligible roles.
+describe('getDecryptedKey', () => {
+  test("returns the caller's own key without ever looking up roles", async () => {
+    const encrypted = encrypt('sk-own-key-1111');
+    mockQuery.mockResolvedValueOnce({ rows: [{ api_key_encrypted: encrypted }] });
+    expect(await getDecryptedKey('user-1', 'fmp')).toBe('sk-own-key-1111');
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  test('falls back to admin-master\'s key for a fallback-eligible role with no key of its own', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no own key
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user' }] }); // getUserRoles
+    const adminMasterEncrypted = encrypt('sk-admin-master-key');
+    mockQuery.mockResolvedValueOnce({ rows: [{ api_key_encrypted: adminMasterEncrypted }] }); // getAdminMasterKey
+    expect(await getDecryptedKey('user-2', 'fmp')).toBe('sk-admin-master-key');
+  });
+
+  test('falls back for user-contra-wokey specifically', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user-contra-wokey' }] });
+    const adminMasterEncrypted = encrypt('sk-admin-master-key');
+    mockQuery.mockResolvedValueOnce({ rows: [{ api_key_encrypted: adminMasterEncrypted }] });
+    expect(await getDecryptedKey('user-3', 'fmp')).toBe('sk-admin-master-key');
+  });
+
+  test('throws a "contact an admin" error when fallback-eligible but admin-master has no key either', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no own key
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'admin' }] }); // getUserRoles
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // getAdminMasterKey - nothing on file
+    let caught: unknown;
+    try {
+      await getDecryptedKey('user-4', 'fmp');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(MissingUserApiKeyError);
+    expect((caught as Error).message).toMatch(/contact an admin/i);
+  });
+
+  test('user-contra-withkey is NOT fallback-eligible - still a hard "add your own key" error', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no own key
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user-contra-withkey' }] }); // getUserRoles
+    await expect(getDecryptedKey('user-5', 'fmp')).rejects.toThrow(/add one via PUT \/subscriptions/i);
   });
 });

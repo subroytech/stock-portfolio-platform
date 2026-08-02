@@ -10,7 +10,7 @@ import { pool } from '../src/db/pool';
 import * as analysisService from '../src/services/analysisService';
 import {
   buildBatches, filterCandidates, resolveQuality, assembleUniverse, scanStock, scanBatch,
-  fetchStockData, assembleScanBatch,
+  fetchStockData, assembleScanBatch, getUniverseTable, refreshTickerDataBatch,
 } from '../src/services/contrarianFinder.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
@@ -100,6 +100,131 @@ describe('assembleUniverse', () => {
     for (const call of mockQuery.mock.calls) {
       expect(call[0]).toMatch(/ORDER BY/i);
     }
+  });
+});
+
+describe('getUniverseTable', () => {
+  test('returns indices in the fixed canonical order (not DB row order) and stocks sorted by index count desc', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [
+          { index_id: 'XLK', index_description: 'Technology Select Sector SPDR Fund' },
+          { index_id: 'DJ30', index_description: 'Dow Jones Industrial Average' },
+          { index_id: 'SP500', index_description: 'S&P 500 Index' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { symbol: 'AAPL', name: 'Apple Inc.', sector: 'Technology', market_cap: '3000000000000', index_ids: ['DJ30', 'SP500', 'XLK'] },
+          { symbol: 'ZOOM', name: null, sector: null, market_cap: null, index_ids: ['SP500'] },
+          { symbol: 'BETA', name: 'Beta Co', sector: 'Finance', market_cap: null, index_ids: ['DJ30', 'SP500'] },
+        ],
+      });
+
+    const result = await getUniverseTable();
+
+    // Canonical order (DJ30, NDX100, SP500, then CF_ETF_LIST) - the mocked DB rows above
+    // arrive in a different order (XLK, DJ30, SP500) to prove this isn't just passthrough.
+    expect(result.indices.map((i) => i.id)).toEqual(['DJ30', 'SP500', 'XLK']);
+
+    // AAPL (3 indices) first, then BETA (2), then ZOOM (1) - descending by membership count.
+    expect(result.stocks.map((s) => s.symbol)).toEqual(['AAPL', 'BETA', 'ZOOM']);
+    // market_cap comes back from pg as a string (NUMERIC) - confirms it's coerced to a number.
+    expect(result.stocks[0]).toEqual({ symbol: 'AAPL', name: 'Apple Inc.', sector: 'Technology', marketCap: 3000000000000, indices: ['DJ30', 'SP500', 'XLK'] });
+  });
+
+  test('ties in index count are broken by symbol ascending', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ index_id: 'DJ30', index_description: 'Dow Jones Industrial Average' }] })
+      .mockResolvedValueOnce({
+        rows: [
+          { symbol: 'ZZZ', name: null, sector: null, index_ids: ['DJ30'] },
+          { symbol: 'AAA', name: null, sector: null, index_ids: ['DJ30'] },
+        ],
+      });
+
+    const result = await getUniverseTable();
+    expect(result.stocks.map((s) => s.symbol)).toEqual(['AAA', 'ZZZ']);
+  });
+
+  test('a stock with no m_tickers row gets name/sector/marketCap null rather than crashing (LEFT JOIN, not INNER)', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ symbol: 'NEW', name: null, sector: null, market_cap: null, index_ids: ['DJ30'] }] });
+
+    const result = await getUniverseTable();
+    expect(result.stocks[0]).toEqual({ symbol: 'NEW', name: null, sector: null, marketCap: null, indices: ['DJ30'] });
+  });
+});
+
+describe('refreshTickerDataBatch', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+
+  function mockProfiles(bySymbol: Record<string, { companyName?: string; sector?: string; marketCap?: number }>) {
+    global.fetch = jest.fn((url: string) => {
+      const symbol = new URL(url).searchParams.get('symbol') ?? '';
+      const p = bySymbol[symbol];
+      return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(p ? [p] : []) });
+    }) as unknown as typeof fetch;
+  }
+
+  const stocks = [
+    { symbol: 'AAPL', tier: 1, source: 'DJ30' },
+    { symbol: 'ZZZ', tier: 3, source: 'S&P 500' },
+  ];
+
+  test('mode "all" refreshes every symbol in the batch regardless of current m_tickers state (no DB query to filter first)', async () => {
+    mockQuery.mockReset();
+    mockProfiles({
+      AAPL: { companyName: 'Apple Inc.', sector: 'Technology', marketCap: 3e12 },
+      ZZZ: { companyName: 'Zzz Co', sector: 'Finance', marketCap: 1e9 },
+    });
+
+    const result = await refreshTickerDataBatch(stocks, 'fake-key', 'all');
+
+    expect(result).toEqual({ updated: 2, skipped: 0 });
+    // Only the upsert query ran - no "which symbols are missing" lookup for mode 'all'.
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    const [sql, params] = mockQuery.mock.calls[0];
+    expect(sql).toContain('ON CONFLICT (symbol) DO UPDATE');
+    expect(params).toEqual(['AAPL', 'Apple Inc.', 'Technology', 3e12, 'ZZZ', 'Zzz Co', 'Finance', 1e9]);
+  });
+
+  test('mode "missing" only fetches/upserts symbols the DB reports as missing (has no row, or a null field)', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [{ symbol: 'ZZZ' }] }); // only ZZZ is missing - AAPL is already fully populated
+    mockProfiles({ ZZZ: { companyName: 'Zzz Co', sector: 'Finance', marketCap: 1e9 } });
+
+    const result = await refreshTickerDataBatch(stocks, 'fake-key', 'missing');
+
+    expect(result).toEqual({ updated: 1, skipped: 1 });
+    expect(mockQuery).toHaveBeenCalledTimes(2); // the missing-lookup, then the upsert
+    const upsertParams = mockQuery.mock.calls[1][1];
+    expect(upsertParams).toEqual(['ZZZ', 'Zzz Co', 'Finance', 1e9]); // AAPL never even queried from FMP
+  });
+
+  test('mode "missing" with nothing missing skips the FMP call and upsert entirely', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // nothing missing
+    const fetchSpy = jest.fn();
+    global.fetch = fetchSpy as unknown as typeof fetch;
+
+    const result = await refreshTickerDataBatch(stocks, 'fake-key', 'missing');
+
+    expect(result).toEqual({ updated: 0, skipped: 2 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledTimes(1); // only the missing-lookup, no upsert
+  });
+
+  test('a symbol FMP has no profile data for is counted as skipped, not upserted with blank values', async () => {
+    mockQuery.mockReset();
+    mockProfiles({ AAPL: { companyName: 'Apple Inc.', sector: 'Technology', marketCap: 3e12 } }); // ZZZ absent
+    const result = await refreshTickerDataBatch(stocks, 'fake-key', 'all');
+    expect(result).toEqual({ updated: 1, skipped: 1 });
   });
 });
 

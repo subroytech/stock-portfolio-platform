@@ -91,6 +91,49 @@ export async function getQuotes(symbols: string[], apiKey: string): Promise<Reco
   return map;
 }
 
+export interface TickerProfile {
+  name: string;
+  sector: string;
+  marketCap: number | null;
+}
+
+// One call per symbol via FMP's /profile endpoint, same one-call-per-symbol
+// parallel shape as getQuotes above - used to backfill m_tickers.name/sector/
+// market_cap (see backend/src/db/backfillTickerData.ts and
+// contrarianFinder.service.ts's refreshTickerDataBatch()). /profile carries
+// all three fields in one response (companyName + sector + marketCap),
+// unlike /quote which has marketCap/name but never sector reliably
+// (confirmed live 2026-07-27 - see contrarianFinder.service.ts's
+// fetchSectorMap comment). Using /profile uniformly for all three keeps a
+// single consistent source rather than mixing quote- and profile-sourced
+// fields.
+export async function getProfiles(symbols: string[], apiKey: string): Promise<Record<string, TickerProfile>> {
+  const results = await Promise.allSettled(
+    symbols.map((sym) =>
+      fmpGet<any>(`${env.fmpBaseUrl}/profile?symbol=${sym}&apikey=${apiKey}`, { timeoutMs: 15000 }).then((data) => {
+        if (!data) return null;
+        const p = Array.isArray(data) ? data[0] : data;
+        if (!p) return null;
+        return { sym, name: p.companyName || '', sector: p.sector || '', marketCap: p.marketCap ?? null };
+      })
+    )
+  );
+
+  const map: Record<string, TickerProfile> = {};
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value && (r.value.name || r.value.sector || r.value.marketCap != null)) {
+      const { sym, name, sector, marketCap } = r.value;
+      map[sym] = { name, sector, marketCap };
+    }
+  }
+
+  const errors = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+  if (errors.length && errors[0].reason?.message?.includes('Invalid or expired FMP API key')) {
+    throw new Error('Invalid or expired FMP API key. Please update your key.');
+  }
+  return map;
+}
+
 export interface HistoricalBar {
   date?: string;
   close: number | string;

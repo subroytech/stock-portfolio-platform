@@ -255,12 +255,25 @@ never actually reject). `tsc`/lint clean. Verified live: a real 15-symbol batch 
 the new path returned correct sector overlays, pricing, and strength scoring. Full detail in
 `Architecture.md` Section 1. **No more Python extractions remain in Section 3.**
 
-## Phases 4–6 — Not Started
-- Phase 4: Shared quote cache — **⏸ on hold, deferred by the user 2026-07-29** before
-  `/plan` started. Design already settled though (CockroachDB TTL table over Redis, UPSERT-
-  keyed by symbol, TTL window = the retention rule) — see `Architecture.md` Section 3 item 6
-  for the full reasoning, ready to resume from whenever this gets picked back up. Table
-  naming (doesn't fit `m_`/`tx_`/`sys_`/unprefixed) is the one still-open decision.
+## Next Up — Two New Items Queued (2026-07-31), Then Phases 4–6
+
+- **Functional Authorization (RBAC) + Usage Tracking Module** — scoping, design discussed,
+  not yet planned for implementation. Gate specific features by role (Contrarian Finder's
+  "Run Scan" → admin-only first) and log per-user usage across analysis features toward
+  future subscription tiering. See `Architecture.md` Section 3 item 6 for the full
+  table-naming design (`m_roles`/`m_role_permissions`/`users_roles`/`user_evt_usage`/
+  `user_evt_usage_summary_monthly`) and the `/auth/me` gap it surfaced.
+- **Contrarian Finder stock universe overhaul** — early discussion, not yet planned. The
+  `m_tickers`/`m_index_master`/`m_index_constituent` tables are already the live source for
+  scans, but the data itself is still the original hand-typed pre-DB snapshot. See
+  `Architecture.md` Section 3 item 7.
+- Phase 4: Shared quote cache — **⏸ on hold, deferred by the user 2026-07-29**, now also
+  queued behind the two items above. Design already settled though (CockroachDB TTL table
+  over Redis, UPSERT-keyed by symbol, TTL window = the retention rule) — see
+  `Architecture.md` Section 3 item 8 for the full reasoning, ready to resume from whenever
+  this gets picked back up. Table naming (doesn't fit `m_`/`tx_`/`sys_`/unprefixed, and
+  `user_evt_` doesn't apply either since this cache isn't per-user) is the one still-open
+  decision.
 - Phase 5: Production hardening (Docker, Sentry, staging/prod split)
 - Phase 6: Migration tool + cutover from current app
 

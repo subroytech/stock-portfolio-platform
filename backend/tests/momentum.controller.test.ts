@@ -17,11 +17,13 @@ jest.mock('../src/services/userSubscription.service', () => ({
   ...jest.requireActual('../src/services/userSubscription.service'),
   getDecryptedKey: jest.fn(),
 }));
+jest.mock('../src/services/usageTracking.service');
 
 import request from 'supertest';
 import * as marketData from '../src/services/marketData.service';
 import * as analysisService from '../src/services/analysisService';
 import * as userSubscription from '../src/services/userSubscription.service';
+import * as usageTracking from '../src/services/usageTracking.service';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
 
@@ -29,6 +31,7 @@ const mockGetHistorical = marketData.getHistorical as jest.Mock;
 const mockGetQuotes = marketData.getQuotes as jest.Mock;
 const mockComputeMomentumAnalysis = analysisService.computeMomentumAnalysis as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
+const mockLogUsage = usageTracking.logUsage as jest.Mock;
 
 const authCookie = `auth_token=${signToken('user-1')}`;
 
@@ -63,6 +66,8 @@ beforeEach(() => {
   mockGetDecryptedKey.mockResolvedValue('fake-fmp-key');
   mockComputeMomentumAnalysis.mockReset();
   mockComputeMomentumAnalysis.mockImplementation(({ price }) => Promise.resolve(fakeAnalysis(price)));
+  mockLogUsage.mockReset();
+  mockLogUsage.mockResolvedValue(undefined);
 });
 
 describe('GET /momentum/:symbol', () => {
@@ -129,5 +134,21 @@ describe('GET /momentum/:symbol', () => {
     expect(res.status).toBe(200);
     expect(res.body.symbol).toBe('AAPL');
     expect(mockGetHistorical).toHaveBeenCalledWith('AAPL', 'fake-fmp-key', 130);
+  });
+
+  test('logs usage on a successful analysis', async () => {
+    mockGetHistorical.mockResolvedValue(makeBars(60));
+    mockGetQuotes.mockResolvedValue({});
+    const res = await request(app).get('/momentum/AAPL').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'momentum');
+  });
+
+  test('a failed usage log does not turn a successful response into a 500 (fire-and-forget)', async () => {
+    mockGetHistorical.mockResolvedValue(makeBars(60));
+    mockGetQuotes.mockResolvedValue({});
+    mockLogUsage.mockRejectedValue(new Error('usage log db exploded'));
+    const res = await request(app).get('/momentum/AAPL').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
   });
 });
