@@ -14,8 +14,13 @@ type SizeTab = 'major' | 'minor';
 // Splits the holdings list by allocation weight so the user can focus on the
 // set that actually moves the portfolio, instead of scrolling past a long
 // tail of small positions to find them. A null allocationPct (holdings
-// haven't had a price refresh yet) defaults to the minor bucket rather than
-// major, since "definitely a significant position" can't be claimed for it.
+// haven't had a price refresh yet - it's only ever computed by
+// refreshPrices(), never set at import time) defaults to the MAJOR bucket,
+// not minor: found live (E2E golden-path regression, 2026-08-03) that
+// defaulting unknown-weight holdings to minor meant a portfolio right after
+// import showed 0 holdings in the default tab until the user thought to
+// click Refresh Prices first - hiding-by-default is the worse failure mode
+// for a brand-new import than showing-by-default.
 const MAJOR_THRESHOLD_PCT = 2.5;
 
 const COLUMNS: { key: SortKey; label: string; align?: 'right' }[] = [
@@ -47,11 +52,11 @@ export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTable
   const [sizeTab, setSizeTab] = useState<SizeTab>('major');
 
   const majorHoldings = useMemo(
-    () => holdings.filter((h) => (h.allocationPct ?? 0) > MAJOR_THRESHOLD_PCT),
+    () => holdings.filter((h) => h.allocationPct == null || h.allocationPct > MAJOR_THRESHOLD_PCT),
     [holdings],
   );
   const minorHoldings = useMemo(
-    () => holdings.filter((h) => (h.allocationPct ?? 0) <= MAJOR_THRESHOLD_PCT),
+    () => holdings.filter((h) => h.allocationPct != null && h.allocationPct <= MAJOR_THRESHOLD_PCT),
     [holdings],
   );
   const visibleHoldings = sizeTab === 'major' ? majorHoldings : minorHoldings;

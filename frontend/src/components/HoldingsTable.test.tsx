@@ -113,28 +113,46 @@ describe('HoldingsTable', () => {
         { ...holding, id: 'h1', symbol: 'BIG', allocationPct: 40 },
         { ...holding, id: 'h2', symbol: 'SMALL', allocationPct: 1 },
         { ...holding, id: 'h3', symbol: 'EDGE', allocationPct: 2.5 }, // exactly at the threshold - minor, not major
-        { ...holding, id: 'h4', symbol: 'UNKNOWN', allocationPct: null }, // no price refresh yet - defaults to minor
+        { ...holding, id: 'h4', symbol: 'UNKNOWN', allocationPct: null }, // no price refresh yet - defaults to MAJOR (see below)
       ];
     }
 
-    test('defaults to the Major tab, showing only allocations > 2.5% with a correct count and $ total', () => {
+    test('defaults to the Major tab, showing allocations > 2.5% PLUS unknown (null) allocations, with a correct count and $ total', () => {
       render(<HoldingsTable holdings={sizedHoldings()} />);
-      expect(screen.getByRole('button', { name: 'MAJOR ($1,500.00) in #1 Stocks' })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'MINOR ($4,500.00) in #3 Stocks' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'MAJOR ($3,000.00) in #2 Stocks' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'MINOR ($3,000.00) in #2 Stocks' })).toBeInTheDocument();
       expect(screen.getAllByText('BIG').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('UNKNOWN').length).toBeGreaterThan(0);
       expect(screen.queryByText('SMALL')).not.toBeInTheDocument();
       expect(screen.queryByText('EDGE')).not.toBeInTheDocument();
-      expect(screen.queryByText('UNKNOWN')).not.toBeInTheDocument();
     });
 
-    test('switching to Minor shows allocations <= 2.5%, including exactly-2.5% and null allocations', async () => {
+    test('switching to Minor shows only real allocations <= 2.5% (including exactly-2.5%), never null ones', async () => {
       render(<HoldingsTable holdings={sizedHoldings()} />);
       await userEvent.click(screen.getByRole('button', { name: /^MINOR/ }));
 
       expect(screen.getAllByText('SMALL').length).toBeGreaterThan(0);
       expect(screen.getAllByText('EDGE').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('UNKNOWN').length).toBeGreaterThan(0);
       expect(screen.queryByText('BIG')).not.toBeInTheDocument();
+      expect(screen.queryByText('UNKNOWN')).not.toBeInTheDocument();
+    });
+
+    // Regression test: found live via the E2E golden-path scenario (2026-08-03) - a fresh
+    // CSV import never sets allocation_pct (only refreshPrices() ever computes it), so right
+    // after import every holding has a null allocationPct. The old ?? 0 default bucketed all
+    // of them into Minor, meaning a brand-new portfolio showed "0 stocks" in the default
+    // (Major) tab until the user thought to click Refresh Prices - a real usability
+    // regression, not just a test-fixture mismatch.
+    test('a portfolio where every holding has a null allocationPct (fresh import, no refresh yet) shows them all in Major, not hidden in Minor', () => {
+      const freshImport = [
+        { ...holding, id: 'h1', symbol: 'AAPL', allocationPct: null },
+        { ...holding, id: 'h2', symbol: 'MSFT', allocationPct: null },
+      ];
+      render(<HoldingsTable holdings={freshImport} />);
+      expect(screen.getByRole('button', { name: /^MAJOR.*#2 Stocks/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^MINOR.*#0 Stocks/ })).toBeInTheDocument();
+      expect(screen.getByTestId('holdings-row-AAPL')).toBeInTheDocument();
+      expect(screen.getByTestId('holdings-row-MSFT')).toBeInTheDocument();
     });
 
     test('shows a tab-specific empty state when the active tab has no matching holdings', async () => {
