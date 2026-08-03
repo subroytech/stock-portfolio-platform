@@ -14,6 +14,7 @@ Feature: Tab navigation
     Then the Momentum ticker input still shows "AAPL"
 
   Scenario: API Keys modal opens and closes from any tab
+    Given they have been granted the "api_keys:manage_own" permission
     When they open the API Keys modal
     Then the API Keys modal is visible
     When they close the API Keys modal
