@@ -283,10 +283,10 @@ time ever — all fixed, all 4 CI jobs (backend/frontend/analysis-service/e2e) c
 
 ## Next Up
 
-- **Usage Tracking** (the unfinished part of the RBAC item above) — extend per-feature usage
-  logging beyond Contrarian Finder scans, toward future subscription tiering.
 - **Contrarian Finder's static constituent lists** — still-open question from the item above:
   keep hand-curating `cf_static_universe.ts`, or source live index membership from FMP.
+- **Usage Tracking** (the unfinished part of the RBAC item above) — extend per-feature usage
+  logging beyond Contrarian Finder scans, toward future subscription tiering.
 - Two small known-leftover cleanups (harmless, not yet decided): an orphaned
   `apiKeys:bringMyOwn` permission naming inconsistency (`User Manual.md`); `momentum
   .service.ts`'s dead-but-undeleted functions, kept as the Python extraction's rollback path.

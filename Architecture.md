@@ -682,14 +682,14 @@ above for full detail (RBAC + Admin Console; Stock Universe/`m_tickers` sync, ta
 "make the metadata usable" angle rather than "replace the static constituent list" — that
 narrower question, below, is still genuinely open). What's left, in rough priority order:
 
+- **Contrarian Finder's static constituent lists** — item 7's original, still-unresolved
+  question: keep hand-curating `cf_static_universe.ts`'s DJ30/NDX100/SP500/ETF membership, or
+  source it live from FMP/another feed.
 - **Usage Tracking, the part of item 6 not yet built.** The RBAC schema includes
   `user_evt_usage`/`user_evt_usage_summary_monthly` and a `usageTracking.service.ts` exists
   (logs `contrarian_finder_scan` events today), but the broader "measure per-user usage across
   every analysis feature toward future subscription tiering" scope wasn't carried further than
   that one call site.
-- **Contrarian Finder's static constituent lists** — item 7's original, still-unresolved
-  question: keep hand-curating `cf_static_universe.ts`'s DJ30/NDX100/SP500/ETF membership, or
-  source it live from FMP/another feed.
 - **Two small known-leftover cleanups**, both flagged and deliberately left alone rather than
   touched speculatively: an orphaned `apiKeys:bringMyOwn` permission (a naming inconsistency
   from before `api_keys:manage_own` was settled on — documented in `User Manual.md`, harmless,
