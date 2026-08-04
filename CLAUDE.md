@@ -46,7 +46,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 07-29)
+# Current Build State (as of 08-03)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -255,25 +255,45 @@ never actually reject). `tsc`/lint clean. Verified live: a real 15-symbol batch 
 the new path returned correct sector overlays, pricing, and strength scoring. Full detail in
 `Architecture.md` Section 1. **No more Python extractions remain in Section 3.**
 
-## Next Up — Two New Items Queued (2026-07-31), Then Phases 4–6
+## Functional Authorization (RBAC) + Admin Console ✅ Done
+Built across 8 phases, 2026-07-31–08-02. Full RBAC schema (`m_roles`/`m_role_permissions`/
+`m_function_master`/`users_roles`, migrations 015–018), `requirePermission` middleware
+(DB-backed, no hardcoded role-name checks), `GET /auth/me` now returns resolved
+`roles`+`permissions` (closing the old probe-`/portfolios`-and-catch-401 gap), a dedicated
+`/admin` console (My API(s)/Manage Users/Functions/Permission/Role, edit-then-save UX),
+permission-based gating on Contrarian Finder's Run Scan + API Keys, Manage Users filters, and
+an Admin-Master Fallback API Key model (3 custom roles modeling bring-your-own-key vs. shared
+fallback — see `User Manual.md`). Usage Tracking is only partial: the `user_evt_usage`/
+`user_evt_usage_summary_monthly` tables + `usageTracking.service.ts` exist and log Contrarian
+Finder scans, but weren't extended to every analysis controller — see Next Up.
 
-- **Functional Authorization (RBAC) + Usage Tracking Module** — scoping, design discussed,
-  not yet planned for implementation. Gate specific features by role (Contrarian Finder's
-  "Run Scan" → admin-only first) and log per-user usage across analysis features toward
-  future subscription tiering. See `Architecture.md` Section 3 item 6 for the full
-  table-naming design (`m_roles`/`m_role_permissions`/`users_roles`/`user_evt_usage`/
-  `user_evt_usage_summary_monthly`) and the `/auth/me` gap it surfaced.
-- **Contrarian Finder stock universe overhaul** — early discussion, not yet planned. The
-  `m_tickers`/`m_index_master`/`m_index_constituent` tables are already the live source for
-  scans, but the data itself is still the original hand-typed pre-DB snapshot. See
-  `Architecture.md` Section 3 item 7.
-- Phase 4: Shared quote cache — **⏸ on hold, deferred by the user 2026-07-29**, now also
-  queued behind the two items above. Design already settled though (CockroachDB TTL table
-  over Redis, UPSERT-keyed by symbol, TTL window = the retention rule) — see
-  `Architecture.md` Section 3 item 8 for the full reasoning, ready to resume from whenever
-  this gets picked back up. Table naming (doesn't fit `m_`/`tx_`/`sys_`/unprefixed, and
-  `user_evt_` doesn't apply either since this cache isn't per-user) is the one still-open
-  decision.
+## Contrarian Finder Stock Universe + m_tickers sync ✅ Done
+Built 2026-08-02–03 — tackled Architecture.md Section 3 item 7 from a "make the metadata
+usable" angle, not "replace the static constituent list" (that question's still open — see
+Next Up). New `GET /contrarian-finder/universe` reference table (visible to everyone).
+`m_tickers` (name/sector/market_cap, migration 019 adds the last one) is now kept populated
+from two live paths — Portfolio Update inserts, and a shared `refreshTickerDataBatch()` used
+by both "Run Scan (+ Mkt Cap)" (a confirm-gated link, piggybacks a full refresh on the scan's
+own batching) and the Admin Console's new "Master Data" Delta Update tab (missing-only,
+admin-only). Real bugs found live: BTC/ETH prices never updated on Refresh Prices (FMP needs
+the `BTCUSD` pair format, not bare `BTC`); a `HoldingsTable.tsx` Major/Minor-tabs regression
+(null allocation defaulted to hidden, not shown) and a flaky `useLogout` test and an outdated
+E2E permission assumption were all caught by the real E2E suite failing in CI for the first
+time ever — all fixed, all 4 CI jobs (backend/frontend/analysis-service/e2e) confirmed green.
+
+## Next Up
+
+- **Usage Tracking** (the unfinished part of the RBAC item above) — extend per-feature usage
+  logging beyond Contrarian Finder scans, toward future subscription tiering.
+- **Contrarian Finder's static constituent lists** — still-open question from the item above:
+  keep hand-curating `cf_static_universe.ts`, or source live index membership from FMP.
+- Two small known-leftover cleanups (harmless, not yet decided): an orphaned
+  `apiKeys:bringMyOwn` permission naming inconsistency (`User Manual.md`); `momentum
+  .service.ts`'s dead-but-undeleted functions, kept as the Python extraction's rollback path.
+- Phase 4: Shared quote cache — **⏸ on hold, deferred by the user 2026-07-29**. Design already
+  settled (CockroachDB TTL table over Redis, UPSERT-keyed by symbol, TTL window = the
+  retention rule) — see `Architecture.md` Section 3 item 8. Table naming (doesn't fit
+  `m_`/`tx_`/`sys_`/unprefixed/`user_evt_`) is the one still-open decision.
 - Phase 5: Production hardening (Docker, Sentry, staging/prod split)
 - Phase 6: Migration tool + cutover from current app
 

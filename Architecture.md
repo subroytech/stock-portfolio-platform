@@ -1,6 +1,6 @@
 ## Rebuild Plan — From Single-User Client-Side App to a Scalable Multi-User Platform
 
-**Last updated:** 2026-07-29
+**Last updated:** 2026-08-03
 
 **Why this section exists:** the user identified the single biggest shortcoming of the current app: it's a 100% client-side, single-user project (no backend, no database, no auth — `localStorage` is the only persistence layer) and therefore cannot scale beyond "one person, one browser." This doc started as a forward-looking rebuild plan and has since become a **living status document** — Section 1 tracks what's actually built, Section 2 is the immediate next action, Section 3 is the full ordered backlog. Update it as work lands rather than letting it drift back into a stale one-time plan. For a compact, fast-scan version of Section 1, see `CLAUDE.md`'s "Current Build State" — this doc carries the detail and rationale; that one carries the quick summary.
 
@@ -53,7 +53,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 07-29
+## Section 1 — Accomplished Till 08-03
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -578,17 +578,126 @@ returned correct sector overlays, pricing, and strength scoring.
 
 This was the last Section 3 backlog item before Phase 4.
 
+### Functional Authorization (RBAC) + Admin Console (Section 3 item 6) ✅ Done
+
+**Built across 8 phases, 2026-07-31–08-02.** Full RBAC schema: migrations `015` (`m_roles`,
+`m_role_permissions`, `users_roles`, `user_evt_usage`/`user_evt_usage_summary_monthly` per the
+design settled in the original scoping note), `016` (`m_function_master` — catalogs only the
+app "functions" that are genuine *exceptions* to "any signed-in user can use it," not a row
+per feature), `017` (user status + a `create` permission), `018` (`api_keys:manage_own`).
+New `requirePermission(key)` middleware (DB-backed, checks the caller's actual
+`m_role_permissions` join — not a hardcoded role-name check anywhere). Closed the `/auth/me`
+gap flagged in the original scoping: `GET /auth/me` now returns `{ id, email, roles,
+permissions }`, replacing the old probe-`/portfolios`-and-catch-401 session-detection hack.
+
+**Dedicated `/admin` console** (`AdminPage.tsx`) replacing the earlier dropdown-of-modals —
+5 tabs (My API(s), Manage Users, Manage Functions, Manage Permission, Manage Role), edit-then-
+save UX, role deletion. **Permission-based UI gating throughout, not role-name checks** — a
+new `hasAdminConsoleAccess()` helper (`api/auth.ts`) checks for *any* of 4 admin-console
+permissions rather than `roles.includes('admin')`, specifically so a differently-named
+superset role (see Admin-Master below) gets the same access without being called "admin"
+literally. Contrarian Finder's "Run Scan" button and the API Keys link/tab are both gated the
+same way. Manage Users gained email/status/role filters and a sticky, one-line-per-user
+desktop/tablet layout.
+
+**Admin-Master Fallback API Key** — the user's own design, implemented as a single-function
+change once traced: every key-dependent feature already funneled through
+`userSubscription.service.ts`'s `getDecryptedKey()`, so the fallback (an account with no FMP
+key of its own transparently uses a designated `admin-master`-role account's key) lives
+entirely there. Models a 3-role bring-your-own-key-or-not split (`user`/`admin` fall back,
+`user-contra-wokey` falls back, `user-contra-withKey` deliberately doesn't — bring-your-own is
+its whole purpose). Documented in full in the repo-root `User Manual.md`.
+
+**Real bugs found live and fixed**: `admin-master` initially saw a plain "API Keys" button
+instead of the "Admin" link (the hardcoded role-name check couldn't recognize a
+differently-named superset role — this is exactly what `hasAdminConsoleAccess()` above was
+built to fix); logout still 401'd on `/portfolios` after an earlier fix only special-cased the
+`['session']` query key — fixed with a general two-stage `setQueryData`-then-deferred-`clear()`
+ordering that protects *any* active query observer, not just session's own; `listRoles()`'s
+`userCount` was silently a string (CockroachDB's `COUNT()`/`INT8` columns round-trip as JS
+strings via `node-pg`, not numbers) — caught only via a live curl check, not by unit tests
+(which had been mocking numeric literals directly, masking the real driver behavior).
+
+### Contrarian Finder Stock Universe + m_tickers sync (Section 3 item 7 — revised scope) ✅ Done
+
+**Built 2026-08-02–03, tackled from a different angle than originally scoped.** The original
+open question (item 7 below) was "keep hand-curating the static DJ30/NDX100/SP500/ETF
+constituent lists, or source live index membership from FMP" — **that question is still
+open**; the constituent lists themselves are untouched. What got built instead: making the
+*metadata about* each universe symbol (name/sector/market cap) actually usable, since
+`m_tickers` — the only table that could hold it — turned out to be 0% populated for name and
+massively out of sync with the real 348-symbol universe (208 of 348 symbols had no
+`m_tickers` row at all; confirmed live, not assumed).
+
+- **`GET /contrarian-finder/universe`** — a new Stock Universe reference table (Symbol / Name
+  / Sector / Market Cap / a ✓ column per index, sorted by index-membership count) on the
+  Contrarian Finder page, visible to everyone (not gated behind `contrarian_finder:scan` —
+  it's read-only reference data, not an action).
+- **`m_tickers` is now the single source of truth for name/sector/market_cap** (migration
+  `019` adds `market_cap`), kept populated from two live paths rather than a one-time static
+  seed: **Portfolio Update** (`importHoldings()` inserts a bare row for any symbol a real CSV
+  import introduces that `m_tickers` doesn't know yet) and a shared
+  **`refreshTickerDataBatch()`** (FMP `/profile`, one consistent source for all three fields)
+  reused by two different triggers — **"Run Scan (+ Mkt Cap)"** (a de-emphasized, confirm-
+  gated link next to the primary "Run scan" button; piggybacks a full refresh onto the scan's
+  own batch/pacing, no new rate-limit logic needed) and the Admin Console's new **"Master
+  Data"** tab's **Delta Update** (missing-only refresh, admin-only, gated by the same
+  `contrarian_finder:scan` permission as Run Scan so the two stay in sync).
+- **Real bugs found live**: BTC/ETH holdings' prices silently never updated on Refresh Prices
+  — FMP's stock-quote endpoint doesn't resolve bare crypto tickers (`BTC`), it needs the pair
+  format (`BTCUSD`); fixed by mapping crypto symbols to FMP's pair format for the quote fetch
+  only, reversed on the way back so the rest of the app keeps using the bare symbol. A
+  `HoldingsTable.tsx` regression (built the same week, see below) was caught by the E2E golden
+  path failing for real.
+
+**HoldingsTable Major/Minor allocation tabs** (a smaller, standalone UI change, same week):
+holdings split into "Major" (>2.5% of portfolio) and "Minor" (≤2.5%) tabs, default-sorted by
+$ value descending. **Regression found via E2E, not manual testing**: a fresh CSV import never
+sets `allocation_pct` (only `refreshPrices()` ever computes it), so every newly-imported
+holding had `null` allocation — the initial `?? 0` default bucketed all of them into Minor,
+meaning a brand-new portfolio showed "0 stocks" in the default (Major) tab until the user
+thought to click Refresh Prices first. Fixed: null allocation now defaults to Major (unknown
+weight should default to *shown*, not *hidden*).
+
+**CI/E2E, same investigation**: a flaky `useLogout` test (raced a real 10ms wall-clock wait
+against a deferred `setTimeout(0)`) failed for real in GitHub Actions after being reliably
+green locally — fixed with fake timers advanced by exactly 0ms (not `vi.runAllTimers()`,
+tried first, which also fires React Query's own ~5min `gcTime` eviction timer and garbage-
+collects the unobserved session query). The `tab-navigation.feature` E2E scenario's "API Keys
+modal" check was testing an assumption Phase 8's permission-gating had already invalidated (a
+brand-new signup has no `api_keys:manage_own` by default, by design) — fixed by granting the
+permission via a dedicated, self-contained E2E-only role rather than relying on any
+dev-database-only manually-created role. **All 4 GitHub Actions jobs (backend/frontend/
+analysis-service/e2e) confirmed green** on the resulting commit, checked directly via the
+Checks API — e2e had been reliably green on every commit since it was scaffolded (2026-07-23)
+and had never actually failed before this round, confirming these were real regressions worth
+fixing properly, not pre-existing flakiness.
+
 ---
 
 ## Section 2 — Next Step
 
-**Two new items queued ahead of Phase 4, neither planned for implementation yet.** The user
-named two functional enhancements while looking ahead to a paid/subscription version of the
-app — **Functional Authorization (RBAC) + Usage Tracking** (Section 3 item 6) and a
-**Contrarian Finder stock universe overhaul** (item 7) — both discussed at the functional/
-design level but not yet run through a dedicated `/plan` session. Phase 4 (shared quote cache,
-item 8) stays on hold behind them — its own design (Redis vs. a Postgres/CockroachDB TTL
-table, resolved in favor of the TTL table) is unchanged, just deprioritized.
+**Both items previously queued here (Section 3 items 6 and 7) are now done** — see Section 1
+above for full detail (RBAC + Admin Console; Stock Universe/`m_tickers` sync, tackled from a
+"make the metadata usable" angle rather than "replace the static constituent list" — that
+narrower question, below, is still genuinely open). What's left, in rough priority order:
+
+- **Usage Tracking, the part of item 6 not yet built.** The RBAC schema includes
+  `user_evt_usage`/`user_evt_usage_summary_monthly` and a `usageTracking.service.ts` exists
+  (logs `contrarian_finder_scan` events today), but the broader "measure per-user usage across
+  every analysis feature toward future subscription tiering" scope wasn't carried further than
+  that one call site.
+- **Contrarian Finder's static constituent lists** — item 7's original, still-unresolved
+  question: keep hand-curating `cf_static_universe.ts`'s DJ30/NDX100/SP500/ETF membership, or
+  source it live from FMP/another feed.
+- **Two small known-leftover cleanups**, both flagged and deliberately left alone rather than
+  touched speculatively: an orphaned `apiKeys:bringMyOwn` permission (a naming inconsistency
+  from before `api_keys:manage_own` was settled on — documented in `User Manual.md`, harmless,
+  not yet decided whether to rename/remove); `momentum.service.ts`'s dead-but-undeleted
+  functions (`assembleMomentumAnalysis`/`calcKellySizing`'s server-side twin), kept as the
+  Python extraction's rollback path.
+- **Phase 4 (shared quote cache, item 8)** stays on hold — design already settled (CockroachDB
+  TTL table), just deprioritized, per the user's 2026-07-29 call.
 
 ---
 
@@ -633,47 +742,20 @@ table, resolved in favor of the TTL table) is unchanged, just deprioritized.
 3. **Contrarian Comeback Analysis — built greenfield in Python. ✅ Done 2026-07-28** — see Section 1 for full detail. Deferred from Phase 3: the full gate-check/fundamental-health/scoring/thesis workflow from `contrarian-analysis.html`, ~500+ lines of logic with zero backend equivalent today. Sized like item 1 (this doc's item numbering, not the E2E item above), not a quick port — same rationale for going straight to Python rather than a throwaway Node version. Test gate: same as item 2, `pytest` coverage is the correctness bar.
 4. **Momentum Analysis — extracted from `momentum.service.ts`. ✅ Done 2026-07-29** — see Section 1 for full detail. `calcKellySizing` was not ported (stays client-side). Test gate: the relevant Jest fixtures ported 1:1 into pytest, value-for-value — the TS version stays in place, unmodified, as the rollback path.
 5. **Contrarian Finder — extracted from `contrarianFinder.service.ts`. ✅ Done 2026-07-29** — see Section 1 for full detail. Node stayed the sole DB owner (pros/cons comparison favored consistency with every other Python feature over Python getting its own CockroachDB connection). Test gate: the relevant Jest fixtures ported 1:1 into pytest, value-for-value — the TS version stays in place, unmodified, as the rollback path.
-6. **Functional Authorization (RBAC) + Usage Tracking Module. Scoping — design discussed,
-   not yet planned for implementation.** Two goals: gate specific features by role (concrete
-   first example: Contrarian Finder's "Run Scan" should be admin-only, not open to every
-   signed-in user) and measure per-user usage across analysis features, to eventually classify
-   users into subscription tiers as this moves toward a paid product. Discussion (2026-07-31)
-   surfaced a real pre-existing gap — there is no `GET /auth/me` endpoint; `frontend/src/api/
-   auth.ts`'s `useSession()` deliberately probes `/portfolios` and catches 401 to infer "logged
-   in," with the actual user object cached in a page-load-scoped JS variable that's lost on
-   reload — and worked through the table design in detail without yet approving an
-   implementation plan: full RBAC rather than a single `role` column (`m_roles` — role catalog,
-   master/reference data, same bucket as `m_index_master`; `m_role_permissions` — which
-   permissions each role grants, child of `m_roles` mirroring `m_index_constituent`;
-   `users_roles` — which roles each user has, per-account data, unprefixed like
-   `users_subscriptions`); a new `user_evt_` naming bucket for usage tracking since it fits
-   none of the existing four (`m_`/`tx_`/`sys_`/unprefixed) — `tx_` is explicitly
-   portfolio-scoped and `sys_` is explicitly internal-not-app-data, neither describes a
-   per-user event log — with two tables, `user_evt_usage` (raw event log, `WITH
-   (ttl_expire_after = '35 days')`, CockroachDB's native TTL auto-deleting old rows with no
-   cron job needed) and `user_evt_usage_summary_monthly` (one row per user+feature+month,
-   incremented via `ON CONFLICT ... DO UPDATE` on every event write rather than a batch rollup
-   job, `WITH (ttl_expire_after = '366 days')` for the ~12-month retention cap); and a real
-   `PUT /users/:id/role` admin-promotion endpoint (itself permission-gated) rather than a
-   manual DB update, with no admin UI to call it yet. Confirmed `users_subscriptions` (existing
-   since 2026-07-12) does **not** double as a billing/tier table — it's per-*provider*
-   (FMP/Finnhub) API-key + that provider's own plan info, a different concept from what tier
-   the user pays this app for; a future `users_platform_subscription`-style table would be
-   needed separately if/when actual billing is built. **Next step**: a dedicated `/plan`
-   session to turn this into a real implementation plan (migration, `requirePermission`
-   middleware, the `/auth/me` fix, usage-logging call sites in the 5 analysis-triggering
-   controllers, frontend role-awareness).
-7. **Contrarian Finder stock universe overhaul. Early discussion, not yet planned.**
-   `m_tickers`/`m_index_master`/`m_index_constituent` already exist and ARE the live source
-   `assembleUniverse()` queries (`backend/src/services/contrarianFinder.service.ts`), capped at
-   `CF_MAX = 450` symbols, built from DJ30 → NDX100 → SP500 → 11 sector SPDR ETFs in that
-   priority order — but the underlying data was never re-sourced when the DB arrived.
-   `backend/src/db/seedTickerData.ts` is a one-time idempotent script that just copies two
-   hardcoded pre-DB-era files (`cf_static_universe.ts`, `ticker_sectors.ts`) into those tables
-   verbatim; moving the universe into a DB table didn't make it any less crude, just relocated
-   it. Open question, not yet resolved: keep hand-curating the static lists (simple, same
-   manual-maintenance burden) vs. sourcing live index membership from FMP's own endpoints or
-   another feed (bigger lift, stops the universe from going stale).
+6. **Functional Authorization (RBAC) + Admin Console. ✅ Done 2026-08-02** — see Section 1
+   above for full detail (schema, `requirePermission`, the `/auth/me` fix, the Admin Console,
+   Admin-Master Fallback API Key). **Usage Tracking is only partially done**: the
+   `user_evt_usage`/`user_evt_usage_summary_monthly` tables and `usageTracking.service.ts`
+   exist and log Contrarian Finder scans, but per-feature usage tracking toward subscription
+   tiering wasn't extended to every analysis-triggering controller — that remains open, see
+   Section 2.
+7. **Contrarian Finder stock universe overhaul. ✅ Done 2026-08-03, from a revised angle** —
+   see Section 1 above (Stock Universe reference table, `m_tickers` sync, "Run Scan (+ Mkt
+   Cap)", Master Data Delta Update). **The original open question is still open**: whether to
+   keep hand-curating `cf_static_universe.ts`'s DJ30/NDX100/SP500/ETF constituent lists or
+   source live index membership from FMP/another feed — that part was deliberately not what
+   this pass tackled (it fixed the *metadata about* each universe symbol, not the universe
+   membership itself). See Section 2.
 8. **Phase 4 — Shared quote cache. ⏸ On hold (deferred by the user 2026-07-29, not started).**
    Behind `GET /quotes`, so concurrent users requesting the same symbol within e.g. 30-60
    seconds hit the cache, not FMP again. Also move the Contrarian Finder's scan-history
