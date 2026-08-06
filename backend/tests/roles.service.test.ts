@@ -4,7 +4,7 @@ import { pool } from '../src/db/pool';
 import {
   getUserRoles, getUserPermissions, setUserRole, InvalidRoleError, listRoles, createRole, DuplicateRoleError,
   listRolePermissions, grantPermission, revokePermission, listUsersWithRoles,
-  deleteRole, RoleInUseError,
+  deleteRole, RoleInUseError, MissingParentPermissionError, ParentPermissionInUseError,
 } from '../src/services/roles.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
@@ -147,6 +147,34 @@ describe('grantPermission / revokePermission', () => {
     mockQuery.mockResolvedValueOnce({});
     await revokePermission('2', 'functions:manage');
     expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('DELETE FROM m_role_permissions'), ['2', 'functions:manage']);
+  });
+
+  test('grantPermission refuses contrarian_finder:scan_history when the role does not already have contrarian_finder:scan', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // parent-check finds nothing
+    await expect(grantPermission('2', 'contrarian_finder:scan_history')).rejects.toThrow(MissingParentPermissionError);
+    expect(mockQuery).toHaveBeenCalledTimes(1); // never reaches the INSERT
+  });
+
+  test('grantPermission allows contrarian_finder:scan_history once the role already has contrarian_finder:scan', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // parent-check finds the grant
+    mockQuery.mockResolvedValueOnce({}); // the INSERT
+    await grantPermission('2', 'contrarian_finder:scan_history');
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+    expect(mockQuery.mock.calls[1][0]).toContain('INSERT INTO m_role_permissions');
+  });
+
+  test('revokePermission refuses to revoke contrarian_finder:scan while the role still has the dependent contrarian_finder:scan_history', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ permission_key: 'contrarian_finder:scan_history' }] });
+    await expect(revokePermission('2', 'contrarian_finder:scan')).rejects.toThrow(ParentPermissionInUseError);
+    expect(mockQuery).toHaveBeenCalledTimes(1); // never reaches the DELETE
+  });
+
+  test('revokePermission allows revoking contrarian_finder:scan once the role has no dependent children left', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // dependent-check finds nothing
+    mockQuery.mockResolvedValueOnce({}); // the DELETE
+    await revokePermission('2', 'contrarian_finder:scan');
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+    expect(mockQuery.mock.calls[1][0]).toContain('DELETE FROM m_role_permissions');
   });
 });
 

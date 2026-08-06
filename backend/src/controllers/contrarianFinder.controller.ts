@@ -3,6 +3,7 @@ import * as cf from '../services/contrarianFinder.service';
 import * as analysisService from '../services/analysisService';
 import * as userSubscription from '../services/userSubscription.service';
 import * as usageTracking from '../services/usageTracking.service';
+import * as rolesService from '../services/roles.service';
 
 // This route sits behind requireAuth (see app.ts), so req.user is always
 // populated by the time this handler runs.
@@ -116,6 +117,50 @@ export async function tickerDataRefreshBatch(req: Request, res: Response, next: 
       res.status(503).json({ error: err.message });
       return;
     }
+    next(err);
+  }
+}
+
+// Persists the results of a scan the caller just finished running client-side
+// (see api/contrarianFinder.ts's useContrarianBatchScan) - fire-and-forget
+// from the frontend's perspective, called once at the very end of a
+// successfully completed scan. requirePermission('contrarian_finder:scan')
+// at the route level - only someone who could run a scan should be able to
+// claim to have completed one.
+//
+// Tiered retention (2026-08-05): contrarian_finder:scan_history distinguishes
+// admin/admin-master from every other contrarian_finder:scan-permitted role
+// (user-contra-withKey/wokey) - a dedicated permission rather than a
+// hardcoded role-name check, resolved fresh per request same as
+// requirePermission does (no caching on the JWT).
+export async function saveLastScan(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const { universeSize, scanned, params, results } = req.body || {};
+
+  if (typeof universeSize !== 'number' || typeof scanned !== 'number' || !Array.isArray(results)) {
+    res.status(400).json({ error: 'universeSize and scanned must be numbers, results must be an array.' });
+    return;
+  }
+
+  try {
+    const userId = getUserId(req);
+    const permissions = await rolesService.getUserPermissions(userId);
+    const runTier: cf.ContrarianRunTier = permissions.includes('contrarian_finder:scan_history') ? 'admin' : 'user';
+    await cf.saveLastScan(userId, runTier, { universeSize, scanned, params, results });
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Read-only, visible to everyone (like getUniverse above) - regular users who
+// can't run a scan themselves still need to see the last one someone else
+// ran. Returns { lastScan: null } rather than 404 when nothing's been saved
+// yet, so the frontend can treat "no last scan" as a normal, not-an-error state.
+export async function getLastScan(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const lastScan = await cf.getLastScan();
+    res.json({ lastScan });
+  } catch (err) {
     next(err);
   }
 }

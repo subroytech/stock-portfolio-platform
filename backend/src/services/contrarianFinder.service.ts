@@ -32,7 +32,7 @@ import * as analysisService from './analysisService';
 
 export const CF_ETF_LIST: string[] = ['XLK', 'XLV', 'XLF', 'XLY', 'XLI', 'XLC', 'XLP', 'XLE', 'XLB', 'XLU', 'XLRE'];
 export const CF_BATCH = 125;
-export const CF_MAX = 450;
+export const CF_MAX = 600;
 export const CF_MAX_BATCHES = 3;
 export const CF_STRENGTH_LOOKBACK = 60; // bars needed for SMA50/RSI14 strength screen
 
@@ -444,4 +444,109 @@ export async function assembleScanBatch(stocks: UniverseEntry[], key: string, qu
     result.sector = sectorMap[stock.symbol] || result.sector;
     return result;
   });
+}
+
+export interface LastScanRecord {
+  completedAt: string;
+  universeSize: number;
+  scanned: number;
+  params: unknown;
+  results: unknown;
+}
+
+export type ContrarianRunTier = 'admin' | 'user';
+
+// Admin/admin-master runs keep a rolling history, capped here rather than
+// via CockroachDB's row-level TTL (added 2026-08-05) - a count-based cap,
+// not a time-based one, since scan cadence isn't predictable enough for a
+// TTL window to reliably mean "last 60 runs."
+const ADMIN_HISTORY_LIMIT = 60;
+
+// Persists the last completed scan server-side (2026-08-04) so it's shared
+// across every user, not just the browser that ran it - see api/
+// contrarianFinder.ts's sessionStorage-only persistence, which this
+// complements rather than replaces (the runner's own browser still shows
+// results instantly from its local cache; this is the fallback for anyone
+// else). Called once, at the end of a successfully completed scan - never
+// for a partial/abandoned one. params/results are opaque JSONB from this
+// service's perspective (the frontend's RunParams/ScanResult[] shapes are
+// the source of truth); no validation beyond what the DB itself enforces.
+//
+// Tiered retention (2026-08-05, the user's own call after noticing every
+// run - regardless of who ran it - was accumulating forever): callers with
+// contrarian_finder:scan_history (admin/admin-master, resolved by the
+// controller) append to a shared history log, pruned back to the most
+// recent ADMIN_HISTORY_LIMIT rows after every insert. Every other
+// contrarian_finder:scan-permitted caller (user-contra-withKey/wokey)
+// instead gets exactly one row of their own - a transactional delete+insert
+// upsert keyed on (started_by, run_tier = 'user'), same "my last scan"
+// mental model the user described, distinct from the admin tier's shared
+// history. GET /contrarian-finder/last-scan is deliberately unaffected by
+// any of this - still just the single most recent row across both tiers.
+export async function saveLastScan(
+  userId: string,
+  runTier: ContrarianRunTier,
+  data: { universeSize: number; scanned: number; params: unknown; results: unknown },
+): Promise<void> {
+  const values = [userId, data.universeSize, data.scanned, JSON.stringify(data.params), JSON.stringify(data.results)];
+
+  if (runTier === 'user') {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `DELETE FROM tx_shared_contrarian_run WHERE started_by = $1 AND run_tier = 'user'`,
+        [userId],
+      );
+      await client.query(
+        `INSERT INTO tx_shared_contrarian_run (started_by, run_tier, universe_size, scanned, params, results)
+         VALUES ($1, 'user', $2, $3, $4, $5)`,
+        values,
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => { /* best-effort */ });
+      throw err;
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  await pool.query(
+    `INSERT INTO tx_shared_contrarian_run (started_by, run_tier, universe_size, scanned, params, results)
+     VALUES ($1, 'admin', $2, $3, $4, $5)`,
+    values,
+  );
+  await pool.query(
+    `DELETE FROM tx_shared_contrarian_run
+     WHERE run_tier = 'admin' AND id NOT IN (
+       SELECT id FROM tx_shared_contrarian_run WHERE run_tier = 'admin' ORDER BY completed_at DESC LIMIT $1
+     )`,
+    [ADMIN_HISTORY_LIMIT],
+  );
+}
+
+// Every row is a completed run (save-once-at-the-end means nothing else gets
+// written) - "the last scan" is just the most recent row, no status filter
+// needed. started_by is intentionally not selected/returned here - stored
+// for a possible future audit trail, not yet exposed to viewers.
+export async function getLastScan(): Promise<LastScanRecord | null> {
+  const { rows } = await pool.query<{
+    completed_at: string; universe_size: string; scanned: string; params: unknown; results: unknown;
+  }>(
+    `SELECT completed_at, universe_size, scanned, params, results
+     FROM tx_shared_contrarian_run ORDER BY completed_at DESC LIMIT 1`,
+  );
+  if (!rows[0]) return null;
+  const r = rows[0];
+  // INT8 columns come back as strings from pg - see marketData/roles services
+  // for the same precedent.
+  return {
+    completedAt: r.completed_at,
+    universeSize: Number(r.universe_size),
+    scanned: Number(r.scanned),
+    params: r.params,
+    results: r.results,
+  };
 }

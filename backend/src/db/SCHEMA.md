@@ -17,7 +17,16 @@ Tables are prefixed by category (settled 2026-07-10):
 - **`m_`** — master/reference data (`m_tickers`, `m_index_master`, `m_index_constituent`,
   `m_roles`, `m_role_permissions`, `m_function_master`).
 - **`tx_`** — transactional, portfolio-scoped data (`tx_portfolios`, `tx_holdings`,
-  `tx_cash_positions`, `tx_uploads`).
+  `tx_cash_positions`, `tx_uploads`). **Exception: `tx_shared_contrarian_run`** (added
+  2026-08-04) is `tx_`-prefixed despite being neither portfolio-scoped nor per-user — the
+  user's own call: running a Contrarian Finder scan is itself a **transaction performed by a
+  role**, not an admin-exclusive system job — both `admin` and the `user-contra-*` roles can
+  trigger one — so `tx_` still fits the "record of an action a user took" sense the other
+  `tx_` tables carry, even though this particular action's *result* (one row per completed
+  scan) is shared/global rather than scoped to that one user's own portfolio. This also sets
+  the precedent for the still-open "what prefix for non-user-scoped shared/cache data"
+  question `user_evt_`'s own note below flags (e.g. the on-hold shared quote cache) — future
+  shared/global tables can follow this same `tx_` precedent instead of inventing a new bucket.
 - **`sys_`** — internal bookkeeping, not app data (`sys_schema_migrations`).
 - **unprefixed** — `users`, `users_subscriptions`, `users_roles`. Deliberately left out of the
   `tx_` bucket (they're account-level, not portfolio-scoped transactional data) and don't fit
@@ -322,6 +331,58 @@ using its last-known price (the new import has no price for a symbol it doesn't 
 Indexes: `tx_portfolio_action_hist_pkey` (PK — this table was created post-rename, so
 unlike the other `tx_`/`m_` tables its constraint name actually matches the live table
 name), `idx_portfolio_action_hist_portfolio_id`.
+
+### `tx_shared_contrarian_run`
+Added by migration `020`, 2026-08-04. Persists the last completed Contrarian Finder scan
+server-side, shared across every user — closes a real gap confirmed live the same day: since
+only Admin/Admin-Master/`user-contra-*` roles can run a scan and regular users can only
+*view* the outcome, a regular user (or the same admin on a different device/session) saw
+nothing at all before this table existed, because results lived only in the running
+browser's `sessionStorage`, never anywhere shared. See `tx_` naming-convention exception note
+above for why this non-portfolio-scoped table still uses the `tx_` prefix.
+
+**Write-once-per-scan, not per-batch**: the client-orchestrated batch-scan flow
+(`useContrarianBatchScan()` in `frontend/src/api/contrarianFinder.ts`) is unchanged — one row
+is written only once, when a scan reaches `phase: 'done'` successfully, with the
+already-fully-assembled results (fire-and-forget `POST /contrarian-finder/last-scan`, gated
+by `requirePermission('contrarian_finder:scan')` — only someone who could run a scan should
+be able to claim to have completed one). An abandoned/failed scan writes no row. No
+`status`/`error_message` columns for the same reason — every row is, by construction, a
+completed run. "The last scan" (`GET /contrarian-finder/last-scan`, ungated — viewing isn't
+the action the permission protects, same as `GET /contrarian-finder/universe`) is just
+`ORDER BY completed_at DESC LIMIT 1` across every row, **regardless of tier** — the tiered
+retention below is a storage/retention concern only, not a viewer-facing one (confirmed with
+the user).
+
+**Tiered retention, added by migration `021`, 2026-08-05** — `saveLastScan()`
+(`contrarianFinder.service.ts`) branches on the caller's tier, resolved by the controller via
+`contrarian_finder:scan_history` (a dedicated permission, not a hardcoded role-name check —
+granted to `admin`/`admin-master` in this DB; any future role could be granted it too):
+- **`run_tier = 'admin'`** — plain `INSERT`, appending to a shared history log, then pruned
+  back to the 60 most recent admin-tier rows (`ADMIN_HISTORY_LIMIT`) after every insert.
+- **`run_tier = 'user'`** — every other `contrarian_finder:scan`-permitted role
+  (`user-contra-withKey`/`user-contra-wokey`). Upserts **one row per user**, not per-tier —
+  a transactional `DELETE ... WHERE started_by = $1 AND run_tier = 'user'` followed by a
+  fresh `INSERT`, rather than a partial-unique-index `ON CONFLICT` (simpler to reason about,
+  and avoids relying on CockroachDB's partial-index `ON CONFLICT` inference). Live-verified
+  2026-08-05: two runs from the same `user-contra-withKey` account leave exactly one row
+  (the second run's), while two admin-tier runs leave two.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `started_by` | `INT8` | FK → `users(id)`, `ON DELETE SET NULL` (not `CASCADE`) — this is shared data meant to outlive any individual account; deleting the admin who ran it shouldn't delete the result everyone's been viewing. Stored but **not yet exposed** via the API — a deliberate "store now, decide how to surface later" call |
+| `completed_at` | `TIMESTAMPTZ` | `NOT NULL`, default `now()` |
+| `universe_size` | `INT8` | `NOT NULL` |
+| `scanned` | `INT8` | `NOT NULL` |
+| `params` | `JSONB` | `NOT NULL` — the run's actual parameters (threshold, batch size, quality preset, etc.), same shape as the frontend's `RunParams` |
+| `results` | `JSONB` | `NOT NULL` — the full `ScanResult[]` array. No JSONB-specific size cap in CockroachDB (bounded by overall row size, soft limit ~64 MiB); a real 348-symbol payload is ≈125KB (measured live via `pg_column_size`), nowhere close |
+| `run_tier` | `VARCHAR(20)` | `NOT NULL`, default `'admin'` (migration `021`'s backfill value for the 2 pre-existing rows, both genuinely admin-run) — `'admin'` \| `'user'`, app-enforced vocabulary, not a DB check constraint, same convention as other free-text status columns in this schema |
+
+Indexes: `tx_shared_contrarian_run_pkey` (PK). No index on `(started_by, run_tier)` yet — the
+user-tier upsert's `DELETE ... WHERE started_by = $1 AND run_tier = 'user'` and the admin-tier
+prune's `ORDER BY completed_at DESC LIMIT 60` both currently do a full scan of this
+still-small table; worth revisiting if row count grows enough to matter.
 
 ### `m_tickers`
 Stock/ETF metadata reference table — **the single source of truth for ticker

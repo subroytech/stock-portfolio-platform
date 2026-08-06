@@ -63,6 +63,10 @@ export async function grantPermission(req: Request, res: Response, next: NextFun
       res.status(400).json({ error: `Unknown permission key: ${permissionKey}` });
       return;
     }
+    if (err instanceof rolesService.MissingParentPermissionError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     next(err);
   }
 }
@@ -73,6 +77,10 @@ export async function revokePermission(req: Request, res: Response, next: NextFu
     const permissions = await rolesService.listRolePermissions(getIdParam(req));
     res.json({ permissions });
   } catch (err) {
+    if (err instanceof rolesService.ParentPermissionInUseError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
     next(err);
   }
 }

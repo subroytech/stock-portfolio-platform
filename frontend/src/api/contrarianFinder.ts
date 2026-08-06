@@ -77,6 +77,23 @@ export interface BatchScanData {
   scanned: number;
   results: ScanResult[];
   params: RunParams;
+  // ISO timestamp of when this run finished — set client-side the moment a
+  // locally-run scan reaches 'done', or sourced from the server record when
+  // populated via useLastScanFallback below. Optional only for backward
+  // compatibility with whatever's already sitting in a user's sessionStorage
+  // from before this field existed.
+  completedAt?: string;
+}
+
+// Mirrors the backend's LastScanRecord (contrarianFinder.service.ts) — the
+// shared, server-persisted "last completed scan," visible to every user
+// regardless of who ran it.
+export interface LastScanRecord {
+  completedAt: string;
+  universeSize: number;
+  scanned: number;
+  params: RunParams;
+  results: ScanResult[];
 }
 
 export type BatchScanPhase = 'idle' | 'scanning' | 'waiting' | 'done';
@@ -149,6 +166,37 @@ function persistScanData(data: BatchScanData | undefined): void {
   }
 }
 
+interface LastScanResponse {
+  lastScan: LastScanRecord | null;
+}
+
+// GET /contrarian-finder/last-scan - the shared server-side result, checked
+// on every mount (2026-08-06: previously gated to only fire when the
+// session had no local data at all - found live that this let a viewer's
+// browser freeze on whatever the shared result happened to be the very
+// first time they ever visited, since a fallback-sourced result gets
+// persisted to sessionStorage/QueryClient cache exactly like a locally-run
+// one, permanently blocking any future refetch for that session even as an
+// admin ran newer scans since). Cheap, ungated GET - always safe to check;
+// useContrarianBatchScan's own effect below decides whether the response is
+// actually newer than what's currently shown before applying it.
+export function useLastScanFallback() {
+  return useQuery<LastScanResponse>({
+    queryKey: ['contrarianFinder', 'lastScanFallback'],
+    queryFn: () => apiFetch<LastScanResponse>('/contrarian-finder/last-scan'),
+  });
+}
+
+// ISO 8601 timestamps compare correctly as plain strings. A missing
+// `candidate` is never an upgrade; a missing `current` means anything real
+// is (covers both "nothing shown yet" and pre-existing sessionStorage
+// entries from before `completedAt` existed).
+function isNewerCompletedAt(candidate: string | undefined, current: string | undefined): boolean {
+  if (!candidate) return false;
+  if (!current) return true;
+  return candidate > current;
+}
+
 // Orchestrates a full Contrarian Finder scan as a sequence of per-batch
 // requests (POST /contrarian-finder/scan-batch), rather than one long-held
 // request. Stops the moment the server-reported `totalBatches` is reached —
@@ -186,6 +234,21 @@ export function useContrarianBatchScan() {
 
   useEffect(() => () => { runIdRef.current += 1; }, []);
 
+  // Always checked (see useLastScanFallback's own comment for why this used
+  // to be gated and isn't anymore) - applied only when it's actually newer
+  // than whatever's currently shown, and never while a run is in progress
+  // (isPending guard below), so this can't clobber this session's own
+  // in-flight scan with a stale shared result racing in behind it.
+  const fallback = useLastScanFallback();
+
+  useEffect(() => {
+    if (isPending) return;
+    const ls = fallback.data?.lastScan;
+    if (ls && isNewerCompletedAt(ls.completedAt, data?.completedAt)) {
+      setData({ universeSize: ls.universeSize, scanned: ls.scanned, results: ls.results, params: ls.params, completedAt: ls.completedAt });
+    }
+  }, [fallback.data, data, isPending, setData]);
+
   const run = useCallback(async (input: BatchScanInput) => {
     const myRunId = (runIdRef.current += 1);
     const isCancelled = () => runIdRef.current !== myRunId;
@@ -213,6 +276,7 @@ export function useContrarianBatchScan() {
     let totalBatches = Infinity; // unknown until the first response tells us
     let batchIndex = 0;
     let tickerRefreshTotal = 0;
+    let universeSize = 0;
 
     try {
       while (batchIndex < totalBatches) {
@@ -226,8 +290,9 @@ export function useContrarianBatchScan() {
         if (isCancelled()) return;
 
         totalBatches = res.totalBatches;
+        universeSize = res.universeSize;
         allResults.push(...res.results);
-        setData({ universeSize: res.universeSize, scanned: allResults.length, results: [...allResults], params });
+        setData({ universeSize, scanned: allResults.length, results: [...allResults], params });
         setProgress((p) => ({ ...p, totalBatches, currentBatch: batchIndex + 1 }));
         if (input.updateAllTickerData) {
           tickerRefreshTotal += (res.tickerRefresh?.updated ?? 0) + (res.tickerRefresh?.skipped ?? 0);
@@ -244,7 +309,19 @@ export function useContrarianBatchScan() {
           );
         }
       }
-      if (!isCancelled()) setProgress((p) => ({ ...p, phase: 'done', waitRemaining: 0 }));
+      if (!isCancelled()) {
+        const completedAt = new Date().toISOString();
+        setData({ universeSize, scanned: allResults.length, results: allResults, params, completedAt });
+        setProgress((p) => ({ ...p, phase: 'done', waitRemaining: 0 }));
+        // Fire-and-forget: shares this completed scan across every user
+        // (Architecture.md — regular users can only view, never run, a scan).
+        // Never fired for an error/abandoned run — only reached once the
+        // while loop above finishes normally.
+        apiFetch('/contrarian-finder/last-scan', {
+          method: 'POST',
+          body: JSON.stringify({ universeSize, scanned: allResults.length, params, results: allResults }),
+        }).catch(() => {});
+      }
     } catch (err) {
       if (!isCancelled()) { setIsError(true); setError(err); }
     } finally {

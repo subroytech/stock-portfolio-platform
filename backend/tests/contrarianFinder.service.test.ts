@@ -1,4 +1,4 @@
-jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn() } }));
+jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
 // Partial mock (keeps the real AnalysisServiceError class so `instanceof`
 // checks elsewhere survive) — only computeContrarianFinderScanBatch itself
 // is replaced, same pattern as every other analysisService-consuming test.
@@ -11,9 +11,11 @@ import * as analysisService from '../src/services/analysisService';
 import {
   buildBatches, filterCandidates, resolveQuality, assembleUniverse, scanStock, scanBatch,
   fetchStockData, assembleScanBatch, getUniverseTable, refreshTickerDataBatch,
+  saveLastScan, getLastScan, CF_MAX,
 } from '../src/services/contrarianFinder.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
+const mockConnect = pool.connect as unknown as jest.Mock;
 const mockComputeScanBatch = analysisService.computeContrarianFinderScanBatch as jest.Mock;
 
 // Small fixture standing in for the seeded index_constituent table - enough
@@ -100,6 +102,27 @@ describe('assembleUniverse', () => {
     for (const call of mockQuery.mock.calls) {
       expect(call[0]).toMatch(/ORDER BY/i);
     }
+  });
+
+  test('stops adding once the running (deduped) total hits CF_MAX, even mid-tier', async () => {
+    // Enough unique symbols across tiers to exceed CF_MAX (600) well before
+    // the ETF loop finishes - proves the raised cap actually takes effect at
+    // runtime, not just that the constant compiles to a new value.
+    mockQuery.mockImplementation((_text: string, params: string[]) => {
+      const indexId = params[0];
+      const perIndexCount: Record<string, number> = {
+        DJ30: 30, NDX100: 100, SP500: 400, XLK: 100, XLV: 100,
+        XLF: 100, XLY: 100, XLI: 100, XLC: 100, XLP: 100, XLE: 100, XLB: 100, XLU: 100, XLRE: 100,
+      };
+      const count = perIndexCount[indexId] ?? 0;
+      const rows = Array.from({ length: count }, (_, i) => ({ symbol: `${indexId}_${i}` }));
+      return Promise.resolve({ rows });
+    });
+
+    const universe = await assembleUniverse();
+    expect(universe.length).toBe(CF_MAX);
+    const symbols = universe.map((u) => u.symbol);
+    expect(new Set(symbols).size).toBe(CF_MAX); // no duplicates even at the cap boundary
   });
 });
 
@@ -225,6 +248,94 @@ describe('refreshTickerDataBatch', () => {
     mockProfiles({ AAPL: { companyName: 'Apple Inc.', sector: 'Technology', marketCap: 3e12 } }); // ZZZ absent
     const result = await refreshTickerDataBatch(stocks, 'fake-key', 'all');
     expect(result).toEqual({ updated: 1, skipped: 1 });
+  });
+});
+
+describe('saveLastScan / getLastScan', () => {
+  const params = { threshold: 25, batchSize: 125, maxBatches: 3, qualityPreset: 'standard', scanDays: 7 };
+  const results = [{ symbol: 'AAPL', filterFail: false }];
+
+  test('admin tier: inserts a new history row, then prunes back to the most recent 60 admin-tier rows', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
+
+    await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
+
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+    const [insertSql, insertParams] = mockQuery.mock.calls[0];
+    expect(insertSql).toContain('INSERT INTO tx_shared_contrarian_run');
+    expect(insertSql).toContain("'admin'");
+    expect(insertParams).toEqual(['user-1', 348, 348, JSON.stringify(params), JSON.stringify(results)]);
+
+    const [pruneSql, pruneParams] = mockQuery.mock.calls[1];
+    expect(pruneSql).toContain('DELETE FROM tx_shared_contrarian_run');
+    expect(pruneSql).toContain("run_tier = 'admin'");
+    expect(pruneParams).toEqual([60]);
+    expect(mockConnect).not.toHaveBeenCalled(); // admin tier never opens a transaction
+  });
+
+  test('user tier: upserts exactly one row per user via a transactional delete+insert, not a plain INSERT', async () => {
+    const client = { query: jest.fn().mockResolvedValue({ rows: [] }), release: jest.fn() };
+    mockConnect.mockReset();
+    mockConnect.mockResolvedValue(client);
+
+    await saveLastScan('user-2', 'user', { universeSize: 100, scanned: 100, params, results });
+
+    expect(mockConnect).toHaveBeenCalledTimes(1);
+    expect(client.query).toHaveBeenNthCalledWith(1, 'BEGIN');
+    const [deleteSql, deleteParams] = client.query.mock.calls[1];
+    expect(deleteSql).toContain('DELETE FROM tx_shared_contrarian_run');
+    expect(deleteSql).toContain("run_tier = 'user'");
+    expect(deleteParams).toEqual(['user-2']);
+    const [insertSql, insertParams] = client.query.mock.calls[2];
+    expect(insertSql).toContain('INSERT INTO tx_shared_contrarian_run');
+    expect(insertSql).toContain("'user'");
+    expect(insertParams).toEqual(['user-2', 100, 100, JSON.stringify(params), JSON.stringify(results)]);
+    expect(client.query).toHaveBeenNthCalledWith(4, 'COMMIT');
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  test('user tier: rolls back and releases the client if the transaction fails partway', async () => {
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce(undefined) // DELETE
+        .mockRejectedValueOnce(new Error('insert exploded')) // INSERT
+        .mockResolvedValueOnce(undefined), // ROLLBACK
+      release: jest.fn(),
+    };
+    mockConnect.mockReset();
+    mockConnect.mockResolvedValue(client);
+
+    await expect(saveLastScan('user-3', 'user', { universeSize: 1, scanned: 1, params, results }))
+      .rejects.toThrow('insert exploded');
+
+    expect(client.query).toHaveBeenNthCalledWith(4, 'ROLLBACK');
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  test('getLastScan returns null when no run has ever been saved', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const result = await getLastScan();
+    expect(result).toBeNull();
+  });
+
+  test('getLastScan returns the most recent row, camelCased', async () => {
+    mockQuery.mockReset();
+    const params = { threshold: 25 };
+    const results = [{ symbol: 'AAPL', filterFail: false }];
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ completed_at: '2026-08-04T10:00:00Z', universe_size: 348, scanned: 348, params, results }],
+    });
+
+    const result = await getLastScan();
+    expect(result).toEqual({ completedAt: '2026-08-04T10:00:00Z', universeSize: 348, scanned: 348, params, results });
+
+    // ORDER BY completed_at DESC LIMIT 1 - "the last scan" is always just the most recent row.
+    const [sql] = mockQuery.mock.calls[0];
+    expect(sql).toContain('ORDER BY completed_at DESC LIMIT 1');
   });
 });
 

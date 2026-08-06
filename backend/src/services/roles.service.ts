@@ -8,6 +8,22 @@ import { pool } from '../db/pool';
 export class InvalidRoleError extends Error {}
 export class DuplicateRoleError extends Error {}
 export class RoleInUseError extends Error {}
+export class MissingParentPermissionError extends Error {}
+export class ParentPermissionInUseError extends Error {}
+
+// Some permissions only make sense as an add-on to another - e.g.
+// contrarian_finder:scan_history only affects behavior that's itself gated
+// by contrarian_finder:scan (see contrarianFinder.controller.ts's
+// saveLastScan, which resolves the retention tier only after the scan
+// permission has already let the request through). Granting the child alone
+// would be a silent no-op via the Manage Permission screen, so grant/revoke
+// below enforce the dependency both ways: a child can't be granted without
+// its parent, and a parent can't be revoked while a granted child depends on
+// it. Flat map (not a general dependency graph) since this is currently the
+// only such pair - extend by adding another entry if a second case shows up.
+const PERMISSION_REQUIRES: Record<string, string> = {
+  'contrarian_finder:scan_history': 'contrarian_finder:scan',
+};
 
 export interface Role {
   id: string;
@@ -124,6 +140,19 @@ export async function listRolePermissions(roleId: string): Promise<string[]> {
 }
 
 export async function grantPermission(roleId: string, permissionKey: string): Promise<void> {
+  const requiredParent = PERMISSION_REQUIRES[permissionKey];
+  if (requiredParent) {
+    const { rows } = await pool.query(
+      'SELECT 1 FROM m_role_permissions WHERE role_id = $1 AND permission_key = $2 LIMIT 1',
+      [roleId, requiredParent],
+    );
+    if (!rows[0]) {
+      throw new MissingParentPermissionError(
+        `"${permissionKey}" requires "${requiredParent}" to already be granted to this role.`,
+      );
+    }
+  }
+
   await pool.query(
     'INSERT INTO m_role_permissions (role_id, permission_key) VALUES ($1, $2) ON CONFLICT (role_id, permission_key) DO NOTHING',
     [roleId, permissionKey],
@@ -131,6 +160,22 @@ export async function grantPermission(roleId: string, permissionKey: string): Pr
 }
 
 export async function revokePermission(roleId: string, permissionKey: string): Promise<void> {
+  const dependentChildren = Object.entries(PERMISSION_REQUIRES)
+    .filter(([, parent]) => parent === permissionKey)
+    .map(([child]) => child);
+
+  if (dependentChildren.length > 0) {
+    const { rows } = await pool.query<{ permission_key: string }>(
+      'SELECT permission_key FROM m_role_permissions WHERE role_id = $1 AND permission_key = ANY($2)',
+      [roleId, dependentChildren],
+    );
+    if (rows[0]) {
+      throw new ParentPermissionInUseError(
+        `Cannot revoke "${permissionKey}" while this role still has "${rows[0].permission_key}", which requires it — revoke that first.`,
+      );
+    }
+  }
+
   await pool.query(
     'DELETE FROM m_role_permissions WHERE role_id = $1 AND permission_key = $2',
     [roleId, permissionKey],

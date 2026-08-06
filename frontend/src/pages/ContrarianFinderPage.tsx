@@ -4,6 +4,7 @@ import { STRENGTH_LIST_QUERY_KEY, useContrarianBatchScan, useStockUniverse, type
 import { ApiError } from '../api/client';
 import { useSession } from '../api/auth';
 import { useApiKeysModal } from '../lib/apiKeysModal';
+import { formatAsOf } from '../lib/format';
 import { useTickerHandoff } from '../lib/tickerHandoff';
 import ContrarianFinderResultsTable from '../components/ContrarianFinderResultsTable';
 import StrengthListTable from '../components/StrengthListTable';
@@ -41,7 +42,7 @@ export default function ContrarianFinderPage() {
   const canScan = session?.permissions?.includes('contrarian_finder:scan') ?? false;
   const [threshold, setThreshold] = useState(25);
   const [batchSize, setBatchSize] = useState(125);
-  const [maxBatches, setMaxBatches] = useState(3);
+  const [maxBatches, setMaxBatches] = useState(5);
   const [scanDays, setScanDays] = useState(7);
   const [qualityPreset, setQualityPreset] = useState<'standard' | 'relaxed'>('standard');
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -143,6 +144,7 @@ export default function ContrarianFinderPage() {
         {!scan.isPending && scan.data?.params && (
           <p className="text-xs italic text-text-secondary">
             Last scan used: {scan.data.params.threshold}% threshold · {scan.data.params.scanDays}-day window · batch size {scan.data.params.batchSize} · max {scan.data.params.maxBatches} batches · {scan.data.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
+            {scan.data.completedAt && <> · run {formatAsOf(scan.data.completedAt)}</>}
           </p>
         )}
 
@@ -294,7 +296,7 @@ export default function ContrarianFinderPage() {
         {canScan && !scan.data && !scan.isPending && !scan.isError && (
           <div className="rounded-card bg-bg-card p-4 shadow-card text-sm text-text-secondary">
             <p>
-              Scans up to 450 stocks across the Dow 30, Nasdaq-100, S&amp;P 500 Top 200, and 11
+              Scans up to 600 stocks across the Dow 30, Nasdaq-100, S&amp;P 500 Top 400, and 11
               sector ETFs, one batch of FMP calls at a time, with a real ~{WAIT_SECONDS}s pause
               between batches to stay within rate limits — a full scan can take a couple of minutes.
             </p>

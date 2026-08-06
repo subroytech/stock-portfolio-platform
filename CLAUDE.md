@@ -46,7 +46,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 08-03)
+# Current Build State (as of 08-05)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -281,10 +281,112 @@ the `BTCUSD` pair format, not bare `BTC`); a `HoldingsTable.tsx` Major/Minor-tab
 E2E permission assumption were all caught by the real E2E suite failing in CI for the first
 time ever — all fixed, all 4 CI jobs (backend/frontend/analysis-service/e2e) confirmed green.
 
+## Contrarian Finder — shared last-scan persistence ✅ Done
+Built 2026-08-04 — closed a real gap the user found by hand: since only Admin/Admin-Master/
+`user-contra-*` roles can run a Contrarian Finder scan and everyone else can only *view* the
+outcome, a regular user (or the same admin on a different device/session) previously saw
+nothing at all, because results lived only in the running browser's `sessionStorage`, never
+anywhere shared. New `tx_shared_contrarian_run` table (migration 020 — deliberately `tx_`-
+prefixed despite the result being shared/global, not portfolio-scoped: running a scan is
+itself a transaction performed by a role, not an admin-exclusive job — both `admin` and
+`user-contra-*` can trigger one — so `tx_` still fits; documented exception in `SCHEMA.md`.
+Stores `started_by` but doesn't expose it via the API yet). `POST /contrarian-finder/last-scan`
+(`requirePermission('contrarian_finder:scan')` — only someone who could run a scan can claim
+to have completed one) is called fire-and-forget by the frontend once a scan reaches `done`;
+`GET /contrarian-finder/last-scan` is ungated (same "viewing isn't the action" reasoning as
+`GET /contrarian-finder/universe`) and used by a new `useLastScanFallback()` hook.
+`ContrarianFinderPage` now shows the run's completed-at timestamp. 10 new backend tests (385
+total), 4 new frontend tests (229 total), `tsc`/lint clean both sides. **Real bug found+fixed
+via live 2-account verification**: `universe_size`/`scanned` (INT8 columns) came back from
+CockroachDB as strings, not numbers — same `node-pg` gotcha as `roles.service.ts`/
+`marketData.service.ts`, fixed with the same `Number()` coercion. Verified live: a plain `user`
+account saw `{ lastScan: null }` before any scan existed, got 403 posting directly, then saw an
+admin account's saved scan appear via `GET` in a completely separate session.
+
+**Follow-up bug found+fixed 2026-08-05, reported by the user in real use**: `useLastScanFallback()`
+originally only fired when a viewer's browser had *no* local scan data at all — the first time
+a plain-`user` account ever visited, it cached whatever the shared result was at that moment
+(in both the QueryClient cache and `sessionStorage`), then never re-checked again for that
+browser session, even across page reloads. A viewer could get permanently stuck seeing a
+days-old result while an admin ran newer scans in the meantime. Confirmed live the backend was
+never the issue (a fresh account with zero local cache always got the true newest record).
+Fixed by making the fallback check fire on every mount unconditionally (cheap, ungated GET),
+applying its result only when it's actually newer (`completedAt` comparison) than whatever's
+currently shown — self-heals a stale view without ever clobbering a run the same session just
+completed itself (guarded by `isPending` and the newer-only check). 1 test replaced with 2
+(one covering the upgrade-when-stale case, one covering never-downgrade-a-fresh-local-run),
+231 frontend tests total.
+
+## Contrarian Finder — tiered last-scan retention ✅ Done
+Built 2026-08-05 — the user noticed the shared-scan table (above) was accumulating one row per
+completed run indefinitely and asked for tiered retention instead: keep a rolling **60-run
+history** for `admin`/`admin-master`, but **upsert a single row per user** for every other
+`contrarian_finder:scan`-permitted role (`user-contra-withKey`/`user-contra-wokey`). Migration
+`021` adds a `run_tier` column (`'admin'` | `'user'`, backfilled `'admin'` for the 2
+pre-existing rows) and a new `contrarian_finder:scan_history` permission, granted to `admin` via
+the migration and to `admin-master` via a direct grant (that role is never migration-seeded —
+same precedent as its other manually-configured grants). `saveLastScan()` branches on tier:
+admin appends then prunes back to the 60 most recent admin-tier rows; user does a transactional
+`DELETE` + `INSERT` keyed on `started_by`, not a partial-unique-index `ON CONFLICT` (simpler to
+reason about, confirmed via the same DELETE+INSERT pattern `roles.service.ts`'s `setUserRole()`
+already established). The controller resolves tier via `rolesService.getUserPermissions()` —
+permission-based, not a hardcoded role-name check, consistent with the rest of this RBAC system.
+`GET /contrarian-finder/last-scan` is deliberately unaffected — still just the single most
+recent row across both tiers (confirmed with the user: a storage/retention change only, not a
+viewer-facing one). 5 new backend tests, `tsc`/lint clean. **Live-verified with two throwaway
+accounts**: an `admin` account running twice left 2 accumulating rows; a `user-contra-withKey`
+account running twice left exactly 1 row (the second run replaced the first).
+
+## Permission dependency guard + Manage Permission UI indent ✅ Done
+Built 2026-08-05, same day — a follow-on question ("should `contrarian_finder:scan` and
+`contrarian_finder:scan_history` be mutually exclusive?") surfaced that `scan_history` is
+actually a strict **child** of `scan` (it only means anything alongside the parent — the tier
+check in `saveLastScan`'s controller only runs after `requirePermission('contrarian_finder
+:scan')` has already let the request through), so granting the child alone via the Admin
+Console would silently do nothing. `roles.service.ts` gets a small, generic `PERMISSION_REQUIRES`
+map (not a full dependency graph — this is currently the only such pair) enforced both
+directions: `grantPermission()` now throws `MissingParentPermissionError` (→ `400`) if the
+parent isn't already granted; `revokePermission()` throws `ParentPermissionInUseError` (→ `409`)
+if a granted child still depends on the permission being revoked. `RolePermissionsPage.tsx`
+mirrors the same map for **display only** (a `withParentChildOrder()` reorder so the child
+renders indented directly under its parent with a `↳` marker, instead of sorting to its own
+alphabetical position — "Contrarian Finder Scan History" would otherwise land well *before*,
+not after, "Run Contrarian Finder Scan"). 6 new backend tests, 1 new frontend test, `tsc`/lint
+clean both sides. Live-verified via the real Admin Console API against a throwaway role: grant
+child without parent → `400`; grant parent then child → both `200`; revoke parent while child
+still granted → `409`; revoke child then parent → both `200`.
+
+## Contrarian Finder — SP500 tier expanded to top 400 ✅ Done
+Built 2026-08-05 — resolved the "keep hand-curating `cf_static_universe.ts`'s SP500 list, or
+source live index membership from FMP" open question in favor of a live-data-driven
+regeneration of the static file, not a runtime FMP dependency. The official S&P 500 membership
+endpoint doesn't work on the current FMP plan (`/stable/sp500-constituent` 402s; legacy
+`/v3/sp500_constituent` is retired) — confirmed live before choosing the fallback: a one-time,
+throwaway `ts-node` script pulled `/stable/company-screener` (real market-cap-ranked US
+companies) and rebuilt the SP500 array as a top-400-by-market-cap proxy, fully replacing the
+old 200 (not appending) — this also fixes a real, previously-confirmed gap (MU, INTC, AMAT,
+ORCL, PLTR, PANW were all missing). Getting a clean list took several rounds of hand-verified
+filtering: the raw screener mixed in preferred stock/notes/trusts with bogus inflated market
+caps, at least one outright private company (SPCX/SpaceX), and OTC-traded subsidiary
+instruments — all caught by spot-checking suspicious symbols live via `/stable/quote` before
+trusting them, not assumed. `dj30`/`ndx100`/`etf` arrays and their DB rows are byte-for-byte
+untouched (confirmed live: 30/88/20-per-ETF, unchanged).
+
+**Real bug this surfaced**: `assembleUniverse()`'s `CF_MAX = 450` cap would have silently
+truncated the ETF tier out of every scan once SP500 grew (ETFs are added last) — raised to
+`600`. Live dedup simulation against the real expanded table: the actual post-expansion total
+is 458 (not the ~540-600 pre-implementation estimate — the real top-400 list overlaps more
+with the ETF tier than assumed), confirmed via a real `scan-batch` API call
+(`universeSize: 458`, `totalBatches: 4`). Frontend's default `maxBatches` raised 3→5 (625
+symbols) so a plain "Run scan" click covers the full universe without needing the Advanced
+panel. `m_index_constituent`'s upsert-only seeding never removes stale rows, so a one-time
+manual prune (`DELETE ... WHERE index_id = 'SP500' AND symbol NOT IN (new 400)`) removed the
+35 tickers that didn't make the new list. 1 new backend test (`assembleUniverse`'s `CF_MAX`
+boundary, 396 total), several existing frontend tests updated for the new default (230 total),
+`tsc`/lint clean both sides.
+
 ## Next Up
 
-- **Contrarian Finder's static constituent lists** — still-open question from the item above:
-  keep hand-curating `cf_static_universe.ts`, or source live index membership from FMP.
 - **Usage Tracking** (the unfinished part of the RBAC item above) — extend per-feature usage
   logging beyond Contrarian Finder scans, toward future subscription tiering.
 - Two small known-leftover cleanups (harmless, not yet decided): an orphaned

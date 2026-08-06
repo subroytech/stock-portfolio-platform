@@ -1,10 +1,11 @@
-# User Manual — Roles & API Key Access
+# User Manual — Roles, API Key Access & Contrarian Finder Retention
 
-This document describes the platform's role/permission model as it relates to FMP/Finnhub API
-keys — who manages their own key, who doesn't, and how the app still works for the people who
-don't. **Status: implemented and live-verified (2026-08-02).** Role names below use the exact
-casing as created in the database: `user-contra-withKey` (capital K), `user-contra-wokey`
-(lowercase), `admin-master`.
+This document describes the platform's role/permission model — as it relates to FMP/Finnhub API
+keys (who manages their own key, who doesn't, and how the app still works for the people who
+don't), and to the Contrarian Finder shared last-scan result. **Status: implemented and
+live-verified (2026-08-02 for the API key sections; 2026-08-05 for Contrarian Finder retention).**
+Role names below use the exact casing as created in the database: `user-contra-withKey`
+(capital K), `user-contra-wokey` (lowercase), `admin-master`.
 
 ## Roles
 
@@ -35,6 +36,30 @@ casing as created in the database: `user-contra-withKey` (capital K), `user-cont
   constraint exists; the app trusts the admin not to promote a second user to this role. The
   stored key can be either/both FMP and Finnhub, same as any other key-holding role — no
   special-casing needed, the existing `users_subscriptions` schema already supports it.
+
+## Contrarian Finder — shared last-scan result & retention tiers
+
+Every signed-in user, including plain `user` (who can't run a scan at all), can **view** the
+most recently completed Contrarian Finder scan — `GET /contrarian-finder/last-scan` has no
+permission gate, same reasoning as the Stock Universe reference table. Only the *running* of a
+scan is gated by `contrarian_finder:scan` (the table above). This view is always kept fresh:
+whichever run is genuinely the newest across every role is what every viewer sees, regardless
+of who ran it or how long ago they last opened the page.
+
+How a completed run is stored depends on a second permission, `contrarian_finder:scan_history`,
+granted only to `admin` and `admin-master`:
+
+| Role | Runs a scan → | Retention |
+|---|---|---|
+| `admin`, `admin-master` | Appends to a shared history log | Rolling **60-run** history, oldest pruned automatically |
+| `user-contra-withKey`, `user-contra-wokey` | Replaces their own prior run | Exactly **one row per account** — the next run overwrites the last |
+
+`contrarian_finder:scan_history` only has an effect *alongside* `contrarian_finder:scan` — it's
+not a separate action a role can take on its own, and the Admin Console's Manage Permission
+screen enforces this: granting `scan_history` to a role that doesn't already have `scan` is
+rejected, and `scan` can't be revoked from a role while it still holds `scan_history`. In the
+Manage Permission checklist, `scan_history` renders indented directly under `scan` to make this
+relationship visible at a glance.
 
 ## "Functional Access" = `contrarian_finder:scan`
 

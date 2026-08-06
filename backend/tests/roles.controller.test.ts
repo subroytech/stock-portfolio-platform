@@ -124,6 +124,14 @@ describe('POST /roles/:id/permissions', () => {
     const res = await request(app).post('/roles/2/permissions').set('Cookie', authCookie).send({ permissionKey: 'not:real' });
     expect(res.status).toBe(400);
   });
+
+  test('400 when granting contrarian_finder:scan_history to a role that does not already have contrarian_finder:scan', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // grantPermission's own parent-check
+    const res = await request(app).post('/roles/2/permissions').set('Cookie', authCookie).send({ permissionKey: 'contrarian_finder:scan_history' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('contrarian_finder:scan');
+  });
 });
 
 describe('DELETE /roles/:id/permissions/:key', () => {
@@ -134,5 +142,12 @@ describe('DELETE /roles/:id/permissions/:key', () => {
     const res = await request(app).delete('/roles/2/permissions/functions:manage').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ permissions: [] });
+  });
+
+  test('409 when revoking contrarian_finder:scan while the role still has the dependent contrarian_finder:scan_history', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+    mockQuery.mockResolvedValueOnce({ rows: [{ permission_key: 'contrarian_finder:scan_history' }] }); // revokePermission's own dependent-check
+    const res = await request(app).delete('/roles/2/permissions/contrarian_finder:scan').set('Cookie', authCookie);
+    expect(res.status).toBe(409);
   });
 });

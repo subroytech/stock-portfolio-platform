@@ -5,6 +5,8 @@ jest.mock('../src/services/contrarianFinder.service', () => ({
   assembleScanBatch: jest.fn(),
   getUniverseTable: jest.fn(),
   refreshTickerDataBatch: jest.fn(),
+  saveLastScan: jest.fn(),
+  getLastScan: jest.fn(),
 }));
 jest.mock('../src/services/userSubscription.service', () => ({
   ...jest.requireActual('../src/services/userSubscription.service'),
@@ -25,6 +27,8 @@ const mockAssembleUniverse = cf.assembleUniverse as jest.Mock;
 const mockAssembleScanBatch = cf.assembleScanBatch as jest.Mock;
 const mockGetUniverseTable = cf.getUniverseTable as jest.Mock;
 const mockRefreshTickerDataBatch = cf.refreshTickerDataBatch as jest.Mock;
+const mockSaveLastScan = cf.saveLastScan as jest.Mock;
+const mockGetLastScan = cf.getLastScan as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockLogUsage = usageTracking.logUsage as jest.Mock;
@@ -55,6 +59,10 @@ beforeEach(() => {
   mockGetUniverseTable.mockReset();
   mockRefreshTickerDataBatch.mockReset();
   mockRefreshTickerDataBatch.mockResolvedValue({ updated: 5, skipped: 1 });
+  mockSaveLastScan.mockReset();
+  mockSaveLastScan.mockResolvedValue(undefined);
+  mockGetLastScan.mockReset();
+  mockGetLastScan.mockResolvedValue(null);
 });
 
 describe('GET /contrarian-finder/universe', () => {
@@ -231,5 +239,96 @@ describe('POST /contrarian-finder/ticker-data-refresh-batch', () => {
     expect(res1.status).toBe(400);
     const res2 = await request(app).post('/contrarian-finder/ticker-data-refresh-batch').set('Cookie', authCookie).send({ batchIndex: 'nope' });
     expect(res2.status).toBe(400);
+  });
+});
+
+describe('POST /contrarian-finder/last-scan', () => {
+  const validBody = { universeSize: 250, scanned: 125, params: { qualityPreset: 'balanced' }, results: [{ symbol: 'S0' }] };
+
+  test('401 without a session cookie', async () => {
+    const res = await request(app).post('/contrarian-finder/last-scan').send(validBody);
+    expect(res.status).toBe(401);
+  });
+
+  test('403 for a signed-in user without the contrarian_finder:scan permission', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).post('/contrarian-finder/last-scan').set('Cookie', authCookie).send(validBody);
+    expect(res.status).toBe(403);
+    expect(mockSaveLastScan).not.toHaveBeenCalled();
+  });
+
+  test('400 when universeSize/scanned are not numbers or results is not an array', async () => {
+    const res1 = await request(app).post('/contrarian-finder/last-scan').set('Cookie', authCookie)
+      .send({ ...validBody, universeSize: 'nope' });
+    expect(res1.status).toBe(400);
+    const res2 = await request(app).post('/contrarian-finder/last-scan').set('Cookie', authCookie)
+      .send({ ...validBody, scanned: 'nope' });
+    expect(res2.status).toBe(400);
+    const res3 = await request(app).post('/contrarian-finder/last-scan').set('Cookie', authCookie)
+      .send({ ...validBody, results: 'nope' });
+    expect(res3.status).toBe(400);
+    expect(mockSaveLastScan).not.toHaveBeenCalled();
+  });
+
+  test('200 for a permitted caller, saves under the caller\'s own user id - defaults to the user tier (no contrarian_finder:scan_history)', async () => {
+    // beforeEach's mockQuery.mockResolvedValue is a blanket default with no
+    // permission_key field, so getUserPermissions() resolves an empty/
+    // non-matching list here - the same as a real caller without
+    // contrarian_finder:scan_history.
+    const res = await request(app).post('/contrarian-finder/last-scan').set('Cookie', authCookie).send(validBody);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+    expect(mockSaveLastScan).toHaveBeenCalledWith('user-1', 'user', {
+      universeSize: 250,
+      scanned: 125,
+      params: { qualityPreset: 'balanced' },
+      results: [{ symbol: 'S0' }],
+    });
+  });
+
+  test('resolves the admin tier when the caller has contrarian_finder:scan_history', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }) // requirePermission('contrarian_finder:scan') gate
+      .mockResolvedValueOnce({ rows: [{ permission_key: 'contrarian_finder:scan' }, { permission_key: 'contrarian_finder:scan_history' }] }); // getUserPermissions
+    const res = await request(app).post('/contrarian-finder/last-scan').set('Cookie', authCookie).send(validBody);
+    expect(res.status).toBe(200);
+    expect(mockSaveLastScan).toHaveBeenCalledWith('user-1', 'admin', expect.anything());
+  });
+
+  test('resolves the user tier when the caller lacks contrarian_finder:scan_history', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }) // requirePermission('contrarian_finder:scan') gate
+      .mockResolvedValueOnce({ rows: [{ permission_key: 'contrarian_finder:scan' }] }); // getUserPermissions, no scan_history
+    const res = await request(app).post('/contrarian-finder/last-scan').set('Cookie', authCookie).send(validBody);
+    expect(res.status).toBe(200);
+    expect(mockSaveLastScan).toHaveBeenCalledWith('user-1', 'user', expect.anything());
+  });
+});
+
+describe('GET /contrarian-finder/last-scan', () => {
+  test('401 without a session cookie', async () => {
+    const res = await request(app).get('/contrarian-finder/last-scan');
+    expect(res.status).toBe(401);
+  });
+
+  test('200 with { lastScan: null } when nothing has been saved yet - no permission check at all', async () => {
+    const res = await request(app).get('/contrarian-finder/last-scan').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ lastScan: null });
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  test('200 with the last saved scan for a caller WITHOUT contrarian_finder:scan - viewing is not the gated action', async () => {
+    const fakeRecord = {
+      completedAt: '2026-08-03T14:22:00.000Z',
+      universeSize: 250,
+      scanned: 250,
+      params: { qualityPreset: 'balanced' },
+      results: [{ symbol: 'S0' }],
+    };
+    mockGetLastScan.mockResolvedValue(fakeRecord);
+    const res = await request(app).get('/contrarian-finder/last-scan').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ lastScan: fakeRecord });
   });
 });

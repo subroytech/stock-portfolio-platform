@@ -20,4 +20,14 @@ router.post('/scan-batch', requirePermission('contrarian_finder:scan'), contrari
 // reachability, since only Admin/Admin-Master pass its own access check too).
 router.post('/ticker-data-refresh-batch', requirePermission('contrarian_finder:scan'), contrarianFinderController.tickerDataRefreshBatch);
 
+// Persists the last completed scan so every user shares one result, not just
+// whichever browser ran it (2026-08-04) - only someone who could run a scan
+// should be able to claim to have completed one.
+router.post('/last-scan', requirePermission('contrarian_finder:scan'), contrarianFinderController.saveLastScan);
+
+// Read-only, visible to any signed-in user - same "viewing isn't the action
+// the permission protects" reasoning as /universe above. Regular users who
+// can't run a scan themselves are exactly who this is for.
+router.get('/last-scan', contrarianFinderController.getLastScan);
+
 export default router;
