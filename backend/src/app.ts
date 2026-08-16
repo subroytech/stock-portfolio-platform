@@ -14,6 +14,7 @@ import analysisRoutes from './routes/analysis.routes';
 import usersRoutes from './routes/users.routes';
 import rolesRoutes from './routes/roles.routes';
 import functionMasterRoutes from './routes/functionMaster.routes';
+import portfolioTemplateRoutes from './routes/portfolioTemplate.routes';
 import errorHandler from './middleware/errorHandler';
 import rateLimiters from './middleware/rateLimit';
 import requireAuth from './middleware/requireAuth';
@@ -64,6 +65,9 @@ app.use('/users', requireAuth, rateLimiters, usersRoutes);
 app.use('/roles', requireAuth, rateLimiters, rolesRoutes);
 // View/Manage Functions (Admin Console Phase 1 backend) - same pattern as /roles above.
 app.use('/functions', requireAuth, rateLimiters, functionMasterRoutes);
+// Portfolio Upload - Flex - requireAuth just confirms a session; requirePermission on each
+// route (portfolioTemplate.routes.ts) restricts to portfolio_upload:flex/manage_status holders.
+app.use('/portfolio-templates', requireAuth, rateLimiters, portfolioTemplateRoutes);
 
 app.use(errorHandler);
 

@@ -46,7 +46,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 08-05)
+# Current Build State (as of 08-14)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -166,6 +166,17 @@ killing the Python process degrades to a clean 503 rather than a crash. 158 back
 machine this was built on, so the `Dockerfile` is unverified by an actual build/run — only
 the direct `poetry run uvicorn` path was live-tested. Full detail in `Architecture.md`
 Section 1.
+
+**2026-08-14 — Python version pin bumped 3.12 → 3.14**: local dev only ever had Python 3.14
+installed (no 3.12 anywhere on the machine), so Poetry had been silently resolving the
+`^3.12` constraint against 3.14 all along — the "tested" version was actually 3.14, not the
+3.12 the `Dockerfile`/CI claimed. Repinned all three to `3.14` for consistency
+(`analysis-service/pyproject.toml`, `analysis-service/Dockerfile`'s `python:3.14-slim` base,
+and `.github/workflows/ci.yml`'s `actions/setup-python` step) and regenerated
+`poetry.lock` — `poetry install` + all 149 Python tests verified passing under the new lock.
+**Known gap unchanged and now also covers this**: since Docker still isn't installed on this
+machine, `python:3.14-slim` actually pulling/building has *not* been verified — only the
+constraint/lock/local-venv side of this change is confirmed.
 
 ## Long-Term Analysis (Section 3 item 2) ✅ Done
 Built 2026-07-26 — the first real business logic in `analysis-service` and the first full
@@ -384,6 +395,169 @@ manual prune (`DELETE ... WHERE index_id = 'SP500' AND symbol NOT IN (new 400)`)
 35 tickers that didn't make the new list. 1 new backend test (`assembleUniverse`'s `CF_MAX`
 boundary, 396 total), several existing frontend tests updated for the new default (230 total),
 `tsc`/lint clean both sides.
+
+## Portfolio Upload — Flex ✅ Done
+
+Built across 5 formally-planned phases, 2026-08-07 (scoped through extensive discussion
+2026-08-06/07, then `/plan`-approved and executed in one continuous "auto mode" session). With
+"appifying" the platform in mind: a general-purpose import path that doesn't need a hardcoded
+per-broker parser for every new source, alongside — not replacing — today's working import.
+
+### Scope split
+- **"Portfolio Upload — Legacy"** — today's existing `parser.service.ts` (`parseGenericCsv` +
+  `HEADER_ALIASES`, and the positional `parseRobinhoodTxt`) stays exactly as-is, untouched,
+  covering Fidelity/Empower/Robinhood.
+- **"Portfolio Upload — Flex"** (Phase 1, this effort) — a new, parallel import path for any
+  CSV/XLS file with *some* header row, built around reusable, admin-governed **templates**
+  rather than a hardcoded parser per broker.
+- **Phase 2 (explicitly deferred)** — teach Flex to also accept linear/positional formats like
+  Robinhood's (no real header row today) by first generating an equivalent header row from
+  them, so they could eventually feed the same Flex pipeline instead of needing their own
+  hardcoded parser like `parseRobinhoodTxt`.
+
+### RBAC / UI shape
+- Both `Portfolio-Legacy` and `Portfolio-Flex` are gated Functions in the Authorization Module
+  (`portfolio_upload:legacy` / `portfolio_upload:flex`, migration 024) — a real behavior change,
+  since portfolio import had no permission gate before. Resolved via `AskUserQuestion` during
+  planning: `user` gets `portfolio_upload:legacy` only by default (nobody loses today's import);
+  `portfolio_upload:flex` stays admin-granted-only. `admin`/`admin-master` get all 3 new
+  permissions (the third being the approval function below).
+- A third gated Admin Console function, `portfolio_template:manage_status`, sets a template's
+  approval status (the approval mechanism itself — see below).
+- The "Stock Portfolio" tab became a "Portfolio" tab with two sub-tabs, **Legacy** and **Flex**
+  (`TabShell.tsx`) — each hidden entirely (not just disabled) for a session lacking that
+  function's permission, same pattern as Admin/API Keys. A session with neither permission
+  falls back to a read-only Legacy view (`DashboardPage`'s new `readOnly` prop — no
+  `UploadImportDialog`) rather than a blank tab, the same defensive-default precedent
+  `ContrarianFinderPage` already used. **Bug found live and fixed same day**: the Legacy
+  sub-tab's `PortfolioSelector` wasn't filtered by `flexTemplateStatus`, so a Flex-created
+  portfolio also showed up under Legacy, where its header-alias-guessing importer would have
+  silently overwritten data no longer matching the portfolio's bound Flex template —
+  `PortfolioSelector` gained an optional `filter` prop, wired from `TabShell` as
+  `p => p.flexTemplateStatus === null` for the Legacy sub-tab only.
+
+### Template governance
+- Status lifecycle: `Pending Approval` → `Approved` or `Rejected`, changed only via the new
+  Admin Console function.
+- A user can use *either* an Approved template *or* their own Pending-Approval template for
+  their own uploads — pending status only blocks visibility to *other* users, never usage by
+  the template's own creator.
+- The **Approved-template list a user sees is filtered**, not a flat shared pool: templates
+  created by Admin, Admin-Master, or the logged-in user themselves — not every other regular
+  user's approved templates. **Open question, not yet resolved**: two different users each
+  mapping the same broker end up with two separate private templates rather than converging on
+  one shared one — acceptable, or should same-shape mappings eventually get promoted to a
+  shared admin-owned one?
+- Templates are never deleted, only status-changed — a `Rejected` template has no cleanup story
+  and just sits there. Accepted as a "don't over-build" tradeoff, not pushed back on.
+
+### The full creation flow (settled, including the forced-resolution rule)
+1. At portfolio creation, pick from the Approved-template list (searchable by name) or a
+   personal Pending-Approval dropdown (shown only if the user has one) — **or** start a brand
+   new mapping.
+2. **New mapping path**: upload a file → map its detected headers (left) to the app's mandatory
+   fields — Symbol, Quantity, Current Price — plus optional ones — Purchase Price, Name,
+   Sector, Purchase Date (right, mandatory ones visually marked) → **Inspect Data** (disabled
+   until every mandatory field is mapped) shows a top-5-record preview, purely in-memory, no
+   writes yet.
+3. From either path, proceeding **actually creates the portfolio for real** — full file
+   imported, `tx_holdings` written, Dashboard rendered from genuinely persisted data (the
+   Dashboard can't render any other way, so this was never something that could stay purely a
+   preview).
+4. **The Dashboard result forces exactly one of two next actions — this is no longer
+   optional**:
+   - **Looks right** → **Save Template is now mandatory**, not offered-and-skippable. This is
+     the entire reason the flow is ordered this way: a template can only ever be saved once
+     it's been proven against a real, rendered Dashboard from real data — a superficial top-5
+     preview alone can't catch a mapping that's subtly wrong (e.g. a numeric-looking column
+     mapped to the wrong field) but would still produce a broken Dashboard. Saving requires a
+     meaningful name (validated: trimmed non-empty, minimum length, at least one letter, on top
+     of the table's own uniqueness constraint) and persists the mapping into
+     `m_portfolio_template_mapping_master`/`_dtls` at `Pending Approval`, binding it to the
+     portfolio via `upload_template_id`.
+   - **Looks wrong** → the only way out is **Delete Portfolio** (already an existing feature,
+     nothing new needed) and start over with a corrected file. Nothing about a bad mapping is
+     ever persisted as reusable.
+   - **Caveat, acknowledged**: a web app can't literally force a user to stay on a page and
+     choose — they can always navigate away mid-decision. "Forced" in practice means: present
+     both actions prominently right after the Dashboard renders, and if the user leaves without
+     choosing, the portfolio is left in an explicit **error/needs-attention state** (next
+     section) rather than silently allowed to exist in limbo.
+5. **Later uploads for an existing portfolio**: if it has a bound template, later Flex uploads
+   reuse it automatically — no mapping screen shown again. The bound template *can* be changed,
+   but changing it always requires re-running Inspect Data against the new mapping first, never
+   a silent swap.
+
+### `flex_template_status` — new column on `tx_portfolios`
+Tracks exactly the "did this Flex portfolio ever get properly resolved" state from step 4 above
+— a deliberately minimal alternative to building a separate notifications/pending-actions
+system. Three values:
+- **`'Flex'`** — created via Flex and properly closed out. Since the only way to survive a bad
+  mapping is deletion, this state can only mean Save Template succeeded — so
+  `upload_template_id` is always non-null whenever `flex_template_status = 'Flex'`.
+- **`'Flex-Err'`** — created via Flex, but the user left before completing Save Template (or
+  Delete). The "needs attention" state — `upload_template_id` stays `NULL` here. Any
+  attention-needed banner, and any block on further uploads until resolved, is just
+  `WHERE flex_template_status = 'Flex-Err'`.
+- **`NULL`** — Classic/Legacy portfolios, untouched by any of this.
+
+Invariant for Flex portfolios: `flex_template_status = 'Flex' ⟺ upload_template_id IS NOT NULL`;
+`'Flex-Err' ⟹ upload_template_id IS NULL`. No drift possible between the two columns as long as
+both are always written together.
+
+### DB design (table names + column names confirmed by the user)
+- **`m_portfolio_template_mapping_master`** — one row per template: `id`, `template_name`
+  (`NOT NULL`, unique — backs the search-by-name list), `status` (`'Pending Approval'` \|
+  `'Approved'` \| `'Rejected'`), `created_by`/`reviewed_by` (FK → `users`), `reviewed_at`,
+  `sample_preview` (`JSONB`, nullable — the top-5-mapped-records snapshot from Inspect Data, so
+  an admin reviewing a pending template later doesn't need the file re-uploaded),
+  `created_at`/`updated_at`.
+- **`m_portfolio_template_mapping_dtls`** — one row per mapped field: `id`, `template_id` (FK
+  → master, `ON DELETE CASCADE`), `target_field` (the app's field: `symbol`/`quantity`/
+  `currentPrice`/`purchasePrice`/`name`/`sector`/`purchaseDate`), `source_header` (the file's
+  actual header text, normalized the same way `mapHeaders()` already does — resilient to column
+  reordering on later uploads). Unique on `(template_id, target_field)`.
+- **Two new columns on the existing `tx_portfolios`**: `upload_template_id` (nullable FK →
+  `m_portfolio_template_mapping_master`, `ON DELETE SET NULL`) and `flex_template_status`
+  (nullable `VARCHAR` — `'Flex'` \| `'Flex-Err'` \| `NULL`, per above).
+- **No new tables needed for RBAC** (reuses `m_function_master`/`m_role_permissions` — just 3
+  new permission rows) **or for holdings data** (Flex just needs to produce the same
+  `HoldingEntry[]` shape `parser.service.ts` already does, then plugs into the existing,
+  already-tested `portfolioService.importHoldings()` — same `tx_holdings`/`tx_uploads`/
+  `tx_portfolio_action_hist` writes as Legacy).
+
+### Implementation summary
+- **Backend**: migrations 022-024 (both new tables + `tx_portfolios`' 2 new columns + the 3
+  permission rows); `parser.service.ts`'s per-row logic extracted into an exported
+  `buildHoldingsFromMappedRows()` (existing `parseGenericCsv` tests passed unchanged — the
+  regression proof that Legacy's own output never moved) so `flexParser.service.ts`'s
+  `resolveMapping()`/`parseFlexCsv()` reuse the exact same value-parsing code, just with a
+  user-defined mapping instead of `HEADER_ALIASES`; `portfolioTemplate.service.ts` (template
+  CRUD/governance, including a composable-transaction `createTemplate(input, client?)` so Save
+  Template can atomically create-and-bind in one transaction); `portfolio.service.ts` gained
+  `createPortfolioFlex()`/`saveFlexTemplate()`/`changeFlexTemplate()`; new
+  `POST /portfolios/flex` (supports a `dryRun` preview branch — the wizard's "Inspect Data"
+  step — mirroring Legacy's own `dryRun` precedent), `POST`/`PUT /portfolios/:id/flex-template`,
+  and the `/portfolio-templates` router (`GET /`, `GET /mine/pending`, `GET /admin/all`,
+  `POST /`, `GET /:id`, `PUT /:id/status`). 472 backend tests (up from 467), `tsc`/lint clean.
+- **Frontend**: `ColumnMappingWizard` (file → header/field mapping → Inspect Data → top-5
+  preview), `FlexTemplatePicker` (searchable Approved list + personal Pending dropdown),
+  `FlexResolutionBanner` (the forced Save-Template-or-Delete-Portfolio UI, re-running the
+  wizard if the original mapping isn't still in browser session state), `FlexPortfolioPage`
+  (the Flex sub-tab — reuses `KpiCards`/`AllocationChart`/`PerformanceChart`/`HoldingsTable`
+  unchanged, same as Legacy), and `PortfolioTemplateApprovalPage` (new Admin Console
+  "Portfolio Templates" tab, gated by `portfolio_template:manage_status`). 256 frontend tests
+  (up from 231), `tsc`/lint clean.
+- **Verified live end-to-end** against the real dev server + CockroachDB Cloud instance, all
+  cleaned up afterward: brand-new-mapping creation → real Dashboard with real data →
+  `flex_template_status: 'Flex-Err'` → Save Template → atomically bound (`Flex` +
+  `upload_template_id`, confirmed via direct row query) and appearing in the creator's own
+  Pending list; reuse of that still-Pending template by id → resolves immediately to `Flex`;
+  changing an already-resolved portfolio's template → re-import + rebind; a plain `user`
+  session correctly 403s on `POST /portfolios/flex`; the Admin Console's new Portfolio
+  Templates tab lists a Pending template, shows its mapping + sample preview on expand, and
+  Approve flips it to `Approved` — immediately visible in a completely unrelated plain user's
+  Approved-template list, confirming the full governance loop end-to-end.
 
 ## Next Up
 

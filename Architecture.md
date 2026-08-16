@@ -1,6 +1,6 @@
 ## Rebuild Plan — From Single-User Client-Side App to a Scalable Multi-User Platform
 
-**Last updated:** 2026-08-05
+**Last updated:** 2026-08-07
 
 **Why this section exists:** the user identified the single biggest shortcoming of the current app: it's a 100% client-side, single-user project (no backend, no database, no auth — `localStorage` is the only persistence layer) and therefore cannot scale beyond "one person, one browser." This doc started as a forward-looking rebuild plan and has since become a **living status document** — Section 1 tracks what's actually built, Section 2 is the immediate next action, Section 3 is the full ordered backlog. Update it as work lands rather than letting it drift back into a stale one-time plan. For a compact, fast-scan version of Section 1, see `CLAUDE.md`'s "Current Build State" — this doc carries the detail and rationale; that one carries the quick summary.
 
@@ -53,7 +53,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 08-05
+## Section 1 — Accomplished Till 08-14
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -367,6 +367,20 @@ timeout/error handling degrades gracefully. Throwaway user deleted from the real
 path was live-tested). Revisit — build and run the image, confirm `/health`/`/docs` work
 identically from inside the container — once Docker is available, ideally before Phase 5
 (Docker for the rest of the stack) assumes this Dockerfile as a working template.
+
+**2026-08-14 — Python version pin corrected 3.12 → 3.14**: this machine never had Python 3.12
+installed at all — only 3.14 (`C:\Python314`) — so `pyproject.toml`'s original `python =
+"^3.12"` constraint had been silently satisfied by 3.14 the entire time Poetry's virtualenv
+was in use; the `Dockerfile`'s `python:3.12-slim` base and CI's `actions/setup-python
+python-version: '3.12'` both claimed a version that had never actually been exercised on this
+project (compounded by the Docker gap directly above — the 3.12 container path was never
+built, so the mismatch had no chance to surface). Repinned all three to `3.14`
+(`pyproject.toml`, `Dockerfile`'s `python:3.14-slim`, and the CI step) and regenerated
+`poetry.lock` accordingly. **Verified**: `poetry check` clean, `poetry install` resolved with
+no changes needed, all 149 Python tests pass under the new lock. **Known gap still open,
+now also covers this**: `python:3.14-slim` actually pulling and building successfully in
+Docker remains unverified for the same reason as above — only the constraint/lock/local-venv
+side of this change has been confirmed live.
 
 `e2e/SCENARIOS.md`: explicitly not updated — this phase adds zero new browser-facing flow
 (the health-check round-trip is server-to-server only), per CLAUDE.md's E2E-coverage-decision
@@ -895,6 +909,67 @@ outgoing request body and the "Last scan used: ... max N batches ..." display te
 test's own fixture data deliberately keeps `maxBatches: 3`, since it represents a *historical*
 server-fallback record from a past run, not the live form default — 230 total). `tsc`/lint
 clean both sides.
+
+### Portfolio Upload — Flex ✅ Done
+
+**Built 2026-08-07**, across 5 formally-planned phases in one continuous "auto mode" session
+(scoped through extensive discussion 2026-08-06/07, `/plan`-approved, then executed
+phase-by-phase without pausing — see `CLAUDE.md`'s "Portfolio Upload — Flex" section for the
+full settled functional spec, including the forced Save-Template-or-Delete-Portfolio
+resolution rule and the `flex_template_status` state machine). A new, parallel import path
+alongside today's working "Legacy" import (`parser.service.ts`, untouched): any CSV/XLS file
+with a header row, mapped by the user to the app's fixed portfolio fields via a UI, saved as a
+reusable, admin-governed template.
+
+**Backend**: migrations 022-024 add `m_portfolio_template_mapping_master`/`_dtls`, 2 new
+`tx_portfolios` columns (`upload_template_id`, `flex_template_status`), and 3 new RBAC
+permissions (`portfolio_upload:legacy` granted to `user` by default so nobody loses today's
+import; `portfolio_upload:flex` and `portfolio_template:manage_status` admin-granted-only).
+`parser.service.ts`'s per-row parsing logic was extracted into an exported
+`buildHoldingsFromMappedRows()` — a pure refactor verified by the pre-existing `parseGenericCsv`
+tests passing unchanged — so the new `flexParser.service.ts` (`resolveMapping()`/
+`parseFlexCsv()`) reuses the exact same value-parsing/derivation code as Legacy, just fed a
+user-defined mapping instead of `HEADER_ALIASES`. New `portfolioTemplate.service.ts` owns
+template CRUD/governance, including a composable-transaction `createTemplate(input, client?)`
+so Save Template can atomically create-and-bind a template to a portfolio in one transaction.
+`portfolio.service.ts` gained `createPortfolioFlex()`/`saveFlexTemplate()`/
+`changeFlexTemplate()`, reusing the existing, already-tested `importHoldings()` write path
+unchanged. New `POST /portfolios/flex` (supports a `dryRun` preview branch for the mapping
+wizard's "Inspect Data" step, mirroring Legacy's own `dryRun` precedent),
+`POST`/`PUT /portfolios/:id/flex-template`, and the `/portfolio-templates` router. 472 backend
+tests (up from 467), `tsc`/lint clean.
+
+**Frontend**: `ColumnMappingWizard` (file → header/field mapping → Inspect Data → top-5
+preview), `FlexTemplatePicker` (searchable Approved list + personal Pending-Approval dropdown),
+`FlexResolutionBanner` (the forced-resolution UI — re-runs the wizard if the original mapping
+isn't still in browser session state, since a `Flex-Err` portfolio's mapping was never
+persisted anywhere), `FlexPortfolioPage` (the new Flex sub-tab, reusing `KpiCards`/
+`AllocationChart`/`PerformanceChart`/`HoldingsTable` unchanged), and
+`PortfolioTemplateApprovalPage` (new Admin Console "Portfolio Templates" tab). The "Stock
+Portfolio" tab became a "Portfolio" tab with **Legacy**/**Flex** sub-tabs in `TabShell.tsx`,
+each hidden entirely for a session lacking the matching permission; a session with neither
+falls back to a read-only Legacy view (`DashboardPage`'s new `readOnly` prop) rather than a
+blank tab — the same defensive-default precedent `ContrarianFinderPage` already used. 256
+frontend tests (up from 231), `tsc`/lint clean.
+
+**Real bug found live and fixed same day**: the Legacy sub-tab's `PortfolioSelector` wasn't
+filtered by `flexTemplateStatus`, so a Flex-created portfolio also appeared under Legacy, where
+its header-alias-guessing importer would have silently overwritten data no longer matching the
+portfolio's bound Flex template. `PortfolioSelector` gained an optional `filter` prop, wired
+from `TabShell` as `p => p.flexTemplateStatus === null` for the Legacy sub-tab only — confirmed
+live (and via a new test) that a Flex portfolio no longer leaks into the Legacy selector while
+still appearing correctly under Flex.
+
+**Verified live end-to-end** against the real dev server + CockroachDB Cloud instance, all
+throwaway accounts/rows cleaned up afterward: brand-new-mapping creation → real Dashboard from
+real persisted data → `flex_template_status: 'Flex-Err'` → Save Template → atomically bound
+(`Flex` + `upload_template_id`, confirmed via direct row query) and appearing in the creator's
+own Pending list; reusing that still-Pending template by id on a second portfolio → resolves
+immediately to `Flex`; changing an already-resolved portfolio's template → re-import + rebind;
+a plain `user` session correctly 403s on `POST /portfolios/flex`; the Admin Console's Portfolio
+Templates tab lists a Pending template, shows its mapping + sample preview on expand, and
+Approve flips it to `Approved` — immediately visible in a completely unrelated plain user's own
+Approved-template list, confirming the full template-governance loop end-to-end.
 
 ---
 

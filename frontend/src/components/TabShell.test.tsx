@@ -40,7 +40,7 @@ describe('TabShell', () => {
 
   test('renders all 5 tab links, the API Keys button, and Log out', async () => {
     renderShell();
-    expect(screen.getByRole('link', { name: 'Stock Portfolio' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Portfolio' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Long-Term Analysis' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Contrarian Finder' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Contrarian Comeback' })).toBeInTheDocument();
@@ -174,6 +174,101 @@ describe('TabShell', () => {
     expect(screen.getByTestId('tab-panel-long-term-analysis')).not.toHaveClass('hidden');
     expect(within(screen.getByTestId('tab-panel-long-term-analysis')).getByLabelText('Ticker')).toHaveValue('AAA');
     expect(client.apiFetch).toHaveBeenCalledWith('/analysis/long-term/AAA');
+  });
+
+  describe('Portfolio tab - Legacy/Flex sub-tabs (Portfolio Upload - Flex, Phase 4)', () => {
+    test('with both permissions, a Legacy/Flex nav appears and toggles between the two sub-panels', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['admin'], permissions: ['portfolio_upload:legacy', 'portfolio_upload:flex'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      expect(await screen.findByRole('button', { name: 'Legacy' })).toBeInTheDocument();
+      expect(screen.getByTestId('portfolio-subtab-legacy')).not.toHaveClass('hidden');
+      expect(screen.getByTestId('portfolio-subtab-flex')).toHaveClass('hidden');
+
+      await userEvent.click(screen.getByRole('button', { name: 'Flex' }));
+      expect(screen.getByTestId('portfolio-subtab-legacy')).toHaveClass('hidden');
+      expect(screen.getByTestId('portfolio-subtab-flex')).not.toHaveClass('hidden');
+    });
+
+    test('a Flex-created portfolio never appears in the Legacy sub-tab\'s selector', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['admin'], permissions: ['portfolio_upload:legacy', 'portfolio_upload:flex'] });
+        if (url === '/portfolios') {
+          return Promise.resolve({
+            portfolios: [
+              { id: '1', name: 'Legacy Portfolio', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: null, flexTemplateStatus: null },
+              { id: '2', name: 'Flex Portfolio', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: 't1', flexTemplateStatus: 'Flex' },
+            ],
+          });
+        }
+        if (url === '/portfolio-templates') return Promise.resolve({ templates: [] });
+        if (url === '/portfolio-templates/mine/pending') return Promise.resolve({ templates: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await screen.findByRole('button', { name: 'Legacy Portfolio' });
+      const legacyPanel = screen.getByTestId('portfolio-subtab-legacy');
+      expect(within(legacyPanel).queryByRole('button', { name: 'Flex Portfolio' })).not.toBeInTheDocument();
+      // Sanity check it does exist, just on the Flex sub-panel instead.
+      expect(within(screen.getByTestId('portfolio-subtab-flex')).getByTestId('flex-portfolio-pill-2')).toHaveTextContent('Flex Portfolio');
+    });
+
+    test('with only portfolio_upload:legacy, no nav renders and only the Legacy sub-panel is mounted', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['portfolio_upload:legacy'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await screen.findByTestId('portfolio-subtab-legacy');
+      expect(screen.queryByRole('button', { name: 'Legacy' })).not.toBeInTheDocument();
+      expect(screen.queryByTestId('portfolio-subtab-flex')).not.toBeInTheDocument();
+    });
+
+    test('with only portfolio_upload:flex, no nav renders and only the Flex sub-panel is mounted', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['portfolio_upload:flex'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        if (url === '/portfolio-templates') return Promise.resolve({ templates: [] });
+        if (url === '/portfolio-templates/mine/pending') return Promise.resolve({ templates: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await screen.findByTestId('portfolio-subtab-flex');
+      expect(screen.queryByRole('button', { name: 'Legacy' })).not.toBeInTheDocument();
+      expect(screen.queryByTestId('portfolio-subtab-legacy')).not.toBeInTheDocument();
+    });
+
+    test('with neither permission, falls back to a read-only Legacy view (no upload control)', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: [] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [{ id: '1', name: 'Fidelity', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: null, flexTemplateStatus: null }] });
+        if (url === '/portfolios/1') {
+          return Promise.resolve({
+            portfolio: {
+              id: '1', name: 'Fidelity', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: null, flexTemplateStatus: null,
+              cashAmount: 0, totalHoldingsValue: 0, totalCostBasis: 0, totalGainLoss: 0, totalPortfolioValue: 0, holdings: [],
+            },
+          });
+        }
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await screen.findByTestId('portfolio-subtab-legacy');
+      expect(screen.queryByTestId('portfolio-subtab-flex')).not.toBeInTheDocument();
+
+      await userEvent.click(await screen.findByRole('button', { name: 'Fidelity' }));
+      await screen.findByText('Holdings');
+      expect(screen.queryByTestId('import-file-input')).not.toBeInTheDocument();
+    });
   });
 
   test("a Contrarian Finder candidate row's CC button launches Contrarian Comeback and auto-runs Check Eligibility", async () => {

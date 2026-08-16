@@ -1,6 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from './client';
 import type { PerformanceBar } from '../lib/performanceMath';
+import type { ColumnMapping } from './portfolioTemplates';
+
+// Portfolio Upload - Flex (CLAUDE.md's "Portfolio Upload - Flex" section) - null for every
+// portfolio created through today's Legacy import, unchanged.
+export type FlexTemplateStatus = 'Flex' | 'Flex-Err' | null;
 
 export interface PortfolioSummary {
   id: string;
@@ -8,6 +13,8 @@ export interface PortfolioSummary {
   broker: string | null;
   createdAt: string;
   updatedAt: string;
+  uploadTemplateId: string | null;
+  flexTemplateStatus: FlexTemplateStatus;
 }
 
 export interface PortfolioHolding {
@@ -180,5 +187,110 @@ export function useRefreshPrices(portfolioId: string) {
   return useMutation({
     mutationFn: () => apiFetch<RefreshPricesResult>(`/portfolios/${portfolioId}/refresh-prices`, { method: 'POST' }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['portfolios', portfolioId] }),
+  });
+}
+
+// Portfolio Upload - Flex (CLAUDE.md's "Portfolio Upload - Flex" section) below.
+
+// Either uploadTemplateId (an existing Approved/own-Pending template) or columnMapping (a
+// brand new one, from the mapping wizard) must be given — mirrors backend/src/controllers/
+// portfolio.controller.ts's createFlex validation.
+export interface CreateFlexInput {
+  name: string;
+  broker?: string | null;
+  uploadTemplateId?: string;
+  columnMapping?: ColumnMapping;
+  headerRowIndex?: number;
+  dataStartColumnIndex?: number;
+  filename: string;
+  content: string;
+}
+
+export interface FlexCreateResult {
+  portfolio: PortfolioSummary;
+  importResult: ImportResult;
+}
+
+// "Inspect Data" — the mapping wizard's preview step. Pure/no DB write (same guarantee as
+// Legacy's usePreviewImport), so it never actually creates a portfolio; a `name` is not
+// required at this stage. dryRun: true.
+export function useFlexPreview() {
+  return useMutation({
+    mutationFn: (input: Omit<CreateFlexInput, 'name' | 'broker'>) => apiFetch<ImportPreviewResult>('/portfolios/flex', {
+      method: 'POST',
+      body: JSON.stringify({ ...input, dryRun: true }),
+    }),
+  });
+}
+
+// The real Create Portfolio action — persists for real (tx_portfolios + tx_holdings) and
+// returns a genuine Dashboard-ready portfolio immediately. flexTemplateStatus comes back
+// 'Flex-Err' for a brand-new mapping (Save Template is still pending) or 'Flex' immediately
+// when uploadTemplateId pointed at an already-proven template.
+export function useCreatePortfolioFlex() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateFlexInput) => apiFetch<FlexCreateResult>('/portfolios/flex', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['portfolios'] }),
+  });
+}
+
+export interface SaveFlexTemplateInput {
+  templateName: string;
+  columnMapping: ColumnMapping;
+  samplePreview: unknown;
+  headerRowIndex: number;
+  dataStartColumnIndex: number;
+  howToUseDescription?: string;
+}
+
+export interface SaveFlexTemplateResult {
+  portfolio: PortfolioSummary;
+  template: { id: string; templateName: string; status: string; createdBy: string | null; createdAt: string };
+}
+
+// POST /portfolios/:id/flex-template — the forced Save Template action. Only valid while the
+// portfolio is genuinely unresolved ('Flex-Err'); the backend 409s otherwise.
+export function useSaveFlexTemplate(portfolioId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: SaveFlexTemplateInput) => apiFetch<SaveFlexTemplateResult>(`/portfolios/${portfolioId}/flex-template`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['portfolios', portfolioId] });
+      queryClient.invalidateQueries({ queryKey: ['portfolios'] });
+      queryClient.invalidateQueries({ queryKey: ['portfolioTemplates'] });
+    },
+  });
+}
+
+export interface ChangeFlexTemplateInput {
+  uploadTemplateId?: string;
+  columnMapping?: ColumnMapping;
+  headerRowIndex?: number;
+  dataStartColumnIndex?: number;
+  filename: string;
+  content: string;
+}
+
+// PUT /portfolios/:id/flex-template — re-imports against the new mapping/template first (the
+// "Inspect Data before swap" rule), then rebinds on success. Also the mechanism for a routine
+// re-upload against an already-bound template: pass its own current uploadTemplateId back.
+export function useChangeFlexTemplate(portfolioId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ChangeFlexTemplateInput) => apiFetch<FlexCreateResult>(`/portfolios/${portfolioId}/flex-template`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['portfolios', portfolioId] });
+      queryClient.invalidateQueries({ queryKey: ['portfolios'] });
+    },
   });
 }

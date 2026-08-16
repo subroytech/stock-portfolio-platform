@@ -1,11 +1,12 @@
-# User Manual — Roles, API Key Access & Contrarian Finder Retention
+# User Manual — Roles, API Key Access, Contrarian Finder Retention & Portfolio Upload
 
 This document describes the platform's role/permission model — as it relates to FMP/Finnhub API
 keys (who manages their own key, who doesn't, and how the app still works for the people who
-don't), and to the Contrarian Finder shared last-scan result. **Status: implemented and
-live-verified (2026-08-02 for the API key sections; 2026-08-05 for Contrarian Finder retention).**
-Role names below use the exact casing as created in the database: `user-contra-withKey`
-(capital K), `user-contra-wokey` (lowercase), `admin-master`.
+don't), to the Contrarian Finder shared last-scan result, and to portfolio import. **Status:
+implemented and live-verified (2026-08-02 for the API key sections; 2026-08-05 for Contrarian
+Finder retention; 2026-08-07 for Portfolio Upload — Flex).** Role names below use the exact
+casing as created in the database: `user-contra-withKey` (capital K), `user-contra-wokey`
+(lowercase), `admin-master`.
 
 ## Roles
 
@@ -103,6 +104,39 @@ provider)` — so the fallback lives entirely there, not in any of the 8 call si
 Both gates check the caller's actual resolved permissions (`GET /auth/me`'s `permissions`
 array), not a hardcoded role name — a future role gets the same UI behavior automatically the
 moment it's granted the matching permission via Manage Permission, no code change needed.
+
+## Portfolio Upload — Flex
+
+**Status: implemented and live-verified, 2026-08-07.**
+
+**What changed for users**: portfolio import now has two RBAC-gated Functions —
+`portfolio_upload:legacy` (today's Fidelity/Empower/Robinhood import, unchanged) and
+`portfolio_upload:flex` (a new, template-driven import for any file with a header row). Import
+previously had no permission gate at all — `user` was granted `portfolio_upload:legacy` by
+default on rollout so nobody lost today's import; `portfolio_upload:flex` is admin-granted-only.
+`admin`/`admin-master` hold both, plus the new `portfolio_template:manage_status` Admin Console
+function (sets a template's approval status). The "Stock Portfolio" tab is now a "Portfolio" tab
+with **Legacy** and **Flex** sub-tabs, each hidden entirely for a session without the matching
+permission (same as Admin/API Keys). A session with neither permission still sees a read-only
+Legacy view rather than a blank tab. Legacy and Flex portfolios are kept strictly separate in
+the UI — a Flex-created portfolio never appears in the Legacy sub-tab's selector, and vice
+versa, so neither importer is ever pointed at data it doesn't own.
+
+**How Flex templates work**: a template is a saved column mapping (uploaded file's headers →
+the app's required portfolio fields), reusable across future uploads instead of re-mapped every
+time. Templates go through `Pending Approval` → `Approved`/`Rejected`. A user can use their own
+Pending template for their own uploads immediately (pending status only hides it from other
+users); the Approved list they see is filtered to templates from Admin, Admin-Master, or
+themselves — not a flat everyone-sees-everything pool.
+
+**Creating a new mapping is tied to actually proving it works**: after mapping columns and
+passing a quick preview check, the portfolio is created for real and its Dashboard is shown
+from genuinely imported data. From there, exactly one of two things must happen — if the
+Dashboard looks right, saving the mapping as a reusable template is required (not optional,
+since only a real rendered Dashboard is strong enough proof the mapping is actually correct);
+if it looks wrong, the fix is deleting that portfolio and trying again with a corrected file.
+A portfolio left without either resolution is flagged internally as needing attention until the
+user comes back and finishes one path or the other.
 
 ## Known leftover, not cleaned up yet
 

@@ -7,13 +7,24 @@ jest.mock('../src/services/userSubscription.service', () => ({
   ...jest.requireActual('../src/services/userSubscription.service'),
   getDecryptedKey: jest.fn(),
 }));
+// Partial mock (keeps the real error classes) - only the two calls
+// createPortfolioFlex/saveFlexTemplate/changeFlexTemplate actually make into this module are
+// replaced, so these tests exercise portfolio.service.ts's own orchestration logic without
+// also re-testing portfolioTemplate.service.ts's own SQL (already covered in its own test file).
+jest.mock('../src/services/portfolioTemplate.service', () => ({
+  ...jest.requireActual('../src/services/portfolioTemplate.service'),
+  getTemplateParseConfig: jest.fn(),
+  createTemplate: jest.fn(),
+}));
 
 import { pool } from '../src/db/pool';
 import * as marketData from '../src/services/marketData.service';
 import * as userSubscription from '../src/services/userSubscription.service';
+import * as portfolioTemplateService from '../src/services/portfolioTemplate.service';
 import {
   listPortfolios, createPortfolio, getPortfolio, updatePortfolio, deletePortfolio,
-  importHoldings, refreshPrices, PortfolioNotFoundError, PortfolioNameConflictError,
+  importHoldings, refreshPrices, createPortfolioFlex, saveFlexTemplate, changeFlexTemplate,
+  PortfolioNotFoundError, PortfolioNameConflictError, FlexTemplateStateError,
 } from '../src/services/portfolio.service';
 import { ParseResult, HoldingEntry } from '../src/services/parser.service';
 
@@ -22,6 +33,8 @@ const mockConnect = pool.connect as unknown as jest.Mock;
 const mockGetQuotes = marketData.getQuotes as jest.Mock;
 const mockGetHistorical = marketData.getHistorical as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
+const mockGetTemplateParseConfig = portfolioTemplateService.getTemplateParseConfig as jest.Mock;
+const mockCreateTemplate = portfolioTemplateService.createTemplate as jest.Mock;
 
 beforeEach(() => {
   mockQuery.mockReset();
@@ -31,6 +44,8 @@ beforeEach(() => {
   mockGetHistorical.mockResolvedValue([]); // refreshPrices now also fetches history in parallel - most tests here don't care about it
   mockGetDecryptedKey.mockReset();
   mockGetDecryptedKey.mockResolvedValue('fake-fmp-key'); // refreshPrices tests: real key resolution isn't under test here
+  mockGetTemplateParseConfig.mockReset();
+  mockCreateTemplate.mockReset();
 });
 
 describe('listPortfolios', () => {
@@ -448,5 +463,198 @@ describe('refreshPrices', () => {
     mockGetDecryptedKey.mockRejectedValue(new userSubscription.MissingUserApiKeyError('No fmp API key on file.'));
     await expect(refreshPrices('user-1', '1')).rejects.toBeInstanceOf(userSubscription.MissingUserApiKeyError);
     expect(mockGetQuotes).not.toHaveBeenCalled();
+  });
+});
+
+describe('createPortfolioFlex', () => {
+  const csv = 'Ticker,Shares,Price\nAAPL,10,150';
+  const mapping = { symbol: 'Ticker', quantity: 'Shares', currentPrice: 'Price' };
+
+  function mockPortfolioInsert(row: Partial<{ id: string; upload_template_id: string | null; flex_template_status: string | null }> = {}) {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'portfolio-1', name: 'My Portfolio', broker: null, created_at: 't1', updated_at: 't1',
+        upload_template_id: null, flex_template_status: null, ...row,
+      }],
+    });
+  }
+
+  test('an existing (already-approved) template resolves immediately to flexTemplateStatus "Flex"', async () => {
+    mockGetTemplateParseConfig.mockResolvedValue({ columnMapping: mapping, headerRowIndex: 1, dataStartColumnIndex: 1 });
+    mockPortfolioInsert({ upload_template_id: 'template-1', flex_template_status: 'Flex' });
+    mockConnect.mockResolvedValue(makeMockClient({ existingHoldings: [] }));
+
+    const result = await createPortfolioFlex('user-1', { name: 'My Portfolio', broker: null, uploadTemplateId: 'template-1', filename: 'f.csv', content: csv });
+
+    expect(mockGetTemplateParseConfig).toHaveBeenCalledWith('template-1');
+    expect(result.portfolio.uploadTemplateId).toBe('template-1');
+    expect(result.portfolio.flexTemplateStatus).toBe('Flex');
+    expect(result.importResult.holdingsCount).toBe(1);
+    const [insertSql, insertParams] = mockQuery.mock.calls[0];
+    expect(insertSql).toContain('INSERT INTO tx_portfolios');
+    expect(insertParams).toEqual(['user-1', 'My Portfolio', null, 'template-1', 'Flex']);
+  });
+
+  test('applies the template\'s saved header row/data start column, not just row 1/column 1', async () => {
+    const preambleCsv = 'Positions for account XXXX\nTicker,Shares,Price\nAAPL,10,150';
+    mockGetTemplateParseConfig.mockResolvedValue({ columnMapping: mapping, headerRowIndex: 2, dataStartColumnIndex: 1 });
+    mockPortfolioInsert({ upload_template_id: 'template-1', flex_template_status: 'Flex' });
+    mockConnect.mockResolvedValue(makeMockClient({ existingHoldings: [] }));
+
+    const result = await createPortfolioFlex('user-1', { name: 'My Portfolio', broker: null, uploadTemplateId: 'template-1', filename: 'f.csv', content: preambleCsv });
+
+    expect(result.importResult.holdingsCount).toBe(1); // would have failed to parse at all if the offset weren't applied
+  });
+
+  test('a brand-new mapping leaves flexTemplateStatus "Flex-Err", unresolved, with no bound template', async () => {
+    mockPortfolioInsert({ upload_template_id: null, flex_template_status: 'Flex-Err' });
+    mockConnect.mockResolvedValue(makeMockClient({ existingHoldings: [] }));
+
+    const result = await createPortfolioFlex('user-1', { name: 'My Portfolio', broker: null, columnMapping: mapping, filename: 'f.csv', content: csv });
+
+    expect(mockGetTemplateParseConfig).not.toHaveBeenCalled();
+    expect(result.portfolio.uploadTemplateId).toBeNull();
+    expect(result.portfolio.flexTemplateStatus).toBe('Flex-Err');
+    const [, insertParams] = mockQuery.mock.calls[0];
+    expect(insertParams).toEqual(['user-1', 'My Portfolio', null, null, 'Flex-Err']);
+  });
+
+  test('throws when neither uploadTemplateId nor columnMapping is given', async () => {
+    await expect(createPortfolioFlex('user-1', { name: 'X', broker: null, filename: 'f.csv', content: csv }))
+      .rejects.toThrow(/Either uploadTemplateId or columnMapping/);
+    expect(mockQuery).not.toHaveBeenCalled(); // never even attempts to create a portfolio
+  });
+
+  test('never creates a portfolio row when the file fails to parse (e.g. mapping does not match the file)', async () => {
+    await expect(createPortfolioFlex('user-1', {
+      name: 'X', broker: null, columnMapping: { symbol: 'Ticker', quantity: 'Shares', currentPrice: 'DoesNotExist' }, filename: 'f.csv', content: csv,
+    })).rejects.toThrow();
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  test('maps a unique-violation on the portfolio name to PortfolioNameConflictError', async () => {
+    mockQuery.mockRejectedValueOnce({ code: '23505' });
+    await expect(createPortfolioFlex('user-1', { name: 'Dup', broker: null, columnMapping: mapping, filename: 'f.csv', content: csv }))
+      .rejects.toBeInstanceOf(PortfolioNameConflictError);
+  });
+});
+
+describe('saveFlexTemplate', () => {
+  const input = {
+    templateName: 'Fidelity CSV', columnMapping: { symbol: 'Ticker' }, samplePreview: [],
+    headerRowIndex: 1, dataStartColumnIndex: 1,
+  };
+
+  test('creates the template (via the shared transaction client) and binds it, only while flex_template_status is Flex-Err', async () => {
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: 'portfolio-1', flex_template_status: 'Flex-Err' }] }) // ownership+state check
+        .mockResolvedValueOnce({ // UPDATE ... RETURNING
+          rows: [{ id: 'portfolio-1', name: 'P', broker: null, created_at: 't1', updated_at: 't2', upload_template_id: 'template-1', flex_template_status: 'Flex' }],
+        })
+        .mockResolvedValueOnce(undefined), // COMMIT
+      release: jest.fn(),
+    };
+    mockConnect.mockResolvedValue(client);
+    mockCreateTemplate.mockResolvedValue({ id: 'template-1', templateName: 'Fidelity CSV', status: 'Pending Approval', createdBy: 'user-1', createdAt: 't1', howToUseDescription: null });
+
+    const result = await saveFlexTemplate('user-1', 'portfolio-1', input);
+
+    expect(mockCreateTemplate).toHaveBeenCalledWith(
+      {
+        templateName: 'Fidelity CSV', columnMapping: { symbol: 'Ticker' }, samplePreview: [],
+        headerRowIndex: 1, dataStartColumnIndex: 1, howToUseDescription: undefined, createdBy: 'user-1',
+      },
+      client, // the same connection, not a fresh one - proves this is one atomic transaction
+    );
+    expect(result.portfolio.uploadTemplateId).toBe('template-1');
+    expect(result.portfolio.flexTemplateStatus).toBe('Flex');
+    expect(client.query).toHaveBeenNthCalledWith(4, 'COMMIT');
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  test('passes a non-default header row/data start column and a how-to-use description through to createTemplate', async () => {
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ rows: [{ id: 'portfolio-1', flex_template_status: 'Flex-Err' }] })
+        .mockResolvedValueOnce({
+          rows: [{ id: 'portfolio-1', name: 'P', broker: null, created_at: 't1', updated_at: 't2', upload_template_id: 'template-1', flex_template_status: 'Flex' }],
+        })
+        .mockResolvedValueOnce(undefined),
+      release: jest.fn(),
+    };
+    mockConnect.mockResolvedValue(client);
+    mockCreateTemplate.mockResolvedValue({ id: 'template-1', templateName: 'Schwab CSV', status: 'Pending Approval', createdBy: 'user-1', createdAt: 't1', howToUseDescription: 'Headers on row 3' });
+
+    await saveFlexTemplate('user-1', 'portfolio-1', {
+      ...input, headerRowIndex: 3, dataStartColumnIndex: 2, howToUseDescription: 'Headers on row 3',
+    });
+
+    expect(mockCreateTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({ headerRowIndex: 3, dataStartColumnIndex: 2, howToUseDescription: 'Headers on row 3' }),
+      client,
+    );
+  });
+
+  test('throws PortfolioNotFoundError when not owned', async () => {
+    const client = {
+      query: jest.fn().mockResolvedValueOnce(undefined).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(undefined), // BEGIN, state check, ROLLBACK
+      release: jest.fn(),
+    };
+    mockConnect.mockResolvedValue(client);
+    await expect(saveFlexTemplate('user-1', 'portfolio-1', input)).rejects.toBeInstanceOf(PortfolioNotFoundError);
+    expect(mockCreateTemplate).not.toHaveBeenCalled();
+  });
+
+  test('throws FlexTemplateStateError when the portfolio is not currently in Flex-Err (e.g. already resolved, or Legacy)', async () => {
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: 'portfolio-1', flex_template_status: 'Flex' }] }) // state check
+        .mockResolvedValueOnce(undefined), // ROLLBACK
+      release: jest.fn(),
+    };
+    mockConnect.mockResolvedValue(client);
+    await expect(saveFlexTemplate('user-1', 'portfolio-1', input)).rejects.toBeInstanceOf(FlexTemplateStateError);
+    expect(mockCreateTemplate).not.toHaveBeenCalled();
+  });
+});
+
+describe('changeFlexTemplate', () => {
+  const csv = 'Ticker,Shares,Price\nAAPL,10,150';
+  const mapping = { symbol: 'Ticker', quantity: 'Shares', currentPrice: 'Price' };
+
+  test('re-imports against the new mapping and rebinds, only while the portfolio is already resolved (Flex)', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'portfolio-1', flex_template_status: 'Flex' }] }) // state check
+      .mockResolvedValueOnce({ // UPDATE ... RETURNING
+        rows: [{ id: 'portfolio-1', name: 'P', broker: null, created_at: 't1', updated_at: 't2', upload_template_id: null, flex_template_status: 'Flex-Err' }],
+      });
+    mockConnect.mockResolvedValue(makeMockClient({ existingHoldings: [] }));
+
+    const result = await changeFlexTemplate('user-1', 'portfolio-1', { columnMapping: mapping, filename: 'f.csv', content: csv });
+
+    expect(result.importResult.holdingsCount).toBe(1); // the real re-import actually ran
+    expect(result.portfolio.flexTemplateStatus).toBe('Flex-Err'); // a brand-new replacement mapping is unresolved too, same forced-resolution rule
+  });
+
+  test('throws FlexTemplateStateError when the portfolio is still Flex-Err (should use saveFlexTemplate for its first resolution instead)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'portfolio-1', flex_template_status: 'Flex-Err' }] });
+    await expect(changeFlexTemplate('user-1', 'portfolio-1', { columnMapping: mapping, filename: 'f.csv', content: csv }))
+      .rejects.toBeInstanceOf(FlexTemplateStateError);
+  });
+
+  test('throws FlexTemplateStateError on a Classic/Legacy portfolio (flex_template_status NULL)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'portfolio-1', flex_template_status: null }] });
+    await expect(changeFlexTemplate('user-1', 'portfolio-1', { columnMapping: mapping, filename: 'f.csv', content: csv }))
+      .rejects.toBeInstanceOf(FlexTemplateStateError);
+  });
+
+  test('throws PortfolioNotFoundError when not owned', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    await expect(changeFlexTemplate('user-1', 'portfolio-1', { columnMapping: mapping, filename: 'f.csv', content: csv }))
+      .rejects.toBeInstanceOf(PortfolioNotFoundError);
   });
 });

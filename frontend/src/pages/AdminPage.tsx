@@ -7,6 +7,7 @@ import UserRolesPage from './UserRolesPage';
 import FunctionsPage from './FunctionsPage';
 import RolePermissionsPage from './RolePermissionsPage';
 import RolesPage from './RolesPage';
+import PortfolioTemplateApprovalPage from './PortfolioTemplateApprovalPage';
 
 const TABS = [
   { id: 'apis', label: 'My API(s)' },
@@ -15,6 +16,7 @@ const TABS = [
   { id: 'functions', label: 'Manage Functions' },
   { id: 'permissions', label: 'Manage Permission' },
   { id: 'roles', label: 'Manage Role' },
+  { id: 'portfolioTemplates', label: 'Portfolio Templates' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -36,6 +38,10 @@ export default function AdminPage() {
   // Admin/Admin-Master ever reach this tab at all, since this whole page is
   // already gated by hasAdminConsoleAccess() above.
   const canManageMasterData = session?.permissions?.includes('contrarian_finder:scan') ?? false;
+  // Portfolio Upload - Flex's approval mechanism (CLAUDE.md's "Portfolio Upload - Flex"
+  // section) - hidden entirely (not disabled) for an admin session that hasn't been granted
+  // this specific Function, same pattern as apis/masterData above.
+  const canManagePortfolioTemplates = session?.permissions?.includes('portfolio_template:manage_status') ?? false;
   const [activeTab, setActiveTab] = useState<TabId>('apis');
 
   // Client-side convenience only - every proxied endpoint's own requirePermission is the
@@ -45,6 +51,7 @@ export default function AdminPage() {
   const visibleTabs = TABS.filter((tab) => {
     if (tab.id === 'apis') return canManageOwnKeys;
     if (tab.id === 'masterData') return canManageMasterData;
+    if (tab.id === 'portfolioTemplates') return canManagePortfolioTemplates;
     return true;
   });
 
@@ -77,6 +84,7 @@ export default function AdminPage() {
         {activeTab === 'functions' && <FunctionsPage />}
         {activeTab === 'permissions' && <RolePermissionsPage />}
         {activeTab === 'roles' && <RolesPage />}
+        {activeTab === 'portfolioTemplates' && canManagePortfolioTemplates && <PortfolioTemplateApprovalPage />}
       </main>
     </div>
   );

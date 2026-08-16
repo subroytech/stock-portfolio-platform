@@ -4,6 +4,7 @@ import { hasAdminConsoleAccess, useLogout, useSession } from '../api/auth';
 import { ApiKeysModalContext } from '../lib/apiKeysModal';
 import { TickerHandoffContext, type HandoffTarget, type TickerHandoff } from '../lib/tickerHandoff';
 import DashboardPage from '../pages/DashboardPage';
+import FlexPortfolioPage from '../pages/FlexPortfolioPage';
 import MomentumPage from '../pages/MomentumPage';
 import ContrarianFinderPage from '../pages/ContrarianFinderPage';
 import LongTermAnalysisPage from '../pages/LongTermAnalysisPage';
@@ -11,7 +12,7 @@ import ContrarianComebackPage from '../pages/ContrarianComebackPage';
 import SubscriptionsPage from '../pages/SubscriptionsPage';
 
 const TABS = [
-  { path: '/', label: 'Stock Portfolio' },
+  { path: '/', label: 'Portfolio' },
   { path: '/long-term-analysis', label: 'Long-Term Analysis' },
   { path: '/contrarian-finder', label: 'Contrarian Finder' },
   { path: '/contrarian-comeback', label: 'Contrarian Comeback' },
@@ -41,6 +42,17 @@ export default function TabShell() {
   const [showApiKeys, setShowApiKeys] = useState(false);
   const [handoff, setHandoff] = useState<TickerHandoff | null>(null);
   const requestIdRef = useRef(0);
+
+  // Portfolio Upload - Flex (CLAUDE.md's "Portfolio Upload - Flex" section) - the Portfolio
+  // tab's Legacy/Flex sub-tabs, each hidden entirely (not disabled) when the caller lacks the
+  // matching Function permission, same pattern as the Admin/API Keys conditional rendering
+  // above. A session with neither permission still gets a reasonable defensive-default: a
+  // read-only Legacy view (no UploadImportDialog) rather than a blank Portfolio tab - the same
+  // precedent ContrarianFinderPage follows for a session lacking contrarian_finder:scan.
+  const canLegacy = session?.permissions?.includes('portfolio_upload:legacy') ?? false;
+  const canFlex = session?.permissions?.includes('portfolio_upload:flex') ?? false;
+  const [portfolioSubTab, setPortfolioSubTab] = useState<'legacy' | 'flex'>('legacy');
+  const effectivePortfolioSubTab = canLegacy && canFlex ? portfolioSubTab : (canFlex && !canLegacy ? 'flex' : 'legacy');
 
   function launch(target: HandoffTarget, symbol: string) {
     requestIdRef.current += 1;
@@ -98,7 +110,40 @@ export default function TabShell() {
           </button>
         </header>
 
-        <div data-testid="tab-panel-portfolio" className={location.pathname === '/' ? '' : 'hidden'}><DashboardPage /></div>
+        <div data-testid="tab-panel-portfolio" className={location.pathname === '/' ? '' : 'hidden'}>
+          {canLegacy && canFlex && (
+            <nav className="flex flex-wrap items-center gap-1 border-b border-border bg-bg-secondary px-4 py-2 sm:px-6">
+              <button
+                type="button"
+                onClick={() => setPortfolioSubTab('legacy')}
+                className={`rounded-btn px-3 py-1 text-sm font-medium transition-colors ${
+                  effectivePortfolioSubTab === 'legacy' ? 'bg-accent text-white' : 'text-text-secondary hover:bg-bg-primary'
+                }`}
+              >
+                Legacy
+              </button>
+              <button
+                type="button"
+                onClick={() => setPortfolioSubTab('flex')}
+                className={`rounded-btn px-3 py-1 text-sm font-medium transition-colors ${
+                  effectivePortfolioSubTab === 'flex' ? 'bg-accent text-white' : 'text-text-secondary hover:bg-bg-primary'
+                }`}
+              >
+                Flex
+              </button>
+            </nav>
+          )}
+          {(canLegacy || !(canLegacy || canFlex)) && (
+            <div data-testid="portfolio-subtab-legacy" className={effectivePortfolioSubTab === 'legacy' ? '' : 'hidden'}>
+              <DashboardPage readOnly={!canLegacy} portfolioFilter={(p) => p.flexTemplateStatus === null} />
+            </div>
+          )}
+          {canFlex && (
+            <div data-testid="portfolio-subtab-flex" className={effectivePortfolioSubTab === 'flex' ? '' : 'hidden'}>
+              <FlexPortfolioPage />
+            </div>
+          )}
+        </div>
         <div data-testid="tab-panel-long-term-analysis" className={location.pathname === '/long-term-analysis' ? '' : 'hidden'}><LongTermAnalysisPage /></div>
         <div data-testid="tab-panel-contrarian-finder" className={location.pathname === '/contrarian-finder' ? '' : 'hidden'}><ContrarianFinderPage /></div>
         <div data-testid="tab-panel-contrarian-comeback" className={location.pathname === '/contrarian-comeback' ? '' : 'hidden'}><ContrarianComebackPage /></div>

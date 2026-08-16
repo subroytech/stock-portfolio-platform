@@ -15,7 +15,8 @@ counts and can show 0 even when tables exist (see `SHOW TABLES`/SQL Shell instea
 
 Tables are prefixed by category (settled 2026-07-10):
 - **`m_`** — master/reference data (`m_tickers`, `m_index_master`, `m_index_constituent`,
-  `m_roles`, `m_role_permissions`, `m_function_master`).
+  `m_roles`, `m_role_permissions`, `m_function_master`,
+  `m_portfolio_template_mapping_master`/`_dtls`).
 - **`tx_`** — transactional, portfolio-scoped data (`tx_portfolios`, `tx_holdings`,
   `tx_cash_positions`, `tx_uploads`). **Exception: `tx_shared_contrarian_run`** (added
   2026-08-04) is `tx_`-prefixed despite being neither portfolio-scoped nor per-user — the
@@ -60,14 +61,18 @@ users (1) ──< tx_portfolios (many)
      │            ├──< tx_holdings (many)
      │            ├──< tx_cash_positions (1, unique per portfolio)
      │            ├──< tx_uploads (many)
-     │            └──< tx_portfolio_action_hist (many)
+     │            ├──< tx_portfolio_action_hist (many)
+     │            └──> m_portfolio_template_mapping_master (1, via upload_template_id, nullable)
      │
      ├──< users_subscriptions (many, one per provider e.g. fmp/finnhub)
      ├──< users_roles (many) >── m_roles (1) ──< m_role_permissions (many) >── m_function_master (1, via FK on permission_key)
      ├──< user_evt_usage (many)
-     └──< user_evt_usage_summary_monthly (many)
+     ├──< user_evt_usage_summary_monthly (many)
+     └──< m_portfolio_template_mapping_master (many, via created_by/reviewed_by, both nullable)
 
 m_index_master (1) ──< m_index_constituent (many)
+
+m_portfolio_template_mapping_master (1) ──< m_portfolio_template_mapping_dtls (many)
 
 m_tickers  — standalone reference table, not FK'd from anywhere
 ```
@@ -259,6 +264,8 @@ month` — this is what makes the `ON CONFLICT` upsert work).
 | `name` | `VARCHAR(100)` | `NOT NULL` |
 | `broker` | `VARCHAR(50)` | nullable |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+| `upload_template_id` | `INT8` | nullable; added by migration `023`, Portfolio Upload — Flex. FK → `m_portfolio_template_mapping_master(id)`, `ON DELETE SET NULL`. `NULL` for every Classic/Legacy portfolio; set once a Flex portfolio's mapping is either an already-Approved template or its own new mapping has been saved via Save Template |
+| `flex_template_status` | `VARCHAR(20)` | nullable; added by migration `023` — `'Flex'` \| `'Flex-Err'` \| `NULL`, app-enforced, no DB check constraint. `'Flex-Err'` is the "needs attention" state (portfolio created, mapping not yet proven/saved); `'Flex'` means resolved. App-enforced invariant (not DB-enforced): `flex_template_status = 'Flex'` iff `upload_template_id IS NOT NULL` |
 
 Indexes: `portfolios_pkey` (PK), `portfolios_user_id_name_key` (unique on `user_id, name` —
 one portfolio name per user, e.g. can't have two "Fidelity" portfolios for the same user).
@@ -443,6 +450,39 @@ pre-rename table name — see the naming-convention note above.)
 
 **Re-seeding:** `npm run seed:tickers` is idempotent (`ON CONFLICT` upserts) — safe to
 re-run after `cf_static_universe.js`/`ticker_sectors.js` change, to push updates into the DB.
+
+### `m_portfolio_template_mapping_master`
+Added by migration `022`, Portfolio Upload — Flex. One row per user-defined column-mapping
+template — `m_`-prefixed despite being user-authored (not seeded) because it's master-data-
+shaped (a fixed catalog every user picks from) and grown by live activity rather than a
+one-time seed, the same characteristic that already justifies `m_tickers`' `m_` prefix.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `template_name` | `VARCHAR(100)` | `NOT NULL`, unique — backs the searchable Approved-template list |
+| `status` | `VARCHAR(20)` | `NOT NULL`, default `'Pending Approval'` — `'Pending Approval'` \| `'Approved'` \| `'Rejected'`, app-enforced, no DB check constraint |
+| `created_by` / `reviewed_by` | `INT8` | both FK → `users(id)`, `ON DELETE SET NULL`, both nullable — `created_by` drives the "Admin/Admin-Master/yourself" visibility filter on the Approved list; `reviewed_by` records who approved/rejected it |
+| `reviewed_at` | `TIMESTAMPTZ` | nullable |
+| `sample_preview` | `JSONB` | nullable — the top-5-mapped-records snapshot captured at "Inspect Data" time, so an admin reviewing a Pending template later doesn't need the original file re-uploaded |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_portfolio_template_mapping_master_pkey` (PK),
+`m_portfolio_template_mapping_master_name_key` (unique on `template_name`).
+
+### `m_portfolio_template_mapping_dtls`
+Added by migration `022`. One row per mapped field within a template.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `template_id` | `INT8` | FK → `m_portfolio_template_mapping_master(id)`, `ON DELETE CASCADE` |
+| `target_field` | `VARCHAR(50)` | `NOT NULL` — one of the app's fixed portfolio fields (`symbol`/`quantity`/`currentPrice`/`purchasePrice`/`name`/`sector`/`purchaseDate`), app-enforced vocabulary, not a DB enum |
+| `source_header` | `VARCHAR(200)` | `NOT NULL` — the uploaded file's actual header text mapped to that field, normalized the same way `parser.service.ts`'s `mapHeaders()` already normalizes — resilient to column reordering on a later upload against the same template |
+
+Indexes: `m_portfolio_template_mapping_dtls_pkey` (PK),
+`m_portfolio_template_mapping_dtls_template_id_target_field_key` (unique on
+`template_id, target_field`).
 
 ### `sys_schema_migrations`
 Internal bookkeeping table created/maintained by `migrate.js` (not part of the app schema)

@@ -119,4 +119,25 @@ describe('AdminPage', () => {
     await screen.findByText('FMP (Financial Modeling Prep)');
     expect(screen.queryByRole('button', { name: 'Master Data' })).not.toBeInTheDocument();
   });
+
+  test('a session with portfolio_template:manage_status sees the "Portfolio Templates" tab and can switch to it', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'admin@b.com', roles: ['admin'], permissions: ['api_keys:manage_own', 'users:manage_roles', 'portfolio_template:manage_status'] });
+      if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
+      if (url === '/portfolio-templates/admin/all') return Promise.resolve({ templates: [] });
+      return Promise.resolve({});
+    });
+    renderPage();
+    await screen.findByText('FMP (Financial Modeling Prep)');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Portfolio Templates' }));
+    expect(await screen.findByText('No portfolio templates have been created yet.')).toBeInTheDocument();
+  });
+
+  test('a session without portfolio_template:manage_status does not see the "Portfolio Templates" tab', async () => {
+    mockAdminSession(); // default helper - no portfolio_template:manage_status
+    renderPage();
+    await screen.findByText('FMP (Financial Modeling Prep)');
+    expect(screen.queryByRole('button', { name: 'Portfolio Templates' })).not.toBeInTheDocument();
+  });
 });

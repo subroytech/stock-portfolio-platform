@@ -8,6 +8,8 @@ import type { HistoricalBar, Quote } from './marketData.service';
 import * as userSubscription from './userSubscription.service';
 import { applyLivePrices, HoldingLike } from './livePrices.service';
 import { ParseResult } from './parser.service';
+import { parseFlexCsv, ColumnMapping } from './flexParser.service';
+import * as portfolioTemplateService from './portfolioTemplate.service';
 
 // Matches an already-pair-formatted symbol (BTCUSD, BTC-USD, a USDT pair) -
 // shared by isPerfSkipped below and toFmpQuoteSymbol, so a symbol that's
@@ -40,6 +42,10 @@ function toFmpQuoteSymbol(symbol: string, sector: string | null): string {
 
 export class PortfolioNotFoundError extends Error {}
 export class PortfolioNameConflictError extends Error {}
+// Portfolio Upload - Flex: saveFlexTemplate()/changeFlexTemplate() refuse to run against a
+// portfolio that isn't a Flex portfolio currently in the 'Flex-Err' (needs-attention) state -
+// e.g. calling Save Template twice, or on a Classic/already-resolved portfolio.
+export class FlexTemplateStateError extends Error {}
 
 const UNIQUE_VIOLATION = '23505';
 
@@ -49,6 +55,8 @@ export interface PortfolioSummary {
   broker: string | null;
   createdAt: string;
   updatedAt: string;
+  uploadTemplateId: string | null;
+  flexTemplateStatus: 'Flex' | 'Flex-Err' | null;
 }
 
 export interface PortfolioDetailHolding {
@@ -82,21 +90,28 @@ export interface PortfolioDetail extends PortfolioSummary {
   totalPortfolioValue: number;
 }
 
+const PORTFOLIO_COLUMNS = 'id, name, broker, created_at, updated_at, upload_template_id, flex_template_status';
+
 interface PortfolioRow {
   id: string;
   name: string;
   broker: string | null;
   created_at: string;
   updated_at: string;
+  upload_template_id: string | null;
+  flex_template_status: 'Flex' | 'Flex-Err' | null;
 }
 
 function mapPortfolioRow(r: PortfolioRow): PortfolioSummary {
-  return { id: r.id, name: r.name, broker: r.broker, createdAt: r.created_at, updatedAt: r.updated_at };
+  return {
+    id: r.id, name: r.name, broker: r.broker, createdAt: r.created_at, updatedAt: r.updated_at,
+    uploadTemplateId: r.upload_template_id, flexTemplateStatus: r.flex_template_status,
+  };
 }
 
 export async function listPortfolios(userId: string): Promise<PortfolioSummary[]> {
   const { rows } = await pool.query<PortfolioRow>(
-    'SELECT id, name, broker, created_at, updated_at FROM tx_portfolios WHERE user_id = $1 ORDER BY created_at',
+    `SELECT ${PORTFOLIO_COLUMNS} FROM tx_portfolios WHERE user_id = $1 ORDER BY created_at`,
     [userId],
   );
   return rows.map(mapPortfolioRow);
@@ -105,7 +120,7 @@ export async function listPortfolios(userId: string): Promise<PortfolioSummary[]
 export async function createPortfolio(userId: string, name: string, broker: string | null): Promise<PortfolioSummary> {
   try {
     const { rows } = await pool.query<PortfolioRow>(
-      'INSERT INTO tx_portfolios (user_id, name, broker) VALUES ($1, $2, $3) RETURNING id, name, broker, created_at, updated_at',
+      `INSERT INTO tx_portfolios (user_id, name, broker) VALUES ($1, $2, $3) RETURNING ${PORTFOLIO_COLUMNS}`,
       [userId, name, broker],
     );
     return mapPortfolioRow(rows[0]);
@@ -159,7 +174,7 @@ function mapHoldingRow(r: HoldingRow): PortfolioDetailHolding {
 
 export async function getPortfolio(userId: string, portfolioId: string): Promise<PortfolioDetail | null> {
   const { rows: portfolioRows } = await pool.query<PortfolioRow>(
-    'SELECT id, name, broker, created_at, updated_at FROM tx_portfolios WHERE id = $1 AND user_id = $2',
+    `SELECT ${PORTFOLIO_COLUMNS} FROM tx_portfolios WHERE id = $1 AND user_id = $2`,
     [portfolioId, userId],
   );
   if (!portfolioRows[0]) return null;
@@ -219,7 +234,7 @@ export async function updatePortfolio(
   try {
     const { rows } = await pool.query<PortfolioRow>(
       `UPDATE tx_portfolios SET ${setClauses.join(', ')} WHERE id = $${idParam} AND user_id = $${userIdParam}
-       RETURNING id, name, broker, created_at, updated_at`,
+       RETURNING ${PORTFOLIO_COLUMNS}`,
       params,
     );
     return rows[0] ? mapPortfolioRow(rows[0]) : null;
@@ -366,6 +381,196 @@ export async function importHoldings(
   } finally {
     client.release();
   }
+}
+
+// Portfolio Upload - Flex (CLAUDE.md's "Portfolio Upload - Flex" section has the full
+// narrative). Either `uploadTemplateId` (an existing Approved/own-Pending template - already
+// proven correct at approval time, so this resolves immediately) or `columnMapping` (a brand
+// new, unproven mapping - leaves the portfolio in 'Flex-Err' pending the forced Save Template
+// or Delete Portfolio resolution) must be given, never both/neither.
+export interface CreatePortfolioFlexInput {
+  name: string;
+  broker: string | null;
+  uploadTemplateId?: string;
+  columnMapping?: ColumnMapping;
+  headerRowIndex?: number;
+  dataStartColumnIndex?: number;
+  filename: string;
+  content: string;
+}
+
+export async function createPortfolioFlex(
+  userId: string,
+  input: CreatePortfolioFlexInput,
+): Promise<{ portfolio: PortfolioSummary; importResult: ImportResult }> {
+  let mapping: ColumnMapping;
+  let headerRowIndex = 1;
+  let dataStartColumnIndex = 1;
+  let uploadTemplateId: string | null = null;
+  let flexTemplateStatus: 'Flex' | 'Flex-Err';
+
+  if (input.uploadTemplateId) {
+    const config = await portfolioTemplateService.getTemplateParseConfig(input.uploadTemplateId);
+    mapping = config.columnMapping;
+    headerRowIndex = config.headerRowIndex;
+    dataStartColumnIndex = config.dataStartColumnIndex;
+    uploadTemplateId = input.uploadTemplateId;
+    flexTemplateStatus = 'Flex';
+  } else if (input.columnMapping) {
+    mapping = input.columnMapping;
+    headerRowIndex = input.headerRowIndex ?? 1;
+    dataStartColumnIndex = input.dataStartColumnIndex ?? 1;
+    flexTemplateStatus = 'Flex-Err';
+  } else {
+    throw new Error('Either uploadTemplateId or columnMapping is required.');
+  }
+
+  // Parse (and therefore validate the mapping against real data) BEFORE ever creating a
+  // portfolio row - a bad mapping or empty/malformed file must never leave a ghost portfolio
+  // behind.
+  const parsed = parseFlexCsv(input.content, mapping, { headerRowIndex, dataStartColumnIndex });
+
+  let portfolio: PortfolioSummary;
+  try {
+    const { rows } = await pool.query<PortfolioRow>(
+      `INSERT INTO tx_portfolios (user_id, name, broker, upload_template_id, flex_template_status)
+       VALUES ($1, $2, $3, $4, $5) RETURNING ${PORTFOLIO_COLUMNS}`,
+      [userId, input.name, input.broker, uploadTemplateId, flexTemplateStatus],
+    );
+    portfolio = mapPortfolioRow(rows[0]);
+  } catch (err) {
+    if ((err as { code?: string })?.code === UNIQUE_VIOLATION) {
+      throw new PortfolioNameConflictError(`A portfolio named "${input.name}" already exists.`);
+    }
+    throw err;
+  }
+
+  // Reuses the existing, already-tested importHoldings() write path unchanged - same
+  // transaction/diffing/tx_uploads audit row as Legacy, just fed Flex-parsed data.
+  const importResult = await importHoldings(userId, portfolio.id, parsed, input.filename, 'flex');
+
+  return { portfolio, importResult };
+}
+
+export interface SaveFlexTemplateInput {
+  templateName: string;
+  columnMapping: ColumnMapping;
+  samplePreview: unknown;
+  headerRowIndex: number;
+  dataStartColumnIndex: number;
+  howToUseDescription?: string;
+}
+
+// The forced-resolution action - only callable while the portfolio is genuinely in the
+// 'Flex-Err' (unresolved) state, i.e. only once, right after a brand-new mapping's Dashboard
+// has actually rendered. One transaction: create the template (via portfolioTemplate
+// .service.ts's createTemplate(), passed this same client so it doesn't open its own),
+// then bind it - so a template is never created without also being bound, or vice versa.
+export async function saveFlexTemplate(
+  userId: string,
+  portfolioId: string,
+  input: SaveFlexTemplateInput,
+): Promise<{ portfolio: PortfolioSummary; template: portfolioTemplateService.TemplateSummary }> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query<{ id: string; flex_template_status: string | null }>(
+      'SELECT id, flex_template_status FROM tx_portfolios WHERE id = $1 AND user_id = $2',
+      [portfolioId, userId],
+    );
+    if (!rows[0]) throw new PortfolioNotFoundError('Portfolio not found.');
+    if (rows[0].flex_template_status !== 'Flex-Err') {
+      throw new FlexTemplateStateError('This portfolio has no unresolved Flex mapping to save as a template.');
+    }
+
+    const template = await portfolioTemplateService.createTemplate(
+      {
+        templateName: input.templateName, columnMapping: input.columnMapping, samplePreview: input.samplePreview,
+        headerRowIndex: input.headerRowIndex, dataStartColumnIndex: input.dataStartColumnIndex,
+        howToUseDescription: input.howToUseDescription, createdBy: userId,
+      },
+      client,
+    );
+
+    const { rows: updatedRows } = await client.query<PortfolioRow>(
+      `UPDATE tx_portfolios SET upload_template_id = $1, flex_template_status = 'Flex', updated_at = now()
+       WHERE id = $2 RETURNING ${PORTFOLIO_COLUMNS}`,
+      [template.id, portfolioId],
+    );
+
+    await client.query('COMMIT');
+    return { portfolio: mapPortfolioRow(updatedRows[0]), template };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => { /* best-effort */ });
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export interface ChangeFlexTemplateInput {
+  uploadTemplateId?: string;
+  columnMapping?: ColumnMapping;
+  headerRowIndex?: number;
+  dataStartColumnIndex?: number;
+  filename: string;
+  content: string;
+}
+
+// Changing an already-resolved portfolio's bound template - only callable while
+// flex_template_status is already 'Flex' (a portfolio still in 'Flex-Err' uses
+// saveFlexTemplate for its first resolution instead; a Classic/Legacy portfolio was never
+// Flex to begin with). Always re-runs the real import against the new mapping first ("Inspect
+// Data before swap" - never a silent template change), reusing importHoldings() exactly like
+// createPortfolioFlex does.
+export async function changeFlexTemplate(
+  userId: string,
+  portfolioId: string,
+  input: ChangeFlexTemplateInput,
+): Promise<{ portfolio: PortfolioSummary; importResult: ImportResult }> {
+  const { rows } = await pool.query<{ id: string; flex_template_status: string | null }>(
+    'SELECT id, flex_template_status FROM tx_portfolios WHERE id = $1 AND user_id = $2',
+    [portfolioId, userId],
+  );
+  if (!rows[0]) throw new PortfolioNotFoundError('Portfolio not found.');
+  if (rows[0].flex_template_status !== 'Flex') {
+    throw new FlexTemplateStateError('Only a portfolio with an already-resolved Flex template can have it changed.');
+  }
+
+  let mapping: ColumnMapping;
+  let headerRowIndex = 1;
+  let dataStartColumnIndex = 1;
+  let uploadTemplateId: string | null;
+  let flexTemplateStatus: 'Flex' | 'Flex-Err';
+
+  if (input.uploadTemplateId) {
+    const config = await portfolioTemplateService.getTemplateParseConfig(input.uploadTemplateId);
+    mapping = config.columnMapping;
+    headerRowIndex = config.headerRowIndex;
+    dataStartColumnIndex = config.dataStartColumnIndex;
+    uploadTemplateId = input.uploadTemplateId;
+    flexTemplateStatus = 'Flex';
+  } else if (input.columnMapping) {
+    mapping = input.columnMapping;
+    headerRowIndex = input.headerRowIndex ?? 1;
+    dataStartColumnIndex = input.dataStartColumnIndex ?? 1;
+    uploadTemplateId = null;
+    flexTemplateStatus = 'Flex-Err'; // same forced-resolution rule applies to a brand-new replacement mapping
+  } else {
+    throw new Error('Either uploadTemplateId or columnMapping is required.');
+  }
+
+  const parsed = parseFlexCsv(input.content, mapping, { headerRowIndex, dataStartColumnIndex });
+  const importResult = await importHoldings(userId, portfolioId, parsed, input.filename, 'flex');
+
+  const { rows: updatedRows } = await pool.query<PortfolioRow>(
+    `UPDATE tx_portfolios SET upload_template_id = $1, flex_template_status = $2, updated_at = now()
+     WHERE id = $3 RETURNING ${PORTFOLIO_COLUMNS}`,
+    [uploadTemplateId, flexTemplateStatus, portfolioId],
+  );
+
+  return { portfolio: mapPortfolioRow(updatedRows[0]), importResult };
 }
 
 export interface RefreshedHolding {

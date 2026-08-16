@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { usePortfolio, useRefreshPrices } from '../api/portfolios';
-import type { RefreshPricesResult } from '../api/portfolios';
+import type { RefreshPricesResult, PortfolioSummary } from '../api/portfolios';
 import { ApiError } from '../api/client';
 import { formatAsOf } from '../lib/format';
 import PortfolioSelector from '../components/PortfolioSelector';
@@ -12,7 +12,18 @@ import PerformanceChart from '../components/PerformanceChart';
 import HoldingsTable from '../components/HoldingsTable';
 import StockPreviewChart from '../components/StockPreviewChart';
 
-export default function DashboardPage() {
+interface DashboardPageProps {
+  // Portfolio Upload - Flex (CLAUDE.md's "Portfolio Upload - Flex" section) - the Legacy
+  // sub-tab's defensive-default fallback for a session with neither portfolio_upload:legacy
+  // nor portfolio_upload:flex (TabShell.tsx, Phase 4): view-only, no UploadImportDialog. Every
+  // pre-existing caller omits this (defaults to false), so today's behavior is unchanged.
+  readOnly?: boolean;
+  // Portfolio Upload - Flex - passed through to PortfolioSelector unchanged. TabShell's
+  // Legacy sub-tab uses this to hide Flex-created portfolios from this view entirely.
+  portfolioFilter?: (p: PortfolioSummary) => boolean;
+}
+
+export default function DashboardPage({ readOnly = false, portfolioFilter }: DashboardPageProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
   const [allocationMode, setAllocationMode] = useState<AllocationMode>('todayDollar');
@@ -49,7 +60,7 @@ export default function DashboardPage() {
   return (
     <>
       <main className="flex flex-col gap-6 p-4 sm:p-6">
-        <PortfolioSelector selectedId={selectedId} onSelect={setSelectedId} />
+        <PortfolioSelector selectedId={selectedId} onSelect={setSelectedId} filter={portfolioFilter} />
 
         {!selectedId && (
           <p className="text-sm text-text-secondary">Select or create a portfolio to get started.</p>
@@ -60,7 +71,7 @@ export default function DashboardPage() {
         {selectedId && portfolio && (
           <>
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-card bg-bg-card p-4 shadow-card">
-              <UploadImportDialog portfolioId={selectedId} hasExistingHoldings={portfolio.holdings.length > 0} />
+              {readOnly ? <span /> : <UploadImportDialog portfolioId={selectedId} hasExistingHoldings={portfolio.holdings.length > 0} />}
               <div className="flex flex-col items-end gap-1">
                 <button
                   type="button"
