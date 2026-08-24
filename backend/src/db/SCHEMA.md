@@ -386,10 +386,11 @@ granted to `admin`/`admin-master` in this DB; any future role could be granted i
 | `results` | `JSONB` | `NOT NULL` — the full `ScanResult[]` array. No JSONB-specific size cap in CockroachDB (bounded by overall row size, soft limit ~64 MiB); a real 348-symbol payload is ≈125KB (measured live via `pg_column_size`), nowhere close |
 | `run_tier` | `VARCHAR(20)` | `NOT NULL`, default `'admin'` (migration `021`'s backfill value for the 2 pre-existing rows, both genuinely admin-run) — `'admin'` \| `'user'`, app-enforced vocabulary, not a DB check constraint, same convention as other free-text status columns in this schema |
 
-Indexes: `tx_shared_contrarian_run_pkey` (PK). No index on `(started_by, run_tier)` yet — the
-user-tier upsert's `DELETE ... WHERE started_by = $1 AND run_tier = 'user'` and the admin-tier
-prune's `ORDER BY completed_at DESC LIMIT 60` both currently do a full scan of this
-still-small table; worth revisiting if row count grows enough to matter.
+Indexes: `tx_shared_contrarian_run_pkey` (PK), `idx_shared_contrarian_run_started_by_run_tier`
+(migration `026`, 2026-08-23 — composite on `(started_by, run_tier)`, covering the user-tier
+upsert's `DELETE ... WHERE started_by = $1 AND run_tier = 'user'` and partially covering the
+admin-tier prune's `ORDER BY completed_at DESC LIMIT 60` scan). Previously both did a full
+table scan — accepted while the table was small; closed once asked about explicitly.
 
 ### `m_tickers`
 Stock/ETF metadata reference table — **the single source of truth for ticker
