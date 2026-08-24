@@ -130,14 +130,21 @@ export default function ColumnMappingWizard({ onReady, onCancel }: ColumnMapping
 
   async function handleInspect() {
     if (!file || !mandatoryMapped) return;
-    const result = await flexPreview.mutateAsync({
-      columnMapping: mapping,
-      filename: file.filename,
-      content: file.content,
-      headerRowIndex,
-      dataStartColumnIndex,
-    });
-    setPreview(result);
+    // A rejection is already surfaced via flexPreview.isError/error below - this catch
+    // only stops it from becoming an unhandled promise rejection (mutateAsync's promise
+    // isn't awaited by anything else here that would otherwise observe the rejection).
+    try {
+      const result = await flexPreview.mutateAsync({
+        columnMapping: mapping,
+        filename: file.filename,
+        content: file.content,
+        headerRowIndex,
+        dataStartColumnIndex,
+      });
+      setPreview(result);
+    } catch {
+      // handled via flexPreview.isError
+    }
   }
 
   function handleUseMapping() {

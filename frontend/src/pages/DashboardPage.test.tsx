@@ -21,6 +21,7 @@ function renderPage() {
 function basePortfolio(overrides: Partial<PortfolioDetail> = {}): PortfolioDetail {
   return {
     id: '1', name: 'Fidelity', broker: null, createdAt: 't1', updatedAt: 't1',
+    uploadTemplateId: null, flexTemplateStatus: null,
     cashAmount: 0, totalHoldingsValue: 1500, totalCostBasis: 1000, totalGainLoss: 500, totalPortfolioValue: 1500,
     holdings: [
       {
