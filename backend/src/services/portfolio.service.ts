@@ -8,7 +8,7 @@ import type { HistoricalBar, Quote } from './marketData.service';
 import * as userSubscription from './userSubscription.service';
 import { applyLivePrices, HoldingLike } from './livePrices.service';
 import { ParseResult } from './parser.service';
-import { parseFlexCsv, ColumnMapping } from './flexParser.service';
+import { parseFlexCsv, ColumnMapping, CashConfig, assertWithinTemplateSampleLimit } from './flexParser.service';
 import * as portfolioTemplateService from './portfolioTemplate.service';
 
 // Matches an already-pair-formatted symbol (BTCUSD, BTC-USD, a USDT pair) -
@@ -254,6 +254,92 @@ export async function deletePortfolio(userId: string, portfolioId: string): Prom
   return rows.length > 0;
 }
 
+export interface BoundPortfolio {
+  id: string;
+  name: string;
+  ownerEmail: string;
+  createdAt: string;
+}
+
+// Admin Console's Portfolio Templates screen only - what's shown in the "bound portfolios"
+// pop-up when a Delete is blocked because the template is still in use (see
+// portfolioTemplate.service.ts's deleteTemplate). Lives here, not portfolioTemplate.service.ts,
+// since that file is already imported BY this one (createPortfolioFlex/saveFlexTemplate) - the
+// reverse import would be circular.
+export async function listBoundPortfolios(templateId: string): Promise<BoundPortfolio[]> {
+  const { rows } = await pool.query<{ id: string; name: string; owner_email: string; created_at: string }>(
+    `SELECT p.id, p.name, u.email AS owner_email, p.created_at
+     FROM tx_portfolios p JOIN users u ON u.id = p.user_id
+     WHERE p.upload_template_id = $1
+     ORDER BY p.created_at`,
+    [templateId],
+  );
+  return rows.map((r) => ({ id: r.id, name: r.name, ownerEmail: r.owner_email, createdAt: r.created_at }));
+}
+
+// Deliberately requires BOTH ids to match (not a bare delete-by-portfolio-id) - this is the
+// scoping guard that keeps an admin's ability to delete another user's portfolio from becoming
+// a general-purpose capability: it can only ever delete a portfolio that is still actually
+// bound to the specific template being cleaned up. Same single-statement shape as
+// deletePortfolio() above - already relies on the same child-table cascade FKs that function
+// has always trusted.
+export async function deleteBoundPortfolio(templateId: string, portfolioId: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    'DELETE FROM tx_portfolios WHERE id = $1 AND upload_template_id = $2 RETURNING id',
+    [portfolioId, templateId],
+  );
+  return rows.length > 0;
+}
+
+export interface UnattachedFlexPortfolio {
+  id: string;
+  name: string;
+  ownerEmail: string;
+  createdAt: string;
+  holdingsCount: number;
+  cashAmount: number;
+}
+
+// Admin Console's Portfolio Templates screen only - Flex portfolios stuck in 'Flex-Err' (the
+// owning user created them via Flex but never completed Save Template or Delete Portfolio, the
+// only two ways out of that state). Visible to only that one user otherwise - if they abandon
+// it, nothing else in the app ever surfaces it again. holdingsCount/cashAmount give an admin
+// enough to judge without needing a full detail view.
+export async function listUnattachedFlexPortfolios(): Promise<UnattachedFlexPortfolio[]> {
+  const { rows } = await pool.query<{
+    id: string; name: string; owner_email: string; created_at: string; holdings_count: string; cash_amount: string;
+  }>(`
+    SELECT p.id, p.name, u.email AS owner_email, p.created_at,
+           COUNT(h.id) AS holdings_count, COALESCE(c.amount, 0) AS cash_amount
+    FROM tx_portfolios p
+    JOIN users u ON u.id = p.user_id
+    LEFT JOIN tx_holdings h ON h.portfolio_id = p.id
+    LEFT JOIN tx_cash_positions c ON c.portfolio_id = p.id
+    WHERE p.flex_template_status = 'Flex-Err'
+    GROUP BY p.id, u.email, p.created_at, c.amount
+    ORDER BY p.created_at
+  `);
+  // COUNT/NUMERIC come back from CockroachDB as strings, not numbers - same node-pg gotcha
+  // handled elsewhere in this codebase (roles.service.ts, marketData.service.ts).
+  return rows.map((r) => ({
+    id: r.id, name: r.name, ownerEmail: r.owner_email, createdAt: r.created_at,
+    holdingsCount: Number(r.holdings_count), cashAmount: parseFloat(r.cash_amount),
+  }));
+}
+
+// Deliberately scoped to the 'Flex-Err' state itself (not a bare delete-by-id) - the same
+// "can't become a general delete-any-portfolio capability" guard as deleteBoundPortfolio, just
+// keyed on status instead of a template binding. upload_template_id IS NULL is implied by the
+// documented invariant whenever flex_template_status = 'Flex-Err', so the status check alone is
+// sufficient - same invariant-trust precedent already used by deleteTemplate() etc.
+export async function deleteUnattachedFlexPortfolio(portfolioId: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    "DELETE FROM tx_portfolios WHERE id = $1 AND flex_template_status = 'Flex-Err' RETURNING id",
+    [portfolioId],
+  );
+  return rows.length > 0;
+}
+
 export interface ImportResult {
   holdingsCount: number;
   cashAmount: number;
@@ -395,6 +481,9 @@ export interface CreatePortfolioFlexInput {
   columnMapping?: ColumnMapping;
   headerRowIndex?: number;
   dataStartColumnIndex?: number;
+  footerMarkerColumnIndex?: number;
+  footerMarkerText?: string;
+  cashConfig?: CashConfig;
   filename: string;
   content: string;
 }
@@ -406,6 +495,9 @@ export async function createPortfolioFlex(
   let mapping: ColumnMapping;
   let headerRowIndex = 1;
   let dataStartColumnIndex = 1;
+  let footerMarkerColumnIndex: number | undefined;
+  let footerMarkerText: string | undefined;
+  let cashConfig: CashConfig | undefined;
   let uploadTemplateId: string | null = null;
   let flexTemplateStatus: 'Flex' | 'Flex-Err';
 
@@ -414,12 +506,19 @@ export async function createPortfolioFlex(
     mapping = config.columnMapping;
     headerRowIndex = config.headerRowIndex;
     dataStartColumnIndex = config.dataStartColumnIndex;
+    footerMarkerColumnIndex = config.footerMarkerColumnIndex ?? undefined;
+    footerMarkerText = config.footerMarkerText ?? undefined;
+    cashConfig = config.cashConfig ?? undefined;
     uploadTemplateId = input.uploadTemplateId;
     flexTemplateStatus = 'Flex';
   } else if (input.columnMapping) {
+    assertWithinTemplateSampleLimit(input.content);
     mapping = input.columnMapping;
     headerRowIndex = input.headerRowIndex ?? 1;
     dataStartColumnIndex = input.dataStartColumnIndex ?? 1;
+    footerMarkerColumnIndex = input.footerMarkerColumnIndex;
+    footerMarkerText = input.footerMarkerText;
+    cashConfig = input.cashConfig;
     flexTemplateStatus = 'Flex-Err';
   } else {
     throw new Error('Either uploadTemplateId or columnMapping is required.');
@@ -428,7 +527,9 @@ export async function createPortfolioFlex(
   // Parse (and therefore validate the mapping against real data) BEFORE ever creating a
   // portfolio row - a bad mapping or empty/malformed file must never leave a ghost portfolio
   // behind.
-  const parsed = parseFlexCsv(input.content, mapping, { headerRowIndex, dataStartColumnIndex });
+  const parsed = parseFlexCsv(input.content, mapping, {
+    headerRowIndex, dataStartColumnIndex, footerMarkerColumnIndex, footerMarkerText, cashConfig,
+  });
 
   let portfolio: PortfolioSummary;
   try {
@@ -459,6 +560,9 @@ export interface SaveFlexTemplateInput {
   headerRowIndex: number;
   dataStartColumnIndex: number;
   howToUseDescription?: string;
+  footerMarkerColumnIndex?: number | null;
+  footerMarkerText?: string | null;
+  cashConfig?: CashConfig | null;
 }
 
 // The forced-resolution action - only callable while the portfolio is genuinely in the
@@ -489,6 +593,8 @@ export async function saveFlexTemplate(
         templateName: input.templateName, columnMapping: input.columnMapping, samplePreview: input.samplePreview,
         headerRowIndex: input.headerRowIndex, dataStartColumnIndex: input.dataStartColumnIndex,
         howToUseDescription: input.howToUseDescription, createdBy: userId,
+        footerMarkerColumnIndex: input.footerMarkerColumnIndex, footerMarkerText: input.footerMarkerText,
+        cashConfig: input.cashConfig,
       },
       client,
     );
@@ -514,6 +620,9 @@ export interface ChangeFlexTemplateInput {
   columnMapping?: ColumnMapping;
   headerRowIndex?: number;
   dataStartColumnIndex?: number;
+  footerMarkerColumnIndex?: number;
+  footerMarkerText?: string;
+  cashConfig?: CashConfig;
   filename: string;
   content: string;
 }
@@ -541,6 +650,9 @@ export async function changeFlexTemplate(
   let mapping: ColumnMapping;
   let headerRowIndex = 1;
   let dataStartColumnIndex = 1;
+  let footerMarkerColumnIndex: number | undefined;
+  let footerMarkerText: string | undefined;
+  let cashConfig: CashConfig | undefined;
   let uploadTemplateId: string | null;
   let flexTemplateStatus: 'Flex' | 'Flex-Err';
 
@@ -549,19 +661,28 @@ export async function changeFlexTemplate(
     mapping = config.columnMapping;
     headerRowIndex = config.headerRowIndex;
     dataStartColumnIndex = config.dataStartColumnIndex;
+    footerMarkerColumnIndex = config.footerMarkerColumnIndex ?? undefined;
+    footerMarkerText = config.footerMarkerText ?? undefined;
+    cashConfig = config.cashConfig ?? undefined;
     uploadTemplateId = input.uploadTemplateId;
     flexTemplateStatus = 'Flex';
   } else if (input.columnMapping) {
+    assertWithinTemplateSampleLimit(input.content);
     mapping = input.columnMapping;
     headerRowIndex = input.headerRowIndex ?? 1;
     dataStartColumnIndex = input.dataStartColumnIndex ?? 1;
+    footerMarkerColumnIndex = input.footerMarkerColumnIndex;
+    footerMarkerText = input.footerMarkerText;
+    cashConfig = input.cashConfig;
     uploadTemplateId = null;
     flexTemplateStatus = 'Flex-Err'; // same forced-resolution rule applies to a brand-new replacement mapping
   } else {
     throw new Error('Either uploadTemplateId or columnMapping is required.');
   }
 
-  const parsed = parseFlexCsv(input.content, mapping, { headerRowIndex, dataStartColumnIndex });
+  const parsed = parseFlexCsv(input.content, mapping, {
+    headerRowIndex, dataStartColumnIndex, footerMarkerColumnIndex, footerMarkerText, cashConfig,
+  });
   const importResult = await importHoldings(userId, portfolioId, parsed, input.filename, 'flex');
 
   const { rows: updatedRows } = await pool.query<PortfolioRow>(

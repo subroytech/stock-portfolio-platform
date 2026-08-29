@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from './client';
 import type { PerformanceBar } from '../lib/performanceMath';
-import type { ColumnMapping } from './portfolioTemplates';
+import type { ColumnMapping, CashConfig } from './portfolioTemplates';
 
 // Portfolio Upload - Flex (CLAUDE.md's "Portfolio Upload - Flex" section) - null for every
 // portfolio created through today's Legacy import, unchanged.
@@ -149,7 +149,17 @@ export function useDeletePortfolio() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => apiFetch<{ success: true }>(`/portfolios/${id}`, { method: 'DELETE' }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['portfolios'] }),
+    onSuccess: (_data, id) => {
+      // Removes (not invalidates) the deleted portfolio's own detail query - invalidating it
+      // would refetch a resource that no longer exists, producing a real 404. This mutation's
+      // own onSuccess runs before mutateAsync resolves, so a caller like
+      // FlexResolutionBanner's handleDelete (await mutateAsync(id); onDeleted()) hasn't yet
+      // switched the selected portfolio away - usePortfolio(id) is often still mounted and
+      // would otherwise refetch immediately. The list query is fine to invalidate normally -
+      // it just comes back with one fewer row, no 404 risk.
+      queryClient.removeQueries({ queryKey: ['portfolios', id] });
+      queryClient.invalidateQueries({ queryKey: ['portfolios'], exact: true });
+    },
   });
 }
 
@@ -202,6 +212,9 @@ export interface CreateFlexInput {
   columnMapping?: ColumnMapping;
   headerRowIndex?: number;
   dataStartColumnIndex?: number;
+  footerMarkerColumnIndex?: number;
+  footerMarkerText?: string;
+  cashConfig?: CashConfig;
   filename: string;
   content: string;
 }
@@ -244,6 +257,9 @@ export interface SaveFlexTemplateInput {
   samplePreview: unknown;
   headerRowIndex: number;
   dataStartColumnIndex: number;
+  footerMarkerColumnIndex?: number | null;
+  footerMarkerText?: string | null;
+  cashConfig?: CashConfig | null;
   howToUseDescription?: string;
 }
 
@@ -274,6 +290,9 @@ export interface ChangeFlexTemplateInput {
   columnMapping?: ColumnMapping;
   headerRowIndex?: number;
   dataStartColumnIndex?: number;
+  footerMarkerColumnIndex?: number;
+  footerMarkerText?: string;
+  cashConfig?: CashConfig;
   filename: string;
   content: string;
 }

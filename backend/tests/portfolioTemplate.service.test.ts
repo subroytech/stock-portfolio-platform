@@ -3,8 +3,8 @@ jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn(
 import { pool } from '../src/db/pool';
 import {
   listApprovedTemplates, listMyPending, listAllTemplates, getTemplateDetail, getTemplateParseConfig, createTemplate,
-  setTemplateStatus, validateTemplateName, InvalidTemplateNameError, DuplicateTemplateNameError,
-  TemplateNotFoundError,
+  setTemplateStatus, deleteTemplate, validateTemplateName, InvalidTemplateNameError, DuplicateTemplateNameError,
+  TemplateNotFoundError, TemplateStatusError, TemplateInUseError,
 } from '../src/services/portfolioTemplate.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
@@ -94,6 +94,7 @@ describe('getTemplateDetail', () => {
             reviewed_by: 'admin-1', reviewed_at: '2026-08-06T01:00:00Z', sample_preview: [{ symbol: 'AAPL' }],
             created_at: '2026-08-06T00:00:00Z', header_row_index: 3, data_start_column_index: 2,
             how_to_use_description: 'Schwab export — headers on row 3',
+            footer_marker_column_index: 1, footer_marker_text: 'Total',
           }],
         })
         .mockResolvedValueOnce({ rows: [{ target_field: 'symbol', source_header: 'Ticker' }, { target_field: 'quantity', source_header: 'Shares' }] }),
@@ -107,6 +108,7 @@ describe('getTemplateDetail', () => {
       createdAt: '2026-08-06T00:00:00Z', reviewedBy: 'admin-1', reviewedAt: '2026-08-06T01:00:00Z',
       samplePreview: [{ symbol: 'AAPL' }], columnMapping: { symbol: 'Ticker', quantity: 'Shares' },
       headerRowIndex: 3, dataStartColumnIndex: 2, howToUseDescription: 'Schwab export — headers on row 3',
+      footerMarkerColumnIndex: 1, footerMarkerText: 'Total',
     });
     expect(client.release).toHaveBeenCalledTimes(1);
   });
@@ -120,22 +122,25 @@ describe('getTemplateDetail', () => {
 });
 
 describe('getTemplateParseConfig', () => {
-  test('returns the mapping plus header row/data start column reconstructed from master + dtls rows', async () => {
+  test('returns the mapping plus header row/data start column/footer marker reconstructed from master + dtls rows', async () => {
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ header_row_index: 3, data_start_column_index: 2 }] })
+      .mockResolvedValueOnce({ rows: [{ header_row_index: 3, data_start_column_index: 2, footer_marker_column_index: 1, footer_marker_text: 'Total' }] })
       .mockResolvedValueOnce({ rows: [{ target_field: 'symbol', source_header: 'Ticker' }] });
     expect(await getTemplateParseConfig('1')).toEqual({
       columnMapping: { symbol: 'Ticker' }, headerRowIndex: 3, dataStartColumnIndex: 2,
+      footerMarkerColumnIndex: 1, footerMarkerText: 'Total',
     });
   });
 
-  test('defaults to (1, 1) for a pre-migration template row', async () => {
+  test('defaults to (1, 1) and null footer fields for a pre-migration template row', async () => {
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ header_row_index: 1, data_start_column_index: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ header_row_index: 1, data_start_column_index: 1, footer_marker_column_index: null, footer_marker_text: null }] })
       .mockResolvedValueOnce({ rows: [{ target_field: 'symbol', source_header: 'Ticker' }] });
     const result = await getTemplateParseConfig('1');
     expect(result.headerRowIndex).toBe(1);
     expect(result.dataStartColumnIndex).toBe(1);
+    expect(result.footerMarkerColumnIndex).toBeNull();
+    expect(result.footerMarkerText).toBeNull();
   });
 
   test('throws TemplateNotFoundError when the master row does not exist', async () => {
@@ -145,9 +150,11 @@ describe('getTemplateParseConfig', () => {
 
   test('does not incorrectly 404 a template whose mapping is legally empty (existence keyed off the master row, not dtls)', async () => {
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ header_row_index: 1, data_start_column_index: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ header_row_index: 1, data_start_column_index: 1, footer_marker_column_index: null, footer_marker_text: null }] })
       .mockResolvedValueOnce({ rows: [] });
-    expect(await getTemplateParseConfig('1')).toEqual({ columnMapping: {}, headerRowIndex: 1, dataStartColumnIndex: 1 });
+    expect(await getTemplateParseConfig('1')).toEqual({
+      columnMapping: {}, headerRowIndex: 1, dataStartColumnIndex: 1, footerMarkerColumnIndex: null, footerMarkerText: null,
+    });
   });
 });
 
@@ -182,7 +189,7 @@ describe('createTemplate', () => {
     expect(masterSql).toContain('header_row_index');
     expect(masterSql).toContain('data_start_column_index');
     expect(masterSql).toContain('how_to_use_description');
-    expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 1, 1, null]);
+    expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 1, 1, null, null, null, null]);
 
     const [dtlsSql, dtlsParams] = client.query.mock.calls[2];
     expect(dtlsSql).toContain('INSERT INTO m_portfolio_template_mapping_dtls');
@@ -208,7 +215,60 @@ describe('createTemplate', () => {
     expect(result.howToUseDescription).toBe('Schwab export — headers on row 3');
 
     const [, masterParams] = client.query.mock.calls[1];
-    expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 3, 2, 'Schwab export — headers on row 3']);
+    expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 3, 2, 'Schwab export — headers on row 3', null, null, null]);
+  });
+
+  test('persists a footer marker column/text when given', async () => {
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: '3', created_at: '2026-08-06T00:00:00Z' }] }) // master INSERT
+        .mockResolvedValueOnce(undefined) // dtls INSERT
+        .mockResolvedValueOnce(undefined), // COMMIT
+      release: jest.fn(),
+    };
+    mockConnect.mockResolvedValue(client);
+
+    await createTemplate({ ...input, footerMarkerColumnIndex: 1, footerMarkerText: 'Total' });
+
+    const [, masterParams] = client.query.mock.calls[1];
+    expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 1, 1, null, 1, 'Total', null]);
+  });
+
+  test('persists a cash config (separate-column value source) when given', async () => {
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: '4', created_at: '2026-08-06T00:00:00Z' }] }) // master INSERT
+        .mockResolvedValueOnce(undefined) // dtls INSERT
+        .mockResolvedValueOnce(undefined), // COMMIT
+      release: jest.fn(),
+    };
+    mockConnect.mockResolvedValue(client);
+
+    const cashConfig = { markerColumnIndex: 2, markerText: 'CASH & CASH INVESTMENTS', valueSource: { type: 'column' as const, columnIndex: 4 } };
+    await createTemplate({ ...input, cashConfig });
+
+    const [, masterParams] = client.query.mock.calls[1];
+    expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 1, 1, null, null, null, JSON.stringify(cashConfig)]);
+  });
+
+  test('persists a cash config (embedded value source) when given', async () => {
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: '5', created_at: '2026-08-06T00:00:00Z' }] }) // master INSERT
+        .mockResolvedValueOnce(undefined) // dtls INSERT
+        .mockResolvedValueOnce(undefined), // COMMIT
+      release: jest.fn(),
+    };
+    mockConnect.mockResolvedValue(client);
+
+    const cashConfig = { markerColumnIndex: 2, markerText: 'Cash, Money Funds and Bank Deposits', valueSource: { type: 'embedded' as const } };
+    await createTemplate({ ...input, cashConfig });
+
+    const [, masterParams] = client.query.mock.calls[1];
+    expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 1, 1, null, null, null, JSON.stringify(cashConfig)]);
   });
 
   test('rejects an invalid name before ever opening a transaction', async () => {
@@ -244,5 +304,49 @@ describe('setTemplateStatus', () => {
   test('throws TemplateNotFoundError when no row matched', async () => {
     mockQuery.mockResolvedValueOnce({ rowCount: 0 });
     await expect(setTemplateStatus('999', 'Rejected', 'admin-1')).rejects.toThrow(TemplateNotFoundError);
+  });
+});
+
+describe('deleteTemplate', () => {
+  test('throws TemplateNotFoundError when the template does not exist', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // status lookup
+    await expect(deleteTemplate('999')).rejects.toThrow(TemplateNotFoundError);
+  });
+
+  test('blocks deleting an Approved template', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'Approved' }] });
+    await expect(deleteTemplate('1')).rejects.toThrow(TemplateStatusError);
+    expect(mockQuery).toHaveBeenCalledTimes(1); // never even checks in-use, never deletes
+  });
+
+  test('blocks deleting a Pending Approval template still bound to a portfolio', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'Pending Approval' }] }); // status lookup
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // a tx_portfolios row references it
+    await expect(deleteTemplate('1')).rejects.toThrow(TemplateInUseError);
+    expect(mockQuery).toHaveBeenCalledTimes(2); // never reaches the DELETE
+  });
+
+  test('blocks deleting a Rejected template still bound to a portfolio', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'Rejected' }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
+    await expect(deleteTemplate('1')).rejects.toThrow(TemplateInUseError);
+  });
+
+  test('deletes an unreferenced Pending Approval template', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'Pending Approval' }] }); // status lookup
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no portfolio references it
+    mockQuery.mockResolvedValueOnce({}); // DELETE
+    await deleteTemplate('1');
+    expect(mockQuery).toHaveBeenCalledTimes(3);
+    expect(mockQuery.mock.calls[2][0]).toContain('DELETE FROM m_portfolio_template_mapping_master');
+    expect(mockQuery.mock.calls[2][1]).toEqual(['1']);
+  });
+
+  test('deletes an unreferenced Rejected template', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'Rejected' }] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    mockQuery.mockResolvedValueOnce({});
+    await deleteTemplate('1');
+    expect(mockQuery).toHaveBeenCalledTimes(3);
   });
 });

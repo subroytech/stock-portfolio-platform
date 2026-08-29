@@ -23,11 +23,19 @@ const mapping: MappingReadyResult = {
   preview: { preview: true, sourceFormat: 'csv', cashAmount: 0, errors: [], holdings: [{ symbol: 'AAPL', name: '', quantity: 10, purchasePrice: 150, currentPrice: 150, sector: '', purchaseDate: '', costBasis: 1500, currentValue: 1500, gainLoss: 0, returnPct: 0 }] },
   headerRowIndex: 1,
   dataStartColumnIndex: 1,
+  footerMarkerColumnIndex: null,
+  footerMarkerText: null,
+  cashConfig: null,
 };
 
 describe('FlexResolutionBanner', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+  });
+
+  test('the template name field defaults to the portfolio\'s own name, not blank', async () => {
+    renderBanner(mapping);
+    expect(screen.getByTestId('flex-save-template-name')).toHaveValue('My Flex Portfolio');
   });
 
   test('with a session mapping available, Save Template only needs a name and calls onSaved', async () => {
@@ -46,7 +54,25 @@ describe('FlexResolutionBanner', () => {
     const { onSaved } = renderBanner(mapping);
 
     expect(screen.queryByTestId('flex-mapping-file-input')).not.toBeInTheDocument();
+    // The field is pre-filled with the portfolio's name - still editable to give the template
+    // a different, more generic reusable name.
+    await userEvent.clear(screen.getByTestId('flex-save-template-name'));
     await userEvent.type(screen.getByTestId('flex-save-template-name'), 'Schwab Export');
+    await userEvent.click(screen.getByTestId('flex-save-template-submit'));
+    expect(onSaved).toHaveBeenCalled();
+  });
+
+  test('saving without editing the pre-filled name uses the portfolio\'s own name as the template name', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
+      if (url === '/portfolios/p1/flex-template' && options?.method === 'POST') {
+        const body = JSON.parse(options.body as string);
+        expect(body.templateName).toBe('My Flex Portfolio');
+        return Promise.resolve({ portfolio: { id: 'p1', flexTemplateStatus: 'Flex' }, template: { id: 't1', templateName: 'My Flex Portfolio', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1', howToUseDescription: null } });
+      }
+      return Promise.resolve({});
+    });
+    const { onSaved } = renderBanner(mapping);
+
     await userEvent.click(screen.getByTestId('flex-save-template-submit'));
     expect(onSaved).toHaveBeenCalled();
   });

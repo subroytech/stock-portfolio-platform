@@ -3,11 +3,13 @@
 
 import { PoolClient } from 'pg';
 import { pool } from '../db/pool';
-import { ColumnMapping, ALL_TARGET_FIELDS } from './flexParser.service';
+import { ColumnMapping, ALL_TARGET_FIELDS, CashConfig } from './flexParser.service';
 
 export class DuplicateTemplateNameError extends Error {}
 export class InvalidTemplateNameError extends Error {}
 export class TemplateNotFoundError extends Error {}
+export class TemplateStatusError extends Error {}
+export class TemplateInUseError extends Error {}
 
 const UNIQUE_VIOLATION = '23505';
 
@@ -29,6 +31,9 @@ export interface TemplateDetail extends TemplateSummary {
   columnMapping: ColumnMapping;
   headerRowIndex: number;
   dataStartColumnIndex: number;
+  footerMarkerColumnIndex: number | null;
+  footerMarkerText: string | null;
+  cashConfig: CashConfig | null;
 }
 
 // Trimmed non-empty, a minimum length, and at least one letter - blocks junk like "123" or
@@ -99,9 +104,12 @@ export async function getTemplateDetail(templateId: string): Promise<TemplateDet
       id: string; template_name: string; status: TemplateStatus; created_by: string | null;
       reviewed_by: string | null; reviewed_at: string | null; sample_preview: unknown; created_at: string;
       header_row_index: number; data_start_column_index: number; how_to_use_description: string | null;
+      footer_marker_column_index: number | null; footer_marker_text: string | null;
+      cash_config: CashConfig | null;
     }>(
       `SELECT id, template_name, status, created_by, reviewed_by, reviewed_at, sample_preview, created_at,
-              header_row_index, data_start_column_index, how_to_use_description
+              header_row_index, data_start_column_index, how_to_use_description,
+              footer_marker_column_index, footer_marker_text, cash_config
        FROM m_portfolio_template_mapping_master WHERE id = $1`,
       [templateId],
     );
@@ -120,6 +128,8 @@ export async function getTemplateDetail(templateId: string): Promise<TemplateDet
       samplePreview: master.sample_preview, columnMapping,
       headerRowIndex: master.header_row_index, dataStartColumnIndex: master.data_start_column_index,
       howToUseDescription: master.how_to_use_description,
+      footerMarkerColumnIndex: master.footer_marker_column_index, footerMarkerText: master.footer_marker_text,
+      cashConfig: master.cash_config,
     };
   } finally {
     client.release();
@@ -130,6 +140,9 @@ export interface TemplateParseConfig {
   columnMapping: ColumnMapping;
   headerRowIndex: number;
   dataStartColumnIndex: number;
+  footerMarkerColumnIndex: number | null;
+  footerMarkerText: string | null;
+  cashConfig: CashConfig | null;
 }
 
 // What real-upload call sites (createPortfolioFlex/changeFlexTemplate/the dryRun preview) need
@@ -138,8 +151,13 @@ export interface TemplateParseConfig {
 // admin-review-only fields. Was named getTemplateMapping before header_row_index/
 // data_start_column_index existed - renamed since "just the mapping" is no longer accurate.
 export async function getTemplateParseConfig(templateId: string): Promise<TemplateParseConfig> {
-  const { rows: masterRows } = await pool.query<{ header_row_index: number; data_start_column_index: number }>(
-    'SELECT header_row_index, data_start_column_index FROM m_portfolio_template_mapping_master WHERE id = $1',
+  const { rows: masterRows } = await pool.query<{
+    header_row_index: number; data_start_column_index: number;
+    footer_marker_column_index: number | null; footer_marker_text: string | null;
+    cash_config: CashConfig | null;
+  }>(
+    `SELECT header_row_index, data_start_column_index, footer_marker_column_index, footer_marker_text, cash_config
+     FROM m_portfolio_template_mapping_master WHERE id = $1`,
     [templateId],
   );
   if (!masterRows[0]) throw new TemplateNotFoundError(`No template found with id ${templateId}.`);
@@ -153,6 +171,9 @@ export async function getTemplateParseConfig(templateId: string): Promise<Templa
     columnMapping: Object.fromEntries(dtlsRows.map((r) => [r.target_field, r.source_header])),
     headerRowIndex: masterRows[0].header_row_index,
     dataStartColumnIndex: masterRows[0].data_start_column_index,
+    footerMarkerColumnIndex: masterRows[0].footer_marker_column_index,
+    footerMarkerText: masterRows[0].footer_marker_text,
+    cashConfig: masterRows[0].cash_config,
   };
 }
 
@@ -164,6 +185,9 @@ export interface CreateTemplateInput {
   headerRowIndex: number;
   dataStartColumnIndex: number;
   howToUseDescription?: string | null;
+  footerMarkerColumnIndex?: number | null;
+  footerMarkerText?: string | null;
+  cashConfig?: CashConfig | null;
 }
 
 // Save Template - master + dtls rows, always lands at 'Pending Approval'. Only ever called
@@ -188,9 +212,14 @@ export async function createTemplate(input: CreateTemplateInput, client?: PoolCl
     try {
       const { rows } = await conn.query<{ id: string; created_at: string }>(
         `INSERT INTO m_portfolio_template_mapping_master
-           (template_name, created_by, sample_preview, header_row_index, data_start_column_index, how_to_use_description)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at`,
-        [templateName, input.createdBy, JSON.stringify(input.samplePreview), input.headerRowIndex, input.dataStartColumnIndex, input.howToUseDescription ?? null],
+           (template_name, created_by, sample_preview, header_row_index, data_start_column_index, how_to_use_description,
+            footer_marker_column_index, footer_marker_text, cash_config)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, created_at`,
+        [
+          templateName, input.createdBy, JSON.stringify(input.samplePreview), input.headerRowIndex, input.dataStartColumnIndex,
+          input.howToUseDescription ?? null, input.footerMarkerColumnIndex ?? null, input.footerMarkerText ?? null,
+          input.cashConfig != null ? JSON.stringify(input.cashConfig) : null,
+        ],
       );
       masterRow = rows[0];
     } catch (err) {
@@ -231,4 +260,34 @@ export async function setTemplateStatus(templateId: string, status: 'Approved' |
     [status, reviewedBy, templateId],
   );
   if (!rowCount) throw new TemplateNotFoundError(`No template found with id ${templateId}.`);
+}
+
+// Hard delete, restricted to Rejected/Pending Approval - never Approved (templates in active
+// use for new uploads are never removable this way, only via status change). Blocks deletion
+// while any tx_portfolios row still references this template via upload_template_id - same
+// "still in use" guard as roles.service.ts's deleteRole() blocking a role still assigned to a
+// user. Necessary, not just precautionary: a Pending Approval template can be actively bound
+// the moment Save Template creates it, and the FK is ON DELETE SET NULL (not RESTRICT), so
+// deleting it wouldn't error at the DB level - it would silently violate the documented
+// invariant flex_template_status = 'Flex' <=> upload_template_id IS NOT NULL for that portfolio.
+// _dtls rows cascade automatically (ON DELETE CASCADE, migration 022).
+export async function deleteTemplate(templateId: string): Promise<void> {
+  const { rows } = await pool.query<{ status: TemplateStatus }>(
+    'SELECT status FROM m_portfolio_template_mapping_master WHERE id = $1',
+    [templateId],
+  );
+  if (!rows[0]) throw new TemplateNotFoundError(`No template found with id ${templateId}.`);
+  if (rows[0].status === 'Approved') {
+    throw new TemplateStatusError('An Approved template cannot be deleted - reject it first if it should no longer be used.');
+  }
+
+  const { rows: inUseRows } = await pool.query(
+    'SELECT 1 FROM tx_portfolios WHERE upload_template_id = $1 LIMIT 1',
+    [templateId],
+  );
+  if (inUseRows[0]) {
+    throw new TemplateInUseError('Cannot delete a template that is still bound to an existing portfolio.');
+  }
+
+  await pool.query('DELETE FROM m_portfolio_template_mapping_master WHERE id = $1', [templateId]);
 }

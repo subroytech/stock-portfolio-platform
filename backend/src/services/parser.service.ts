@@ -72,6 +72,18 @@ function findHeaderRowIndex(rows: string[][]): number {
 // regardless of how `map` (field -> column index) got built, so Flex produces
 // byte-identical HoldingEntry output using this same, already-tested logic rather
 // than a parallel implementation.
+// handles "(123.45)" as -123.45 — Pending Activity/cash-equivalent balances can be net
+// negative. Exported so flexParser.service.ts's cash-marker detection reuses the exact same
+// parenthetical-negative parsing instead of duplicating it.
+export function parseCashAmt(v: unknown): number | null {
+  if (v == null) return null;
+  let s = String(v).trim();
+  let neg = false;
+  if (/^\(.*\)$/.test(s)) { neg = true; s = s.slice(1, -1); }
+  const n = parseNum(s);
+  return n == null ? null : (neg ? -Math.abs(n) : n);
+}
+
 export function buildHoldingsFromMappedRows(rows: Record<string, string>[], map: Record<string, number>): ParseResult {
   const hasPurchasePrice = 'purchasePrice' in map;
   const hasMarketValue = 'marketValue' in map;
@@ -80,16 +92,6 @@ export function buildHoldingsFromMappedRows(rows: Record<string, string>[], map:
   const data: HoldingEntry[] = [];
   const errors: string[] = [];
   let cashTotal = 0;
-
-  // handles "(123.45)" as -123.45 — Pending Activity can be net negative
-  function parseCashAmt(v: unknown): number | null {
-    if (v == null) return null;
-    let s = String(v).trim();
-    let neg = false;
-    if (/^\(.*\)$/.test(s)) { neg = true; s = s.slice(1, -1); }
-    const n = parseNum(s);
-    return n == null ? null : (neg ? -Math.abs(n) : n);
-  }
 
   rows.forEach((row, i) => {
     const vals = Object.values(row);

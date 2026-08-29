@@ -257,6 +257,15 @@ describe('POST /portfolios/flex', () => {
     expect(mockCreatePortfolioFlex).not.toHaveBeenCalled();
   });
 
+  test('dryRun: true 400s a brand-new-mapping sample file over the template size limit', async () => {
+    const oversizedCsv = new Array(203).fill('a,b,c').join('\n');
+    const res = await request(app).post('/portfolios/flex').set('Cookie', authCookie).send({
+      columnMapping: { symbol: 'Ticker', quantity: 'Shares', currentPrice: 'Price' }, filename: 'f.csv', content: oversizedCsv, dryRun: true,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('at most 202 rows');
+  });
+
   test('dryRun: true 400s when the mapping does not match the file headers', async () => {
     const res = await request(app).post('/portfolios/flex').set('Cookie', authCookie).send({
       columnMapping: { symbol: 'Nope', quantity: 'Shares', currentPrice: 'Price' }, filename: 'f.csv', content: 'Ticker,Shares,Price\nAAPL,10,150', dryRun: true,
@@ -299,7 +308,8 @@ describe('POST /portfolios/:id/flex-template', () => {
     expect(res.status).toBe(200);
     expect(res.body.portfolio.flexTemplateStatus).toBe('Flex');
     expect(mockSaveFlexTemplate).toHaveBeenCalledWith('user-1', '1', {
-      ...validBody, headerRowIndex: 1, dataStartColumnIndex: 1, howToUseDescription: undefined,
+      ...validBody, headerRowIndex: 1, dataStartColumnIndex: 1, footerMarkerColumnIndex: null, footerMarkerText: null,
+      cashConfig: null, howToUseDescription: undefined,
     });
   });
 

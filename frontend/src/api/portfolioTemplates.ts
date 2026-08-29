@@ -7,6 +7,20 @@ export type TemplateStatus = 'Pending Approval' | 'Approved' | 'Rejected';
 // ColumnMapping wire shape exactly.
 export type ColumnMapping = Record<string, string>;
 
+// Mirrors backend/src/services/flexParser.service.ts's CashConfig/CashValueSource exactly - a
+// discriminated union so Pattern #1 (separate value column) and Pattern #2 (value fused into
+// the marker cell itself) can be added/extended without another migration each time. Omitting
+// valueSource entirely means the implicit fallback: quantity x currentPrice.
+export type CashValueSource =
+  | { type: 'column'; columnIndex: number }
+  | { type: 'embedded' };
+
+export interface CashConfig {
+  markerColumnIndex: number;
+  markerText: string;
+  valueSource?: CashValueSource;
+}
+
 export interface TemplateSummary {
   id: string;
   templateName: string;
@@ -23,6 +37,9 @@ export interface TemplateDetail extends TemplateSummary {
   columnMapping: ColumnMapping;
   headerRowIndex: number;
   dataStartColumnIndex: number;
+  footerMarkerColumnIndex: number | null;
+  footerMarkerText: string | null;
+  cashConfig: CashConfig | null;
 }
 
 export const MANDATORY_TARGET_FIELDS = ['symbol', 'quantity', 'currentPrice'] as const;
@@ -86,6 +103,80 @@ export function useSetTemplateStatus() {
     }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['portfolioTemplates'] });
+    },
+  });
+}
+
+// DELETE /portfolio-templates/:id — Admin Console approval screen only. Hard delete, only
+// valid while Rejected/Pending Approval and not bound to any portfolio (backend enforces both
+// - 409 otherwise).
+export function useDeleteTemplate() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiFetch<{ success: true }>(`/portfolio-templates/${id}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['portfolioTemplates'] });
+    },
+  });
+}
+
+// The "bound portfolios" pop-up - shown when the Delete above 409s because the template is
+// still in use. Resolves by deleting the specific portfolios blocking it (never a cascade -
+// see CLAUDE.md's "Portfolio Template delete" note), one explicit admin action at a time.
+export interface BoundPortfolio {
+  id: string;
+  name: string;
+  ownerEmail: string;
+  createdAt: string;
+}
+
+export function useBoundPortfolios(templateId: string | null) {
+  return useQuery({
+    queryKey: ['portfolioTemplates', 'boundPortfolios', templateId],
+    queryFn: () => apiFetch<{ portfolios: BoundPortfolio[] }>(`/portfolio-templates/${templateId}/bound-portfolios`).then((r) => r.portfolios),
+    enabled: templateId !== null,
+  });
+}
+
+// Deletes a portfolio the admin doesn't own, but only one still bound to this specific template
+// - the backend enforces that scoping itself (404 otherwise), this isn't just a UI convention.
+export function useDeleteBoundPortfolio(templateId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (portfolioId: string) => apiFetch<{ success: true }>(`/portfolio-templates/${templateId}/bound-portfolios/${portfolioId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['portfolioTemplates', 'boundPortfolios', templateId] });
+    },
+  });
+}
+
+// The other half of this screen's template-health concern: Flex portfolios stuck in
+// 'Flex-Err' (created via Flex, but the owning user never completed Save Template or Delete
+// Portfolio) - otherwise visible to no one but that one user, forever, if they abandon it.
+export interface UnattachedFlexPortfolio {
+  id: string;
+  name: string;
+  ownerEmail: string;
+  createdAt: string;
+  holdingsCount: number;
+  cashAmount: number;
+}
+
+export function useUnattachedFlexPortfolios() {
+  return useQuery({
+    queryKey: ['portfolioTemplates', 'unattachedPortfolios'],
+    queryFn: () => apiFetch<{ portfolios: UnattachedFlexPortfolio[] }>('/portfolio-templates/unattached-portfolios').then((r) => r.portfolios),
+  });
+}
+
+// Deletes a portfolio the admin doesn't own, but only one still genuinely stuck in 'Flex-Err'
+// - the backend enforces that scoping itself (404 otherwise), this isn't just a UI convention.
+export function useDeleteUnattachedFlexPortfolio() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (portfolioId: string) => apiFetch<{ success: true }>(`/portfolio-templates/unattached-portfolios/${portfolioId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['portfolioTemplates', 'unattachedPortfolios'] });
     },
   });
 }

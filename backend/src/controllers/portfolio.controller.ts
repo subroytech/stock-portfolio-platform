@@ -154,7 +154,11 @@ export async function importHoldings(req: Request, res: Response, next: NextFunc
 const PARSE_ERROR_PATTERN = /CSV appears to be empty|No valid rows found|row .* is out of range|column .* is out of range/;
 
 export async function createFlex(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const { name, broker, uploadTemplateId, columnMapping, headerRowIndex, dataStartColumnIndex, filename, content, dryRun } = req.body || {};
+  const {
+    name, broker, uploadTemplateId, columnMapping, headerRowIndex, dataStartColumnIndex,
+    footerMarkerColumnIndex, footerMarkerText, cashConfig,
+    filename, content, dryRun,
+  } = req.body || {};
   if (typeof content !== 'string' || !content.trim()) {
     res.status(400).json({ error: 'File content is required.' });
     return;
@@ -176,19 +180,32 @@ export async function createFlex(req: Request, res: Response, next: NextFunction
       let mapping: flexParser.ColumnMapping;
       let effectiveHeaderRowIndex: number;
       let effectiveDataStartColumnIndex: number;
+      let effectiveFooterMarkerColumnIndex: number | undefined;
+      let effectiveFooterMarkerText: string | undefined;
+      let effectiveCashConfig: flexParser.CashConfig | undefined;
       if (hasTemplateId) {
         const config = await portfolioTemplateService.getTemplateParseConfig(uploadTemplateId.trim());
         mapping = config.columnMapping;
         effectiveHeaderRowIndex = config.headerRowIndex;
         effectiveDataStartColumnIndex = config.dataStartColumnIndex;
+        effectiveFooterMarkerColumnIndex = config.footerMarkerColumnIndex ?? undefined;
+        effectiveFooterMarkerText = config.footerMarkerText ?? undefined;
+        effectiveCashConfig = config.cashConfig ?? undefined;
       } else {
+        flexParser.assertWithinTemplateSampleLimit(content);
         mapping = columnMapping;
         effectiveHeaderRowIndex = typeof headerRowIndex === 'number' ? headerRowIndex : 1;
         effectiveDataStartColumnIndex = typeof dataStartColumnIndex === 'number' ? dataStartColumnIndex : 1;
+        effectiveFooterMarkerColumnIndex = typeof footerMarkerColumnIndex === 'number' ? footerMarkerColumnIndex : undefined;
+        effectiveFooterMarkerText = typeof footerMarkerText === 'string' ? footerMarkerText : undefined;
+        effectiveCashConfig = flexParser.coerceCashConfig(cashConfig);
       }
       const parsed = flexParser.parseFlexCsv(content, mapping, {
         headerRowIndex: effectiveHeaderRowIndex,
         dataStartColumnIndex: effectiveDataStartColumnIndex,
+        footerMarkerColumnIndex: effectiveFooterMarkerColumnIndex,
+        footerMarkerText: effectiveFooterMarkerText,
+        cashConfig: effectiveCashConfig,
       });
       res.json({ preview: true, holdings: parsed.data, cashAmount: parsed.cashAmount, errors: parsed.errors });
     } catch (err) {
@@ -196,7 +213,7 @@ export async function createFlex(req: Request, res: Response, next: NextFunction
         res.status(404).json({ error: err.message });
         return;
       }
-      if (err instanceof flexParser.FlexMappingMismatchError) {
+      if (err instanceof flexParser.FlexMappingMismatchError || err instanceof flexParser.TemplateSampleTooLargeError) {
         res.status(400).json({ error: err.message });
         return;
       }
@@ -222,6 +239,9 @@ export async function createFlex(req: Request, res: Response, next: NextFunction
       columnMapping: hasMapping ? columnMapping : undefined,
       headerRowIndex: typeof headerRowIndex === 'number' ? headerRowIndex : undefined,
       dataStartColumnIndex: typeof dataStartColumnIndex === 'number' ? dataStartColumnIndex : undefined,
+      footerMarkerColumnIndex: typeof footerMarkerColumnIndex === 'number' ? footerMarkerColumnIndex : undefined,
+      footerMarkerText: typeof footerMarkerText === 'string' ? footerMarkerText : undefined,
+      cashConfig: flexParser.coerceCashConfig(cashConfig),
       filename: typeof filename === 'string' ? filename : '',
       content,
     });
@@ -235,7 +255,7 @@ export async function createFlex(req: Request, res: Response, next: NextFunction
       res.status(404).json({ error: err.message });
       return;
     }
-    if (err instanceof flexParser.FlexMappingMismatchError) {
+    if (err instanceof flexParser.FlexMappingMismatchError || err instanceof flexParser.TemplateSampleTooLargeError) {
       res.status(400).json({ error: err.message });
       return;
     }
@@ -250,7 +270,11 @@ export async function createFlex(req: Request, res: Response, next: NextFunction
 // POST /portfolios/:id/flex-template - the forced Save Template action, only valid while the
 // portfolio is genuinely unresolved ('Flex-Err').
 export async function saveFlexTemplate(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const { templateName, columnMapping, samplePreview, headerRowIndex, dataStartColumnIndex, howToUseDescription } = req.body || {};
+  const {
+    templateName, columnMapping, samplePreview, headerRowIndex, dataStartColumnIndex,
+    footerMarkerColumnIndex, footerMarkerText, cashConfig,
+    howToUseDescription,
+  } = req.body || {};
   if (typeof templateName !== 'string' || !templateName.trim()) {
     res.status(400).json({ error: 'A templateName is required.' });
     return;
@@ -267,6 +291,9 @@ export async function saveFlexTemplate(req: Request, res: Response, next: NextFu
       samplePreview,
       headerRowIndex: typeof headerRowIndex === 'number' ? headerRowIndex : 1,
       dataStartColumnIndex: typeof dataStartColumnIndex === 'number' ? dataStartColumnIndex : 1,
+      footerMarkerColumnIndex: typeof footerMarkerColumnIndex === 'number' ? footerMarkerColumnIndex : null,
+      footerMarkerText: typeof footerMarkerText === 'string' ? footerMarkerText : null,
+      cashConfig: flexParser.coerceCashConfig(cashConfig) ?? null,
       howToUseDescription: typeof howToUseDescription === 'string' ? howToUseDescription : undefined,
     });
     res.json(result);
@@ -294,7 +321,11 @@ export async function saveFlexTemplate(req: Request, res: Response, next: NextFu
 // PUT /portfolios/:id/flex-template - change an already-resolved portfolio's bound template.
 // Always re-imports against the new mapping/template first.
 export async function changeFlexTemplate(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const { uploadTemplateId, columnMapping, headerRowIndex, dataStartColumnIndex, filename, content } = req.body || {};
+  const {
+    uploadTemplateId, columnMapping, headerRowIndex, dataStartColumnIndex,
+    footerMarkerColumnIndex, footerMarkerText, cashConfig,
+    filename, content,
+  } = req.body || {};
   if (typeof content !== 'string' || !content.trim()) {
     res.status(400).json({ error: 'File content is required.' });
     return;
@@ -312,6 +343,9 @@ export async function changeFlexTemplate(req: Request, res: Response, next: Next
       columnMapping: hasMapping ? columnMapping : undefined,
       headerRowIndex: typeof headerRowIndex === 'number' ? headerRowIndex : undefined,
       dataStartColumnIndex: typeof dataStartColumnIndex === 'number' ? dataStartColumnIndex : undefined,
+      footerMarkerColumnIndex: typeof footerMarkerColumnIndex === 'number' ? footerMarkerColumnIndex : undefined,
+      footerMarkerText: typeof footerMarkerText === 'string' ? footerMarkerText : undefined,
+      cashConfig: flexParser.coerceCashConfig(cashConfig),
       filename: typeof filename === 'string' ? filename : '',
       content,
     });
@@ -323,6 +357,10 @@ export async function changeFlexTemplate(req: Request, res: Response, next: Next
     }
     if (err instanceof portfolioService.FlexTemplateStateError) {
       res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof flexParser.TemplateSampleTooLargeError) {
+      res.status(400).json({ error: err.message });
       return;
     }
     if (err instanceof portfolioTemplateService.TemplateNotFoundError) {

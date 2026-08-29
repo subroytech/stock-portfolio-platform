@@ -22,7 +22,11 @@ interface FlexResolutionBannerProps {
 // unresolved" path - this banner stays up until one of the two happens.
 export default function FlexResolutionBanner({ portfolioId, portfolioName, sessionMapping, onSaved, onDeleted }: FlexResolutionBannerProps) {
   const [remapping, setRemapping] = useState<MappingReadyResult | null>(sessionMapping);
-  const [templateName, setTemplateName] = useState('');
+  // Defaults to the portfolio's own name rather than starting blank - the portfolio name was
+  // just typed one step earlier, and re-typing it for the template felt like being asked the
+  // same thing twice. Still fully editable, e.g. to give the template a more generic reusable
+  // name than this one specific portfolio's.
+  const [templateName, setTemplateName] = useState(portfolioName);
   const [howToUseDescription, setHowToUseDescription] = useState('');
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const saveTemplate = useSaveFlexTemplate(portfolioId);
@@ -36,6 +40,9 @@ export default function FlexResolutionBanner({ portfolioId, portfolioName, sessi
       samplePreview: remapping.preview.holdings.slice(0, 5),
       headerRowIndex: remapping.headerRowIndex,
       dataStartColumnIndex: remapping.dataStartColumnIndex,
+      footerMarkerColumnIndex: remapping.footerMarkerColumnIndex,
+      footerMarkerText: remapping.footerMarkerText,
+      cashConfig: remapping.cashConfig,
       howToUseDescription: howToUseDescription.trim() || undefined,
     });
     onSaved();

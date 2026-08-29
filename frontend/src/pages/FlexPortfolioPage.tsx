@@ -91,6 +91,9 @@ export default function FlexPortfolioPage() {
           content: wizardResult.content,
           headerRowIndex: wizardResult.headerRowIndex,
           dataStartColumnIndex: wizardResult.dataStartColumnIndex,
+          footerMarkerColumnIndex: wizardResult.footerMarkerColumnIndex ?? undefined,
+          footerMarkerText: wizardResult.footerMarkerText ?? undefined,
+          cashConfig: wizardResult.cashConfig ?? undefined,
         });
 
     if (!result) return;
@@ -126,6 +129,9 @@ export default function FlexPortfolioPage() {
       columnMapping: result.columnMapping,
       headerRowIndex: result.headerRowIndex,
       dataStartColumnIndex: result.dataStartColumnIndex,
+      footerMarkerColumnIndex: result.footerMarkerColumnIndex ?? undefined,
+      footerMarkerText: result.footerMarkerText ?? undefined,
+      cashConfig: result.cashConfig ?? undefined,
       filename: result.filename,
       content: result.content,
     });
@@ -165,7 +171,7 @@ export default function FlexPortfolioPage() {
           ))}
           <button
             type="button"
-            onClick={() => setCreateStep('picker')}
+            onClick={() => { setSelectedId(null); setCreateStep('picker'); }}
             data-testid="flex-new-portfolio-button"
             className="rounded-btn border border-dashed border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-primary"
           >
