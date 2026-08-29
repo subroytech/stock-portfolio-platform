@@ -1,4 +1,12 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
+// This file's total real request count now exceeds the default 30-per-user/60s limit
+// (express-rate-limit's in-memory store persists across every test in this file, all using the
+// same authCookie/user id) - not something these tests are meant to exercise, so bypass it here
+// rather than tune the real limiter's config. Same precedent as portfolio.controller.test.ts.
+jest.mock('../src/middleware/rateLimit', () => ({
+  __esModule: true,
+  default: [(_req: unknown, _res: unknown, next: () => void) => next(), (_req: unknown, _res: unknown, next: () => void) => next()],
+}));
 jest.mock('../src/services/portfolioTemplate.service', () => ({
   ...jest.requireActual('../src/services/portfolioTemplate.service'),
   listApprovedTemplates: jest.fn(),
@@ -7,11 +15,20 @@ jest.mock('../src/services/portfolioTemplate.service', () => ({
   createTemplate: jest.fn(),
   setTemplateStatus: jest.fn(),
   getTemplateDetail: jest.fn(),
+  deleteTemplate: jest.fn(),
+}));
+jest.mock('../src/services/portfolio.service', () => ({
+  ...jest.requireActual('../src/services/portfolio.service'),
+  listBoundPortfolios: jest.fn(),
+  deleteBoundPortfolio: jest.fn(),
+  listUnattachedFlexPortfolios: jest.fn(),
+  deleteUnattachedFlexPortfolio: jest.fn(),
 }));
 
 import request from 'supertest';
 import { pool } from '../src/db/pool';
 import * as portfolioTemplateService from '../src/services/portfolioTemplate.service';
+import * as portfolioService from '../src/services/portfolio.service';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
 
@@ -22,6 +39,11 @@ const mockListAll = portfolioTemplateService.listAllTemplates as jest.Mock;
 const mockCreate = portfolioTemplateService.createTemplate as jest.Mock;
 const mockSetStatus = portfolioTemplateService.setTemplateStatus as jest.Mock;
 const mockGetDetail = portfolioTemplateService.getTemplateDetail as jest.Mock;
+const mockDelete = portfolioTemplateService.deleteTemplate as jest.Mock;
+const mockListBoundPortfolios = portfolioService.listBoundPortfolios as jest.Mock;
+const mockDeleteBoundPortfolio = portfolioService.deleteBoundPortfolio as jest.Mock;
+const mockListUnattached = portfolioService.listUnattachedFlexPortfolios as jest.Mock;
+const mockDeleteUnattached = portfolioService.deleteUnattachedFlexPortfolio as jest.Mock;
 
 const authCookie = `auth_token=${signToken('user-1')}`;
 
@@ -34,6 +56,11 @@ beforeEach(() => {
   mockCreate.mockReset();
   mockSetStatus.mockReset();
   mockGetDetail.mockReset();
+  mockDelete.mockReset();
+  mockListBoundPortfolios.mockReset();
+  mockDeleteBoundPortfolio.mockReset();
+  mockListUnattached.mockReset();
+  mockDeleteUnattached.mockReset();
 });
 
 describe('GET /portfolio-templates', () => {
@@ -116,7 +143,8 @@ describe('POST /portfolio-templates', () => {
     expect(res.status).toBe(201);
     expect(mockCreate).toHaveBeenCalledWith({
       templateName: 'Fidelity CSV', columnMapping: { symbol: 'Ticker' }, samplePreview: [], createdBy: 'user-1',
-      headerRowIndex: 1, dataStartColumnIndex: 1, howToUseDescription: undefined,
+      headerRowIndex: 1, dataStartColumnIndex: 1, footerMarkerColumnIndex: null, footerMarkerText: null,
+      cashConfig: null, howToUseDescription: undefined,
     });
   });
 
@@ -165,5 +193,121 @@ describe('GET /portfolio-templates/:id', () => {
     mockGetDetail.mockRejectedValue(new portfolioTemplateService.TemplateNotFoundError('gone'));
     const res = await request(app).get('/portfolio-templates/999').set('Cookie', authCookie);
     expect(res.status).toBe(404);
+  });
+});
+
+describe('DELETE /portfolio-templates/:id', () => {
+  test('200 on success', async () => {
+    mockDelete.mockResolvedValue(undefined);
+    const res = await request(app).delete('/portfolio-templates/1').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(mockDelete).toHaveBeenCalledWith('1');
+  });
+
+  test('404 when not found', async () => {
+    mockDelete.mockRejectedValue(new portfolioTemplateService.TemplateNotFoundError('gone'));
+    const res = await request(app).delete('/portfolio-templates/999').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+  });
+
+  test('409 when the template is Approved', async () => {
+    mockDelete.mockRejectedValue(new portfolioTemplateService.TemplateStatusError('cannot delete an Approved template'));
+    const res = await request(app).delete('/portfolio-templates/1').set('Cookie', authCookie);
+    expect(res.status).toBe(409);
+  });
+
+  test('409 when the template is still bound to a portfolio', async () => {
+    mockDelete.mockRejectedValue(new portfolioTemplateService.TemplateInUseError('still bound'));
+    const res = await request(app).delete('/portfolio-templates/1').set('Cookie', authCookie);
+    expect(res.status).toBe(409);
+  });
+
+  test('403 without portfolio_template:manage_status', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).delete('/portfolio-templates/1').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(mockDelete).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /portfolio-templates/:id/bound-portfolios', () => {
+  test('200 with the bound portfolio list', async () => {
+    mockListBoundPortfolios.mockResolvedValue([{ id: 'p1', name: 'Charles-Schwab', ownerEmail: 'a@b.com', createdAt: '2026-08-06T00:00:00Z' }]);
+    const res = await request(app).get('/portfolio-templates/1/bound-portfolios').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.portfolios).toHaveLength(1);
+    expect(mockListBoundPortfolios).toHaveBeenCalledWith('1');
+  });
+
+  test('403 without portfolio_template:manage_status', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).get('/portfolio-templates/1/bound-portfolios').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(mockListBoundPortfolios).not.toHaveBeenCalled();
+  });
+});
+
+describe('DELETE /portfolio-templates/:id/bound-portfolios/:portfolioId', () => {
+  test('200 on success', async () => {
+    mockDeleteBoundPortfolio.mockResolvedValue(true);
+    const res = await request(app).delete('/portfolio-templates/1/bound-portfolios/p1').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(mockDeleteBoundPortfolio).toHaveBeenCalledWith('1', 'p1');
+  });
+
+  test('404 when the portfolio is not bound to this template (or does not exist)', async () => {
+    mockDeleteBoundPortfolio.mockResolvedValue(false);
+    const res = await request(app).delete('/portfolio-templates/1/bound-portfolios/p1').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+  });
+
+  test('403 without portfolio_template:manage_status', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).delete('/portfolio-templates/1/bound-portfolios/p1').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(mockDeleteBoundPortfolio).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /portfolio-templates/unattached-portfolios', () => {
+  test('200 with the unattached Flex portfolio list', async () => {
+    mockListUnattached.mockResolvedValue([{ id: 'p1', name: 'Abandoned', ownerEmail: 'a@b.com', createdAt: '2026-08-28T00:00:00Z', holdingsCount: 3, cashAmount: 0 }]);
+    const res = await request(app).get('/portfolio-templates/unattached-portfolios').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.portfolios).toHaveLength(1);
+  });
+
+  test('403 without portfolio_template:manage_status', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).get('/portfolio-templates/unattached-portfolios').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(mockListUnattached).not.toHaveBeenCalled();
+  });
+});
+
+describe('DELETE /portfolio-templates/unattached-portfolios/:portfolioId', () => {
+  test('200 on success', async () => {
+    mockDeleteUnattached.mockResolvedValue(true);
+    const res = await request(app).delete('/portfolio-templates/unattached-portfolios/p1').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(mockDeleteUnattached).toHaveBeenCalledWith('p1');
+  });
+
+  test('404 when the portfolio is already resolved (or does not exist)', async () => {
+    mockDeleteUnattached.mockResolvedValue(false);
+    const res = await request(app).delete('/portfolio-templates/unattached-portfolios/p1').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+  });
+
+  test('403 without portfolio_template:manage_status', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).delete('/portfolio-templates/unattached-portfolios/p1').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(mockDeleteUnattached).not.toHaveBeenCalled();
   });
 });

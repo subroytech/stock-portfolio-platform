@@ -23,10 +23,12 @@ import * as userSubscription from '../src/services/userSubscription.service';
 import * as portfolioTemplateService from '../src/services/portfolioTemplate.service';
 import {
   listPortfolios, createPortfolio, getPortfolio, updatePortfolio, deletePortfolio,
+  listBoundPortfolios, deleteBoundPortfolio, listUnattachedFlexPortfolios, deleteUnattachedFlexPortfolio,
   importHoldings, refreshPrices, createPortfolioFlex, saveFlexTemplate, changeFlexTemplate,
   PortfolioNotFoundError, PortfolioNameConflictError, FlexTemplateStateError,
 } from '../src/services/portfolio.service';
 import { ParseResult, HoldingEntry } from '../src/services/parser.service';
+import { TemplateSampleTooLargeError, MAX_TEMPLATE_SAMPLE_LINES } from '../src/services/flexParser.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockConnect = pool.connect as unknown as jest.Mock;
@@ -156,6 +158,71 @@ describe('deletePortfolio', () => {
   test('returns false when nothing matched', async () => {
     mockQuery.mockResolvedValue({ rows: [] });
     expect(await deletePortfolio('user-1', '1')).toBe(false);
+  });
+});
+
+describe('listBoundPortfolios', () => {
+  test('maps DB rows including the joined owner email', async () => {
+    mockQuery.mockResolvedValue({
+      rows: [{ id: 'p1', name: 'Charles-Schwab', owner_email: 'a@b.com', created_at: 't1' }],
+    });
+    const result = await listBoundPortfolios('template-1');
+    expect(result).toEqual([{ id: 'p1', name: 'Charles-Schwab', ownerEmail: 'a@b.com', createdAt: 't1' }]);
+  });
+
+  test('returns an empty array when nothing is bound', async () => {
+    mockQuery.mockResolvedValue({ rows: [] });
+    expect(await listBoundPortfolios('template-1')).toEqual([]);
+  });
+});
+
+describe('deleteBoundPortfolio', () => {
+  test('returns true when the portfolio is genuinely bound to that template', async () => {
+    mockQuery.mockResolvedValue({ rows: [{ id: 'p1' }] });
+    expect(await deleteBoundPortfolio('template-1', 'p1')).toBe(true);
+  });
+
+  // Proves the scoping guard: a portfolio bound to a DIFFERENT template (or not found at all)
+  // never matches the WHERE clause's upload_template_id check, so nothing is deleted - this is
+  // what keeps this from becoming a general delete-any-portfolio-by-id capability.
+  test('returns false when the portfolio is bound to a different template (or does not exist)', async () => {
+    mockQuery.mockResolvedValue({ rows: [] });
+    expect(await deleteBoundPortfolio('template-1', 'p1')).toBe(false);
+  });
+});
+
+describe('listUnattachedFlexPortfolios', () => {
+  test('maps rows including holdings count/cash amount, coerced from strings', async () => {
+    mockQuery.mockResolvedValue({
+      rows: [{
+        id: 'p1', name: 'Abandoned Mapping', owner_email: 'a@b.com', created_at: 't1',
+        holdings_count: '3', cash_amount: '125.50',
+      }],
+    });
+    const result = await listUnattachedFlexPortfolios();
+    expect(result).toEqual([{
+      id: 'p1', name: 'Abandoned Mapping', ownerEmail: 'a@b.com', createdAt: 't1',
+      holdingsCount: 3, cashAmount: 125.5,
+    }]);
+  });
+
+  test('returns an empty array when none are unattached', async () => {
+    mockQuery.mockResolvedValue({ rows: [] });
+    expect(await listUnattachedFlexPortfolios()).toEqual([]);
+  });
+});
+
+describe('deleteUnattachedFlexPortfolio', () => {
+  test('returns true when the portfolio is genuinely stuck in Flex-Err', async () => {
+    mockQuery.mockResolvedValue({ rows: [{ id: 'p1' }] });
+    expect(await deleteUnattachedFlexPortfolio('p1')).toBe(true);
+  });
+
+  // Proves the scoping guard: a resolved ('Flex') portfolio or a nonexistent id never matches
+  // the WHERE clause's flex_template_status check, so nothing is deleted.
+  test('returns false when the portfolio is already resolved (or does not exist)', async () => {
+    mockQuery.mockResolvedValue({ rows: [] });
+    expect(await deleteUnattachedFlexPortfolio('p1')).toBe(false);
   });
 });
 
@@ -537,6 +604,23 @@ describe('createPortfolioFlex', () => {
     await expect(createPortfolioFlex('user-1', { name: 'Dup', broker: null, columnMapping: mapping, filename: 'f.csv', content: csv }))
       .rejects.toBeInstanceOf(PortfolioNameConflictError);
   });
+
+  test('rejects a brand-new-mapping sample file over the template size limit, before ever creating a portfolio row', async () => {
+    const oversizedCsv = new Array(MAX_TEMPLATE_SAMPLE_LINES + 1).fill('a,b,c').join('\n');
+    await expect(createPortfolioFlex('user-1', { name: 'X', broker: null, columnMapping: mapping, filename: 'f.csv', content: oversizedCsv }))
+      .rejects.toBeInstanceOf(TemplateSampleTooLargeError);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  test('does not apply the sample size limit when reusing an existing template (uploadTemplateId given)', async () => {
+    const largeCsv = 'Ticker,Shares,Price\n' + new Array(MAX_TEMPLATE_SAMPLE_LINES + 50).fill('AAPL,10,150').join('\n');
+    mockGetTemplateParseConfig.mockResolvedValue({ columnMapping: mapping, headerRowIndex: 1, dataStartColumnIndex: 1 });
+    mockPortfolioInsert({ upload_template_id: 'template-1', flex_template_status: 'Flex' });
+    mockConnect.mockResolvedValue(makeMockClient({ existingHoldings: [] }));
+
+    const result = await createPortfolioFlex('user-1', { name: 'My Portfolio', broker: null, uploadTemplateId: 'template-1', filename: 'f.csv', content: largeCsv });
+    expect(result.importResult.holdingsCount).toBe(MAX_TEMPLATE_SAMPLE_LINES + 50);
+  });
 });
 
 describe('saveFlexTemplate', () => {
@@ -656,5 +740,26 @@ describe('changeFlexTemplate', () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     await expect(changeFlexTemplate('user-1', 'portfolio-1', { columnMapping: mapping, filename: 'f.csv', content: csv }))
       .rejects.toBeInstanceOf(PortfolioNotFoundError);
+  });
+
+  test('rejects a brand-new-mapping sample file over the template size limit, after the state check but before parsing', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'portfolio-1', flex_template_status: 'Flex' }] });
+    const oversizedCsv = new Array(MAX_TEMPLATE_SAMPLE_LINES + 1).fill('a,b,c').join('\n');
+    await expect(changeFlexTemplate('user-1', 'portfolio-1', { columnMapping: mapping, filename: 'f.csv', content: oversizedCsv }))
+      .rejects.toBeInstanceOf(TemplateSampleTooLargeError);
+  });
+
+  test('does not apply the sample size limit when reusing an existing template (uploadTemplateId given)', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'portfolio-1', flex_template_status: 'Flex' }] }) // state check
+      .mockResolvedValueOnce({
+        rows: [{ id: 'portfolio-1', name: 'P', broker: null, created_at: 't1', updated_at: 't2', upload_template_id: 'template-1', flex_template_status: 'Flex' }],
+      });
+    mockConnect.mockResolvedValue(makeMockClient({ existingHoldings: [] }));
+    mockGetTemplateParseConfig.mockResolvedValue({ columnMapping: mapping, headerRowIndex: 1, dataStartColumnIndex: 1 });
+    const largeCsv = 'Ticker,Shares,Price\n' + new Array(MAX_TEMPLATE_SAMPLE_LINES + 50).fill('AAPL,10,150').join('\n');
+
+    const result = await changeFlexTemplate('user-1', 'portfolio-1', { uploadTemplateId: 'template-1', filename: 'f.csv', content: largeCsv });
+    expect(result.importResult.holdingsCount).toBe(MAX_TEMPLATE_SAMPLE_LINES + 50);
   });
 });
