@@ -5,6 +5,7 @@ import {
   getUserRoles, getUserPermissions, setUserRole, InvalidRoleError, listRoles, createRole, DuplicateRoleError,
   listRolePermissions, grantPermission, revokePermission, listUsersWithRoles,
   deleteRole, RoleInUseError, MissingParentPermissionError, ParentPermissionInUseError,
+  RoleNotAllowedForPermissionError,
 } from '../src/services/roles.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
@@ -175,6 +176,27 @@ describe('grantPermission / revokePermission', () => {
     await revokePermission('2', 'contrarian_finder:scan');
     expect(mockQuery).toHaveBeenCalledTimes(2);
     expect(mockQuery.mock.calls[1][0]).toContain('DELETE FROM m_role_permissions');
+  });
+
+  test('granting an unrelated permission never triggers the admin-master-only role-name lookup', async () => {
+    mockQuery.mockResolvedValueOnce({}); // just the INSERT - no role-name SELECT beforehand
+    await grantPermission('2', 'functions:manage');
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    expect(mockQuery.mock.calls[0][0]).toContain('INSERT INTO m_role_permissions');
+  });
+
+  test('grantPermission refuses config_properties:manage for a role that is not admin-master', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'admin' }] }); // role-name lookup
+    await expect(grantPermission('2', 'config_properties:manage')).rejects.toBeInstanceOf(RoleNotAllowedForPermissionError);
+    expect(mockQuery).toHaveBeenCalledTimes(1); // never reaches the INSERT
+  });
+
+  test('grantPermission allows config_properties:manage for the admin-master role itself', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'admin-master' }] }); // role-name lookup
+    mockQuery.mockResolvedValueOnce({}); // the INSERT
+    await grantPermission('3', 'config_properties:manage');
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+    expect(mockQuery.mock.calls[1][0]).toContain('INSERT INTO m_role_permissions');
   });
 });
 

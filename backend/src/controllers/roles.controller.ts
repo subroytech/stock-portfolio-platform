@@ -67,6 +67,10 @@ export async function grantPermission(req: Request, res: Response, next: NextFun
       res.status(400).json({ error: err.message });
       return;
     }
+    if (err instanceof rolesService.RoleNotAllowedForPermissionError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     next(err);
   }
 }

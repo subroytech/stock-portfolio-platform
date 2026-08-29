@@ -132,6 +132,14 @@ describe('POST /roles/:id/permissions', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('contrarian_finder:scan');
   });
+
+  test('400 when granting config_properties:manage to a role that is not admin-master', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'admin' }] }); // grantPermission's role-name lookup
+    const res = await request(app).post('/roles/2/permissions').set('Cookie', authCookie).send({ permissionKey: 'config_properties:manage' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('admin-master');
+  });
 });
 
 describe('DELETE /roles/:id/permissions/:key', () => {

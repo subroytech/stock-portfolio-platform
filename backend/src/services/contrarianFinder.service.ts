@@ -28,6 +28,7 @@ import env from '../config/env';
 import { pool } from '../db/pool';
 import { fmpGet, HistoricalBar, getProfiles } from './marketData.service';
 import { mwSMA, mwRSI, mwBB } from './momentum.service';
+import { getConfigInt } from './configProperty.service';
 import * as analysisService from './analysisService';
 
 export const CF_ETF_LIST: string[] = ['XLK', 'XLV', 'XLF', 'XLY', 'XLI', 'XLC', 'XLP', 'XLE', 'XLB', 'XLU', 'XLRE'];
@@ -460,7 +461,16 @@ export type ContrarianRunTier = 'admin' | 'user';
 // via CockroachDB's row-level TTL (added 2026-08-05) - a count-based cap,
 // not a time-based one, since scan cadence isn't predictable enough for a
 // TTL window to reliably mean "last 60 runs."
-const ADMIN_HISTORY_LIMIT = 60;
+//
+// Config Properties framework (2026-08-24) - this limit is now admin-configurable via
+// m_config_property (key: contrarian_finder_admin_history_retention_count, seeded to 60 in
+// migration 027) instead of a hardcoded constant. ADMIN_HISTORY_LIMIT_FALLBACK is a defensive
+// last resort only: getConfigInt never throws, but if the config row is ever missing or
+// unparseable it logs a warning and falls back to this literal, rather than letting the prune
+// query below run with undefined/NaN/0 - this is a business-critical cap, not something that
+// should silently no-op (unbounded growth) or wipe the whole history.
+const ADMIN_HISTORY_RETENTION_KEY = 'contrarian_finder_admin_history_retention_count';
+const ADMIN_HISTORY_LIMIT_FALLBACK = 60;
 
 // Persists the last completed scan server-side (2026-08-04) so it's shared
 // across every user, not just the browser that ran it - see api/
@@ -513,6 +523,8 @@ export async function saveLastScan(
     return;
   }
 
+  const historyLimit = await getConfigInt(ADMIN_HISTORY_RETENTION_KEY, ADMIN_HISTORY_LIMIT_FALLBACK);
+
   await pool.query(
     `INSERT INTO tx_shared_contrarian_run (started_by, run_tier, universe_size, scanned, params, results)
      VALUES ($1, 'admin', $2, $3, $4, $5)`,
@@ -523,7 +535,7 @@ export async function saveLastScan(
      WHERE run_tier = 'admin' AND id NOT IN (
        SELECT id FROM tx_shared_contrarian_run WHERE run_tier = 'admin' ORDER BY completed_at DESC LIMIT $1
      )`,
-    [ADMIN_HISTORY_LIMIT],
+    [historyLimit],
   );
 }
 

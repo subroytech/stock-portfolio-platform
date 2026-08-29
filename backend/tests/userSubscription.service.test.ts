@@ -89,9 +89,14 @@ describe('getDecryptedKey', () => {
     expect(mockQuery).toHaveBeenCalledTimes(1);
   });
 
+  // getUserRoles and the fallback-eligible-roles config read run concurrently (Promise.all),
+  // so both mocks must be queued regardless of which branch the test cares about - order
+  // matches Promise.all's synchronous invocation order (getUserRoles first, config read
+  // second), same as the real pool.query call sequence.
   test('falls back to admin-master\'s key for a fallback-eligible role with no key of its own', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] }); // no own key
     mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user' }] }); // getUserRoles
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: 'user,admin,user-contra-wokey' }] }); // fallback-roles config
     const adminMasterEncrypted = encrypt('sk-admin-master-key');
     mockQuery.mockResolvedValueOnce({ rows: [{ api_key_encrypted: adminMasterEncrypted }] }); // getAdminMasterKey
     expect(await getDecryptedKey('user-2', 'fmp')).toBe('sk-admin-master-key');
@@ -100,14 +105,32 @@ describe('getDecryptedKey', () => {
   test('falls back for user-contra-wokey specifically', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user-contra-wokey' }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: 'user,admin,user-contra-wokey' }] });
     const adminMasterEncrypted = encrypt('sk-admin-master-key');
     mockQuery.mockResolvedValueOnce({ rows: [{ api_key_encrypted: adminMasterEncrypted }] });
     expect(await getDecryptedKey('user-3', 'fmp')).toBe('sk-admin-master-key');
   });
 
+  test('falls back for user-premium specifically - the role that surfaced this config-driven list live', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user-premium' }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: 'user,admin,user-contra-wokey,user-premium' }] });
+    const adminMasterEncrypted = encrypt('sk-admin-master-key');
+    mockQuery.mockResolvedValueOnce({ rows: [{ api_key_encrypted: adminMasterEncrypted }] });
+    expect(await getDecryptedKey('user-premium-1', 'fmp')).toBe('sk-admin-master-key');
+  });
+
+  test('the eligible-roles list is genuinely DB-driven - a role omitted from the configured value is not fallback-eligible even though it once was', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no own key
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user' }] }); // getUserRoles - normally eligible
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: 'admin,user-contra-wokey' }] }); // config omits 'user' this time
+    await expect(getDecryptedKey('user-6', 'fmp')).rejects.toThrow(/add one via PUT \/subscriptions/i);
+  });
+
   test('throws a "contact an admin" error when fallback-eligible but admin-master has no key either', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] }); // no own key
     mockQuery.mockResolvedValueOnce({ rows: [{ name: 'admin' }] }); // getUserRoles
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: 'user,admin,user-contra-wokey' }] }); // fallback-roles config
     mockQuery.mockResolvedValueOnce({ rows: [] }); // getAdminMasterKey - nothing on file
     let caught: unknown;
     try {
@@ -122,6 +145,17 @@ describe('getDecryptedKey', () => {
   test('user-contra-withkey is NOT fallback-eligible - still a hard "add your own key" error', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] }); // no own key
     mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user-contra-withkey' }] }); // getUserRoles
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: 'user,admin,user-contra-wokey,user-premium' }] }); // fallback-roles config
     await expect(getDecryptedKey('user-5', 'fmp')).rejects.toThrow(/add one via PUT \/subscriptions/i);
+  });
+
+  test('falls back to the code-level default list when the config row is missing (no config write ever happened)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no own key
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user-premium' }] }); // getUserRoles
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // fallback-roles config - missing row
+    const adminMasterEncrypted = encrypt('sk-admin-master-key');
+    mockQuery.mockResolvedValueOnce({ rows: [{ api_key_encrypted: adminMasterEncrypted }] });
+    // user-premium is in the code-level default fallback list too, so this still succeeds.
+    expect(await getDecryptedKey('user-7', 'fmp')).toBe('sk-admin-master-key');
   });
 });

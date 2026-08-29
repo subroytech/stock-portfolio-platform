@@ -10,14 +10,21 @@
 import { pool } from '../db/pool';
 import { encrypt, decrypt } from '../utils/encryption';
 import * as rolesService from './roles.service';
+import { getConfigStringList } from './configProperty.service';
 
 export class MissingUserApiKeyError extends Error {}
 
 // Admin-Master Fallback API Key - roles that fall back to the single admin-master account's
-// key when they have none of their own on file. user-contra-withkey is deliberately absent -
-// bring-your-own is the whole point of that role, so a missing key stays a hard 503 for them,
-// same as before this feature existed. See User Manual.md for the full role model.
-const FALLBACK_ELIGIBLE_ROLES = ['user', 'admin', 'user-contra-wokey'];
+// key when they have none of their own on file. Config-driven (Config Properties framework,
+// 2026-08-27) since 'api_key_fallback_eligible_roles' - was originally a hardcoded array here,
+// converted after a new custom role had no way to gain fallback eligibility without a code
+// deploy. user-contra-withkey is deliberately never in this list - bring-your-own is the whole
+// point of that role, so a missing key stays a hard 503 for them regardless of config. See
+// User Manual.md for the full role model.
+const FALLBACK_ELIGIBLE_ROLES_KEY = 'api_key_fallback_eligible_roles';
+// Matches the seeded DB value (migration 029) - belt-and-suspenders default if the config row
+// is ever missing/unparseable, not the feature's pre-config-property historical default.
+const FALLBACK_ELIGIBLE_ROLES_FALLBACK = ['user', 'admin', 'user-contra-wokey', 'user-premium'];
 
 export interface SubscriptionInput {
   apiKey: string;
@@ -131,8 +138,13 @@ export async function getDecryptedKey(userId: string, provider: string): Promise
   );
   if (rows[0]) return decrypt(rows[0].api_key_encrypted);
 
-  const roles = await rolesService.getUserRoles(userId);
-  if (roles.some((r) => FALLBACK_ELIGIBLE_ROLES.includes(r))) {
+  // Independent reads, run concurrently - keeps this at the same number of sequential
+  // round-trips as before the config value was added, rather than a new one.
+  const [roles, fallbackEligibleRoles] = await Promise.all([
+    rolesService.getUserRoles(userId),
+    getConfigStringList(FALLBACK_ELIGIBLE_ROLES_KEY, FALLBACK_ELIGIBLE_ROLES_FALLBACK),
+  ]);
+  if (roles.some((r) => fallbackEligibleRoles.includes(r))) {
     const fallback = await getAdminMasterKey(provider);
     if (fallback) return fallback;
     // Fallback-eligible but admin-master itself has no key yet - "add one via PUT

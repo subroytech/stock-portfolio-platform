@@ -255,24 +255,61 @@ describe('saveLastScan / getLastScan', () => {
   const params = { threshold: 25, batchSize: 125, maxBatches: 3, qualityPreset: 'standard', scanDays: 7 };
   const results = [{ symbol: 'AAPL', filterFail: false }];
 
-  test('admin tier: inserts a new history row, then prunes back to the most recent 60 admin-tier rows', async () => {
+  test('admin tier: inserts a new history row, then prunes back to the DB-configured retention count', async () => {
     mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: '60' }] }); // getConfigInt's config-value read
     mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
     mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
 
     await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
 
-    expect(mockQuery).toHaveBeenCalledTimes(2);
-    const [insertSql, insertParams] = mockQuery.mock.calls[0];
+    expect(mockQuery).toHaveBeenCalledTimes(3);
+    const [insertSql, insertParams] = mockQuery.mock.calls[1];
     expect(insertSql).toContain('INSERT INTO tx_shared_contrarian_run');
     expect(insertSql).toContain("'admin'");
     expect(insertParams).toEqual(['user-1', 348, 348, JSON.stringify(params), JSON.stringify(results)]);
 
-    const [pruneSql, pruneParams] = mockQuery.mock.calls[1];
+    const [pruneSql, pruneParams] = mockQuery.mock.calls[2];
     expect(pruneSql).toContain('DELETE FROM tx_shared_contrarian_run');
     expect(pruneSql).toContain("run_tier = 'admin'");
     expect(pruneParams).toEqual([60]);
     expect(mockConnect).not.toHaveBeenCalled(); // admin tier never opens a transaction
+  });
+
+  test('admin tier: prunes using a non-default DB-configured retention count', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: '15' }] });
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
+
+    await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
+
+    const [, pruneParams] = mockQuery.mock.calls[2];
+    expect(pruneParams).toEqual([15]);
+  });
+
+  test('admin tier: falls back to 60 when no retention value is configured', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no active config row
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
+
+    await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
+
+    const [, pruneParams] = mockQuery.mock.calls[2];
+    expect(pruneParams).toEqual([60]);
+  });
+
+  test('admin tier: falls back to 60 when the configured retention value is unparseable', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: 'not-a-number' }] });
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
+
+    await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
+
+    const [, pruneParams] = mockQuery.mock.calls[2];
+    expect(pruneParams).toEqual([60]);
   });
 
   test('user tier: upserts exactly one row per user via a transactional delete+insert, not a plain INSERT', async () => {

@@ -10,6 +10,7 @@ export class DuplicateRoleError extends Error {}
 export class RoleInUseError extends Error {}
 export class MissingParentPermissionError extends Error {}
 export class ParentPermissionInUseError extends Error {}
+export class RoleNotAllowedForPermissionError extends Error {}
 
 // Some permissions only make sense as an add-on to another - e.g.
 // contrarian_finder:scan_history only affects behavior that's itself gated
@@ -24,6 +25,16 @@ export class ParentPermissionInUseError extends Error {}
 const PERMISSION_REQUIRES: Record<string, string> = {
   'contrarian_finder:scan_history': 'contrarian_finder:scan',
 };
+
+// Config Properties (2026-08-24) is system-level configuration - the user's own call was that
+// config_properties:manage must never be grantable to any role except admin-master, even by an
+// admin using the Manage Role screen. This is a deliberate, narrow exception to "every gate in
+// this app is DB-driven, never a hardcoded role-name check": the permission mechanism itself
+// stays fully DB-backed (still a real, revocable m_role_permissions row, still checked by
+// requirePermission like everything else) - only *which roles this one specific key can be
+// granted to* is hardcoded. Small explicit set, not a general per-permission role-allowlist
+// system, since this is currently the only such case.
+const ADMIN_MASTER_ONLY_PERMISSIONS = new Set(['config_properties:manage', 'users:impersonate']);
 
 export interface Role {
   id: string;
@@ -140,6 +151,13 @@ export async function listRolePermissions(roleId: string): Promise<string[]> {
 }
 
 export async function grantPermission(roleId: string, permissionKey: string): Promise<void> {
+  if (ADMIN_MASTER_ONLY_PERMISSIONS.has(permissionKey)) {
+    const { rows } = await pool.query<{ name: string }>('SELECT name FROM m_roles WHERE id = $1', [roleId]);
+    if (rows[0]?.name !== 'admin-master') {
+      throw new RoleNotAllowedForPermissionError(`"${permissionKey}" can only be granted to the admin-master role.`);
+    }
+  }
+
   const requiredParent = PERMISSION_REQUIRES[permissionKey];
   if (requiredParent) {
     const { rows } = await pool.query(
