@@ -6,6 +6,12 @@ export interface User {
   email: string;
   roles: string[];
   permissions: string[];
+  // "Login-as" (CLAUDE.md's "Login-as" section) - true only while the current session is an
+  // admin-master impersonating this user. Everything else about `User` (email/roles/
+  // permissions) already reflects the impersonated identity, not the real admin's own.
+  // Added here (Session/Persona commit) rather than in the later Login-as commit, since
+  // UserPersonaBadge.test.tsx's User fixture already needs it - keeps every commit compiling.
+  impersonating: boolean;
 }
 
 // Any one of these implies real Admin Console capability. Checking permissions rather than a

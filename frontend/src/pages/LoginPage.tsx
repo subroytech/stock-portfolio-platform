@@ -1,13 +1,27 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useLogin } from '../api/auth';
 import { ApiError } from '../api/client';
+import { SESSION_EXPIRED_STORAGE_KEY } from '../lib/queryClient';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showSessionExpired, setShowSessionExpired] = useState(false);
   const login = useLogin();
   const navigate = useNavigate();
+
+  // Set only by apiFetch's global 401 handling when a real session was cached at the time
+  // (see lib/queryClient.ts's clearSession) - never by a plain first-ever visit or a failed
+  // login/signup attempt, both of which start from a null session already.
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem(SESSION_EXPIRED_STORAGE_KEY)) {
+        setShowSessionExpired(true);
+        sessionStorage.removeItem(SESSION_EXPIRED_STORAGE_KEY);
+      }
+    } catch { /* private browsing/quota */ }
+  }, []);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -26,6 +40,15 @@ export default function LoginPage() {
         className="w-full max-w-sm rounded-card bg-bg-card p-8 shadow-card"
       >
         <h1 className="mb-6 text-xl font-semibold text-text-primary">Log in</h1>
+
+        {showSessionExpired && (
+          <p
+            data-testid="login-session-expired"
+            className="mb-4 rounded-btn bg-warning/10 px-3 py-2 text-sm text-warning"
+          >
+            Your session ended — please log in again.
+          </p>
+        )}
 
         <label className="mb-1 block text-sm text-text-secondary" htmlFor="email">Email</label>
         <input
