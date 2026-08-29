@@ -1,12 +1,16 @@
-# User Manual — Roles, API Key Access, Contrarian Finder Retention & Portfolio Upload
+# User Manual — Roles, API Key Access, Contrarian Finder Retention, Portfolio Upload, Config Properties & Login-as
 
 This document describes the platform's role/permission model — as it relates to FMP/Finnhub API
 keys (who manages their own key, who doesn't, and how the app still works for the people who
-don't), to the Contrarian Finder shared last-scan result, and to portfolio import. **Status:
-implemented and live-verified (2026-08-02 for the API key sections; 2026-08-05 for Contrarian
-Finder retention; 2026-08-07 for Portfolio Upload — Flex).** Role names below use the exact
-casing as created in the database: `user-contra-withKey` (capital K), `user-contra-wokey`
-(lowercase), `admin-master`.
+don't), to the Contrarian Finder shared last-scan result, to portfolio import, to the
+admin-configurable Config Properties framework, and to the `admin-master`-only Login-as
+troubleshooting tool. **Status: implemented and live-verified (2026-08-02 for the API key
+sections; 2026-08-05 for Contrarian Finder retention; 2026-08-07 for Portfolio Upload — Flex;
+2026-08-24 for Config Properties; 2026-08-27 for the Flex guided stepper, footer/cash row
+markers, and template-governance admin tools; 2026-08-28 for Login-as, built and test-covered but
+still pending its own live two-account walkthrough — see that section below).** Role names below
+use the exact casing as created in the database: `user-contra-withKey` (capital K),
+`user-contra-wokey` (lowercase), `admin-master`.
 
 ## Roles
 
@@ -137,6 +141,131 @@ since only a real rendered Dashboard is strong enough proof the mapping is actua
 if it looks wrong, the fix is deleting that portfolio and trying again with a corrected file.
 A portfolio left without either resolution is flagged internally as needing attention until the
 user comes back and finishes one path or the other.
+
+### The mapping wizard — a 6-step guided walkthrough
+
+**Status: implemented and live-verified, 2026-08-27.**
+
+Creating a new mapping now walks through six steps, shown as a stepper bar at the top of the
+wizard: **Header → Footer → Cash → Map Columns → Inspect Data → Confirm Mapping**. The current
+step's own Back/Next/Skip buttons sit to the left of that bar; the step indicators themselves sit
+to the right, so it's always clear both where you are and what's still ahead.
+
+- **Header** — confirms which row in the uploaded file is the real header row.
+- **Footer (optional, skippable)** — some brokers add a trailing "Totals"/disclaimer block below
+  the real holdings rows. If your file has one, click the first row of that trailing block in the
+  preview grid to mark it — everything at or below that row is excluded from every future import
+  through this template, not just this one. If your file has no such block, click Skip.
+- **Cash (optional, skippable)** — some brokers export your cash/money-market balance as its own
+  row rather than a normal holding. If your file has one, click that row to mark it, then choose
+  how the dollar value is represented:
+  - **"Same column"** — the value sits in its own column on that row (pick which one).
+  - **"Embedded in another column"** — the value is embedded inside a text cell, e.g. a
+    "Description" column containing `"CASH & CASH EQUIVALENTS $12,345.67"` — click the cell
+    holding that text and the app extracts the dollar figure automatically.
+
+  If your file has no separate cash row, click Skip.
+- **Map Columns** — map the file's detected headers to the app's fields (Symbol/Quantity/Current
+  Price are mandatory; Purchase Price/Name/Sector/Purchase Date are optional).
+- **Inspect Data** — shows a top-5-record preview of what will actually be imported, including a
+  "Cash detected: $X" line if a cash row was configured. **You must scroll this preview fully
+  into view before "Use This Mapping" becomes clickable** — a deliberate check to make sure the
+  preview actually gets looked at before the real import runs, not skipped past. A short note
+  next to the disabled button explains why it's disabled until you've scrolled.
+- **Confirm Mapping** — proceeds to the real import and Dashboard, per the "actually proving it
+  works" flow described above.
+
+A template saved from this wizard remembers its footer/cash settings along with the column
+mapping, so a later upload using the same template applies all three automatically — no need to
+re-mark the footer row or re-identify the cash row every time.
+
+### Admin: managing templates and stuck portfolios
+
+**Status: implemented and live-verified, 2026-08-27.** All of the below lives in the existing
+Admin Console → Portfolio Templates tab (gated by `portfolio_template:manage_status`, same as
+Approve/Reject) — no new menu items.
+
+- **Delete a template** — a `Rejected` or still-`Pending Approval` template (created by mistake,
+  or superseded by a better one) can now be permanently deleted. An `Approved` template that's
+  actually bound to real portfolios can never be deleted this way — only rejected, going forward.
+- **Bound-portfolios pop-up** — attempting to delete a template that's still bound to one or more
+  portfolios opens a list of exactly which portfolios (owner + name), each with its own delete
+  button right there, instead of just a "can't delete, in use" dead end. Deleting a portfolio
+  from this list is the same as deleting it from the Dashboard — permanent, cannot be undone.
+- **Unattached Flex Portfolios** — a new section, further down the same tab, listing every Flex
+  portfolio that was created but never resolved (the user left before either saving a template or
+  deleting the portfolio — the "needs attention" state the original Flex design always allowed
+  for, now finally visible somewhere). Each entry can be viewed or deleted from here directly.
+
+## Config Properties (Admin Console)
+
+**Status: implemented and live-verified, 2026-08-24.**
+
+A new "Config Properties" tab in the Admin Console lets `admin-master` change certain
+business-tunable values without needing a code deploy — for example, how many admin-tier
+Contrarian Finder scan-history rows to keep before pruning the oldest ones (today configured to
+`60`, the same default it was hardcoded to before this feature existed). This tab is visible
+only to `admin-master` — not even `admin` sees it, the one deliberate exception in this app to
+"every permission can be granted to any role via Manage Permission."
+
+**How it's organized**: properties are grouped (e.g. "Data Retention Policies") purely for
+browsing — a group isn't tied to a specific file or service. Each property has a type
+(`integer` or `string`), and integer properties can optionally have a min/max range; saving a
+value outside that range is rejected with a clear error instead of silently accepted. Every
+value change is kept in a full history (which version was active when, and who changed it) —
+nothing is ever overwritten or deleted, only superseded by a newer version.
+
+**What this is not (yet)**: there's no way to schedule a value change for a future date/time —
+every change takes effect immediately. There's also no caching layer, so a change here takes
+effect on a service's very next read, not after a restart.
+
+## Login-as (admin-master troubleshooting tool)
+
+**Status: implemented and test-covered, 2026-08-28 — not yet walked through live with two real
+accounts. Treat this section as accurate-but-unverified until that walkthrough happens.**
+
+`admin-master` can view the app exactly as a specific user sees it, without needing their
+password — a fast way to reproduce a role-specific issue someone reports, without having to ask
+them to screen-share or describe every click. This is deliberately **not** available to plain
+`admin` — only `admin-master`, and the permission behind it (`users:impersonate`) can only ever
+be granted by directly editing the database, never through the Admin Console's Manage Permission
+screen.
+
+**How it works**:
+1. From the Admin Console header, `admin-master` clicks **"Login as User"** (invisible to
+   everyone else, including plain `admin`).
+2. A pop-up lists every user, searchable by email. Pick one and confirm.
+3. The app immediately switches to that user's identity — same Dashboard, same permissions, same
+   data they'd see if they logged in themselves. A banner reading **"You are viewing as
+   {email}."** stays pinned near the top of every page for as long as this is active, so it's
+   never ambiguous whose account is currently being viewed.
+4. Click **"Return to my account"** in that banner at any time to switch back to the
+   `admin-master` session cleanly.
+
+**Guardrails**:
+- **Another admin can never be impersonated** — attempting to "Login as" any account that itself
+  has Admin Console access (another `admin`/`admin-master`) is blocked outright. This tool is for
+  seeing what an ordinary user sees, not a way to quietly assume another administrator's access.
+- **No nested impersonation** — while viewing as someone else, "Login as" isn't available again;
+  return to your own account first.
+- **Time-limited automatically** — an impersonation session expires after 1 hour even if never
+  explicitly ended (vs. the normal 7-day login), and expiry is handled the same way any other
+  expired session is (see below) — a clean re-login prompt, not a confusing error.
+- **Every session is logged** — who impersonated whom, when it started, and when it ended, kept
+  for 180 days as an audit trail. Not currently viewable from any screen in the app itself.
+
+## Session Expiry & Account Indicator
+
+**Status: implemented and live-verified, 2026-08-27.**
+
+- If your session ever goes stale (rare — a very old login, or reconnecting after a backend
+  restart during active development), the app now recognizes this cleanly instead of showing
+  scattered errors that can look like the whole service is down: you're returned to the login
+  page with a "Your session ended, please log back in" message.
+- Every page header now shows a small badge with your initials, next to the Log out button —
+  hover over it to see the exact email and role(s) your current session is signed in as. Useful
+  whenever more than one account might be in play in the same browser (e.g. testing, or after
+  using Login-as above).
 
 ## Known leftover, not cleaned up yet
 

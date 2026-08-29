@@ -47,6 +47,28 @@ account…"/"As of…" lines), and ideally a leading label column too.
 - [ ] Now, **after** mapping fields, change the "Header row" or "Data start column" number again. Confirm the in-progress field mapping is cleared (forces re-mapping against the new header set — a stale mapping could otherwise silently point at the wrong column).
 - [ ] Use This Mapping → Create Portfolio → confirm the Dashboard renders correctly (proves the offset was actually applied end-to-end, not just cosmetically in the wizard).
 
+### 4a. Blank-line-before-header regression (real bug found 2026-08-26, now fixed)
+Use a file with a genuinely **blank line** somewhere above the real header row (e.g. a blank
+separator between an account-info preamble line and the header row — very common in real
+Schwab-style exports).
+- [ ] Set "Header row" to the real header's row number (counting every line, blank included, the same way the grid displays them).
+- [ ] Confirm step "3. Map columns" dropdowns show the file's **real headers**, not another row's data (this is exactly the bug: a blank line before the header used to make the backend read the wrong row entirely once "Inspect Data" ran, even though the wizard's own grid looked correct).
+- [ ] Map fields → Inspect Data → confirm the preview shows real holdings, not a "headers don't match the mapping" error listing actual data values.
+- [ ] Use This Mapping → Create Portfolio → confirm the Dashboard renders correctly.
+
+### 4b. Footer marker — click-to-set and manual text entry
+Use a file with footer content below the real holdings (a totals row, a disclaimer line, or both).
+- [ ] Click "Set footer marker" (next to "Set header row / data start"), then click the cell that marks where the footer begins (e.g. a cell containing "Total" or "Position Total"). Confirm the footer marker text field pre-fills with that cell's text, and the column number shown next to it matches the clicked column.
+- [ ] Edit the pre-filled text (e.g. narrow "Position Total" down to just "Total") and confirm it's editable.
+- [ ] Clear the file and re-upload it; this time type the footer marker text directly into the field without clicking a cell — pick a column number that also makes sense. Confirm this works without ever clicking the grid.
+- [ ] Map Symbol/Quantity/Current Price → Inspect Data → confirm the preview **excludes** the footer row and anything below it, showing only real holdings.
+- [ ] Use This Mapping → Create Portfolio → confirm the Dashboard's totals reflect only the real holdings (not inflated by a totals/footer row that slipped through).
+- [ ] Save Template, then reuse it (Section 8) against a **second, larger file** of the same shape (well over 200 rows, more holdings than the original sample) — confirm the footer is still correctly excluded and the upload succeeds, proving reuse has no row-count restriction (only defining a new template does).
+
+### 4c. Footer marker — no match, and the 202-row hard limit
+- [ ] Set a footer marker whose text never appears anywhere in the file → Inspect Data → confirm the file still parses successfully to its real end (no error) — a footer marker not matching isn't treated as a failure.
+- [ ] Try selecting a sample file with **more than 202 rows** for a brand-new template (Section 3 or here) → confirm the wizard rejects it immediately with a clear message before showing the grid/mapping step at all, and that this only applies to defining a **new** mapping — never to reusing an already-saved template.
+
 ## 5. Flex — Save Template, including the how-to-use description
 - [ ] On the banner, enter a template name and (optionally) fill in "How to use this template" (e.g. "Schwab export — headers on row 3, account column on the left") → Save Template.
 - [ ] Banner disappears, ⚠ marker clears.

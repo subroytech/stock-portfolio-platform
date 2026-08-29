@@ -1,6 +1,6 @@
 ## Rebuild Plan — From Single-User Client-Side App to a Scalable Multi-User Platform
 
-**Last updated:** 2026-08-07
+**Last updated:** 2026-08-28
 
 **Why this section exists:** the user identified the single biggest shortcoming of the current app: it's a 100% client-side, single-user project (no backend, no database, no auth — `localStorage` is the only persistence layer) and therefore cannot scale beyond "one person, one browser." This doc started as a forward-looking rebuild plan and has since become a **living status document** — Section 1 tracks what's actually built, Section 2 is the immediate next action, Section 3 is the full ordered backlog. Update it as work lands rather than letting it drift back into a stale one-time plan. For a compact, fast-scan version of Section 1, see `CLAUDE.md`'s "Current Build State" — this doc carries the detail and rationale; that one carries the quick summary.
 
@@ -53,7 +53,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 08-14
+## Section 1 — Accomplished Till 08-28
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -971,6 +971,486 @@ Templates tab lists a Pending template, shows its mapping + sample preview on ex
 Approve flips it to `Approved` — immediately visible in a completely unrelated plain user's own
 Approved-template list, confirming the full template-governance loop end-to-end.
 
+### Config Properties framework ✅ Done
+
+**Built 2026-08-24** — requirements settled through conversation first (per the user's explicit
+"discuss and finalize the requirement before Plan and DB" instruction), then `/plan`-approved
+and implemented. A general-purpose, admin-configurable settings framework: business-tunable
+values that previously lived as hardcoded constants now live in the DB and can be changed by
+`admin-master` alone, without a code deploy. Deliberately built as reusable infrastructure, not
+a one-off fix — the user named future candidates ("Max Portfolios Allowed," "Max Stocks in a
+Portfolio Allowed") without building them yet, and this pass proves the pattern end-to-end with
+exactly one real consumer wired up. Kept deliberately distinct from `m_function_master`/"Manage
+Functions" (the pre-existing RBAC permission catalog) — a naming collision risk flagged and
+resolved early in the requirements conversation.
+
+**Requirements settled in conversation**: only `admin-master` manages properties (confirmed
+"System level," not a general-admin capability); a bad value is rejected at save time,
+optionally against a min/max range; values are stored as `TEXT` (string now, since a future
+`'date'` type is anticipated, not just numeric); a schema-level `effective_timestamp` +
+`version` + `is_active` shape is built now even though real future-dated scheduling isn't
+(`effective_timestamp` always equals `created_at` today — the column exists purely so
+scheduling logic can be added later with zero migration); reads are always live (no caching) —
+confirmed acceptable since values change rarely (admin-only writes) and the one consumer wired
+up (`saveLastScan`) runs once per completed scan, not a hot path; `property_key` is globally
+unique, not scoped per-group (Option B, chosen for flexibility over the discussion's Option A).
+
+**Data model** — migration `027_create_config_properties.sql` adds three new `m_`-prefixed
+tables:
+- **`m_config_group`** — a free-standing category label (not tied to a specific file/service,
+  since Group no longer implies a single owning file once `property_key` and `description`
+  carry that information instead). `id`, `name` (unique), `description`, `created_at`/
+  `updated_at`.
+- **`m_config_property`** — the property *definition*, metadata only, never itself versioned.
+  `id`, `group_id` (FK), `property_key` (globally unique, immutable after creation — same
+  reasoning as `m_function_master.permission_key`: real code looks it up directly), `name`,
+  `description` (now the one place documenting which file/service reads a given property),
+  `value_type` (`'integer'`\|`'string'`, app-enforced vocabulary not a DB check, same
+  convention as `FunctionStatus`), `min_value`/`max_value` (nullable `TEXT`, so a future
+  `'date'` type needs zero schema change; only enforced when `value_type` is numeric),
+  `status` (`'active'`\|`'inactive'` — never delete, only status-change, mirroring
+  `m_function_master`), `created_at`/`updated_at`.
+- **`m_config_property_value`** — append-only value history. `id`, `property_id` (FK,
+  cascade), `value` (`TEXT`), `version` (increments per property from 1),
+  `effective_timestamp` (always equals `created_at` for now — see above), `is_active` (exactly
+  one `true` row per `property_id` at a time, enforced by an **application-level transactional
+  flip** — `pool.connect()` → `BEGIN` → flip old row's `is_active` → insert new row → `COMMIT`/
+  `ROLLBACK`/`finally release()` — the same shape already used twice in this codebase:
+  `roles.service.ts`'s `setUserRole()` and `contrarianFinder.service.ts`'s `saveLastScan()`
+  user-tier branch), `changed_by` (nullable FK → `users(id)`, `ON DELETE SET NULL`, same audit
+  pattern as `tx_shared_contrarian_run.started_by`), `created_at`. A property can never exist
+  with zero value rows — `createProperty()` inserts the definition and its initial value
+  transactionally, so every read path can assume "found or not found," never "definition
+  exists, no value yet."
+
+The migration also seeds: the `config_properties:manage` `m_function_master` row (**not**
+granted to any role by the migration itself, matching migration 021's precedent for
+`admin-master` — that role is never migration-seeded); one group ("Data Retention Policies");
+one property (`contrarian_finder_admin_history_retention_count`, `integer`, range `1`–`500`);
+its initial value row (`60` — unchanged behavior on deploy).
+
+**One deliberate exception to "never hardcode a role name"**: `config_properties:manage` can
+only ever be granted to `admin-master`, confirmed explicitly with the user as acceptable since
+this is genuinely system-level configuration. `roles.service.ts` gets a small hardcoded
+`ADMIN_MASTER_ONLY_PERMISSIONS` set, checked inside `grantPermission()` before the existing
+`PERMISSION_REQUIRES` parent-permission check — a role-name lookup (`SELECT name FROM m_roles
+WHERE id = $1`, mirroring `setUserRole()`'s own inverse query) throws a new
+`RoleNotAllowedForPermissionError` (→ `400`) if the target role isn't literally `'admin-master'`.
+The permission-check *mechanism* itself stays fully DB-driven and consistent with the rest of
+the app — this is the one specific key that additionally carries an "and only this role" rule,
+not a general pattern.
+
+**Backend**: `configProperty.service.ts` (new) — groups CRUD, properties CRUD
+(`property_key`/`value_type` immutable after creation), `setPropertyValue()` (the transactional
+value-flip write), `listPropertyValueHistory()`, and the two read functions real consumers use:
+`getConfigValue(propertyKey)` (live, no cache) and `getConfigInt(propertyKey, fallback)`
+(parses/validates, `console.warn`s and returns the caller's fallback — never throws — on a
+missing or unparseable row, so a business-critical limit can never silently become
+`0`/`NaN`/undefined). New error classes (`InvalidValueTypeError`, `InvalidConfigValueError`,
+`DuplicateConfigGroupError`, `DuplicatePropertyKeyError`) mapped to `400`/`409` in
+`configProperty.controller.ts`, following the existing `instanceof`-based convention. Every
+route (`GET/POST /groups`, `PUT /groups/:id`, `GET/POST /properties`, `PUT /properties/:id`,
+`PUT /properties/:id/value`, `GET /properties/:id/history`) gated by a single
+`requirePermission('config_properties:manage')` — unlike `m_function_master`, which splits
+read/write gating, every operation here is admin-master-only anyway. Mounted in `app.ts` as
+`/config-properties`. `contrarianFinder.service.ts`'s previously-hardcoded
+`const ADMIN_HISTORY_LIMIT = 60` removed; `saveLastScan()`'s admin-tier branch now calls
+`getConfigInt('contrarian_finder_admin_history_retention_count', 60)` before the prune query —
+the literal `60` fallback stays in-file too, matching the seeded DB value. 53 new backend
+tests (groups/properties CRUD, the transactional value-flip shape, validation for both value
+types, `getConfigInt`'s fallback-and-warn behavior, status-code mapping) plus updates to
+`roles.service.test.ts`/`roles.controller.test.ts` (the new admin-master-only guard, including
+a regression check that granting an unrelated permission never triggers the extra role-name
+lookup) and `contrarianFinder.service.test.ts`'s admin-tier `saveLastScan` test (now a 3-call
+sequence — config read → insert → prune — plus two new tests for the missing-row and
+unparseable-value fallback paths). 542 backend tests total, `tsc`/lint clean.
+
+**Frontend**: `api/configProperties.ts` (new) — TanStack Query hooks mirroring
+`portfolioTemplates.ts`'s pattern (`useConfigGroups`, `useCreateConfigGroup`,
+`useUpdateConfigGroup`, `useConfigProperties`, `useCreateConfigProperty`,
+`useUpdateConfigProperty`, `useSetConfigPropertyValue`, `useConfigPropertyValueHistory`).
+`ConfigPropertiesPage.tsx` (new) combines `FunctionsPage.tsx`'s create-form-plus-list pattern
+with `PortfolioTemplateApprovalPage.tsx`'s expandable-row-plus-detail pattern: a "create group"
+form, a "create property" form (group/type/range/initial value — min/max inputs only shown when
+type is `integer`), and a property list where each row expands to a metadata-edit form, a
+"set new value" form, and the value-history table. `AdminPage.tsx` gained a `configProperties`
+tab, a `canManageConfigProperties` boolean derived from `session?.permissions`, and the same
+hidden-not-disabled double-guard (tab visibility + rendered-content check) already used for
+every other gated tab. 18 new frontend tests (API hooks + page behavior + the new tab's
+visibility gating in `AdminPage.test.tsx`), 290 frontend tests total, `tsc`/lint clean.
+
+**Verified live**: migration applied against the real CockroachDB Cloud dev DB, confirmed via
+`SHOW CREATE TABLE` for all three new tables plus the seeded group/property/value rows and the
+`config_properties:manage` function row. `config_properties:manage` granted to `admin-master`
+directly (same manual-grant precedent as `contrarian_finder:scan_history`), confirmed via query
+that no other role holds it.
+
+**Second real consumer — migration `029`, the Admin-Master Fallback API Key model.** The
+`user`/`admin`/`user-contra-wokey`-fall-back-to-admin-master's-key logic (Functional
+Authorization, above) had `FALLBACK_ELIGIBLE_ROLES` hardcoded as a TS array in
+`userSubscription.service.ts`. Converted to a `string`-typed config property,
+`api_key_fallback_eligible_roles` (group "API Key Access Policies"), storing role names as a
+comma-separated list — the first real use of `value_type: 'string'` since the framework was
+built type-agnostic from the start. **What actually motivated this**: not a bug in the existing
+three roles, but a new custom role — `user-premium` — that had no FMP/Finnhub key of its own and
+had no way to become fallback-eligible short of a code deploy, since the list lived in a TS
+constant. Exactly the "business-tunable value that shouldn't need a deploy" case this framework
+was built for. Resolution (`getDecryptedKey()`'s fallback branch) now calls the new
+`getConfigStringList('api_key_fallback_eligible_roles', fallback)` live on every call, no
+caching — same "reads always live" principle as the integer consumer. The role-fetch
+(`rolesService.getUserRoles()`) and this config read now run **concurrently** via `Promise.all`
+rather than adding a second sequential round-trip to what was already there.
+
+**New `ROLE_LIST_PROPERTY_KEYS` validation**: a bare `string`-typed property has no natural
+min/max range check the way `integer` does, so without additional validation
+`api_key_fallback_eligible_roles` could be saved as any opaque text, including a typo'd role name
+that would silently exclude a role from fallback forever. `configProperty.service.ts` gained a
+small `ROLE_LIST_PROPERTY_KEYS` set (currently one entry, same "extend by adding a line" pattern
+as `PERMISSION_REQUIRES`) — when a property's key is in that set, `setPropertyValue()` calls
+`validateRoleListValue()`, which splits the incoming value on `,`, trims each entry, and confirms
+every one names a role that actually exists in `m_roles` (a live `SELECT ... WHERE name = ANY($1)`),
+rejecting with `InvalidConfigValueError` (`400`) listing the unknown name(s) otherwise. The new
+`getConfigStringList()` read function applies the same trim-and-drop-empty normalization on the
+way out, so a defensively-written value round-trips identically to how it was validated at write
+time. `getConfigInt()`'s existing "never throws, warns and falls back" contract is mirrored here
+too — a missing or empty-after-parsing config row logs a warning and returns the caller's own
+fallback array rather than ever leaving `FALLBACK_ELIGIBLE_ROLES` empty/undefined.
+
+### Portfolio Upload — Flex: Footer & Cash Row Markers ✅ Done
+
+**Built 2026-08-25–27** — two follow-on rounds to the original Flex wizard (above), both driven
+by real broker export files the user tried mid-testing that broke the original "one clean header
+row, then straight data rows" assumption the wizard was designed around.
+
+**Footer marker (migration `028`)**: several exports append a trailing summary/disclaimer block
+below the genuine holdings rows — "Totals," "Prices as of [date]," legal boilerplate — that
+`flexParser.service.ts` had no way to exclude. Depending on the row's shape, this either broke
+parsing outright (non-numeric cells landing in a numeric-mapped column) or, worse, silently
+ingested the block as one or more bogus holdings. New optional wizard step: after Inspect Data's
+top-5 preview, the user can click any row in a full-file preview grid to mark it — and every row
+below it — as the footer; the parser truncates the row set to everything strictly above that
+marker before running `buildHoldingsFromMappedRows()`. Persisted as a nullable
+`footer_marker_row INT` on `m_portfolio_template_mapping_master`, so once a template is saved, a
+later reused upload auto-truncates at the same *relative* row position without re-asking — a
+template genuinely captures "this broker's export always has N holdings rows, then a footer,"
+not just the column mapping. **Real bug found+fixed live**: manually retyping a bad cell value in
+the wizard (a legitimate correction path, not a re-upload) didn't go through the same
+row-derivation code as a fresh file parse, so the stored footer-marker index could point past the
+edited row count if the edit changed which row was "last." Fixed by re-deriving the marker
+position against the *current* in-memory row array on every edit, not against the original
+upload's row count captured at file-read time.
+
+**Cash row identifier v1 (migration `030`)**: a second real gap — some brokers export the
+portfolio's cash/money-market balance as its own row rather than a value the app's
+`tx_cash_positions` table can already receive through a normal field mapping. Without a way to
+flag it, that row either got silently dropped (no sensible `Quantity`×`Current Price` combination
+existed for it) or worse, miscounted directly into holdings totals. V1 covered exactly one
+pattern: click a row to mark it "this is the cash row," then map which column on that row holds
+its dollar value — a `cashValueColumn` marker, mirroring the footer marker's click-to-set
+interaction. 3 new flat columns on `m_portfolio_template_mapping_master` for this.
+
+**Cash row identifier v2 — JSON redesign (migration `031`)**: continued testing surfaced a second
+real cash pattern v1 structurally couldn't express — some exports embed the cash figure *inside*
+a labelled text cell (e.g. a "Description" column literally containing
+`"CASH & CASH EQUIVALENTS $12,345.67"`) rather than a clean adjacent numeric column. Rather than
+bolt a fourth flat column onto the table for this second pattern, replaced all 3 of v1's flat cash
+columns with a single `cash_config JSONB` column holding a small discriminated union:
+```ts
+type CashValueSource =
+  | { kind: 'column'; column: string }     // Pattern #1: value lives in its own column
+  | { kind: 'embedded'; pattern: string }; // Pattern #2: value is embedded text in the marked cell
+type CashConfig = { rowMarker: string; value: CashValueSource } | null;
+```
+New `extractEmbeddedCashAmt()` (regex-extracts a dollar figure out of free text given the stored
+`pattern`) and `coerceCashConfig()` (validates/normalizes a `cash_config` value read back from the
+DB) in `flexParser.service.ts`. The wizard's cash step now presents an explicit toggle — "Same
+column" (Pattern #1, unchanged UX) vs. "Embedded in another column" (Pattern #2, new) — rather
+than inferring which pattern applies. **Real bug found+fixed live**: switching the toggle from
+Pattern #1 to Pattern #2 left the preview grid's click-target state defaulted to `'marker'`
+instead of auto-advancing to `'value'`, so the user's very next click (intended to pick the cell
+holding the embedded value) silently overwrote the already-correct row marker instead of setting
+the value target. Fixed by having the "Embedded in another column" option's `onClick` also call
+`setCashPickTarget('value')` on entry. **Second bug, same week**: the Inspect Data preview step
+never surfaced the detected cash amount at all, so a user proceeding through the wizard had no
+confirmation the cash config was actually working before committing — fixed by adding a
+"Cash detected: $X" line to that step, sourced from running the same extraction logic
+client-side against the preview rows.
+
+Migration `030`'s 3 flat columns never shipped to a real user-facing release before `031`
+superseded them the same week — no backfill or dual-write concern, `031`'s migration drops them
+outright.
+
+### Portfolio Upload — Flex: Guided Stepper ✅ Done
+
+**Built 2026-08-26–27.** Across the footer-marker and both cash-identifier rounds above, the
+wizard had organically grown to 4-plus loosely sequenced *optional* steps ahead of Inspect Data,
+each shown/hidden by its own local boolean rather than governed by any single flow. Manual testing
+surfaced a real behavioral problem this produced: users learned they could skip straight from
+"Map Columns" to "Use This Mapping" without ever scrolling down to actually look at the top-5
+preview — which quietly defeats the entire premise the original Flex design rests on ("a template
+can only ever be saved once it's been proven against a real, rendered Dashboard from real data,"
+per the original Flex build's step-4 rationale) if the human in the loop never looked at the one
+intermediate checkpoint meant to catch an obviously-wrong mapping before it reaches the Dashboard.
+
+**Replaced the flat toggle row with a real 6-step stepper**: **Header → Footer → Cash → Map
+Columns → Inspect Data → Confirm Mapping**, rendered as one combined bar rather than a stepper
+row plus a separate actions row — a left `stageActions` zone (the current step's own
+Back/Next/Skip controls, a visually distinct background) and a right stepper zone (`bg-bg-card`,
+one indicator per `DISPLAY_STEPS` entry) separated by a visible divider. A `stepStatus()` function
+derives each indicator's done/current/upcoming visual state purely from the wizard's existing
+state machine — no new state was introduced to drive the stepper itself, it's a derived view over
+state that already existed for each step's own logic.
+
+**Scroll-to-review gate, the actual behavioral fix**: "Use This Mapping" now stays disabled until
+the user has genuinely scrolled the top-5 preview into view. A `hasSeenPreview` boolean flips true
+the first time an `IntersectionObserver` (watching a `previewEndRef` sentinel element placed
+immediately after the last preview row) reports that sentinel entering the viewport, plus a
+visible remark next to the disabled button explaining why it's disabled. Once triggered,
+`hasSeenPreview` stays `true` permanently for that wizard session even if the user scrolls back up
+— the gate only needs to confirm the preview was seen once, not that it's currently on-screen,
+so it can't be re-triggered into a false "not yet seen" state by ordinary scrolling.
+
+**Test infrastructure**: `ColumnMappingWizard.test.tsx`/`FlexPortfolioPage.test.tsx` needed a
+`vi.stubGlobal('IntersectionObserver', ...)` mock, since jsdom (this repo's test DOM) has no real
+`IntersectionObserver` implementation — a `vi.fn()` constructor function (not an arrow function,
+since arrow functions can't be used with `new`) capturing every registered callback in an array,
+plus a `simulatePreviewScrolledIntoView()` test helper that invokes those captured callbacks
+wrapped in React Testing Library's `act()` — required because the callback synchronously updates
+component state from outside any real DOM event handler, which React Testing Library otherwise
+flags as an unwrapped-state-update warning/failure.
+
+### Portfolio Template Governance — Delete, Bound-Portfolios & Unattached Portfolios ✅ Done
+
+**Built 2026-08-27** — a cluster of admin-side template-lifecycle gaps surfaced organically while
+manually testing the Flex wizard work above, all scoped to the existing Portfolio Templates admin
+tab rather than new top-level UI, following the "admin acts on another user's resource, tightly
+scoped" pattern already established twice in this repo (the bound-portfolios pop-up below reuses
+it a third time within the same feature).
+
+**Hard-delete a template**: the original Flex design deliberately made templates permanent
+("never deleted, only status-changed" — accepted then as a "don't over-build" tradeoff for a
+`Rejected` template's cleanup story). Manual testing accumulated enough mistake/throwaway
+`Rejected`/`Pending Approval` templates that the user asked for a real delete path. New delete
+action restricted to those two statuses only — an `Approved` template that's actually in use by
+real portfolios can never be hard-deleted, only rejected going forward (status-changed, same as
+before) — and blocked outright, independent of status, if any `tx_portfolios` row currently has
+`upload_template_id` pointing at it.
+
+**Bound-portfolios pop-up, resolving the block without a dead end**: rather than surfacing a bare
+"can't delete, currently in use" error and leaving the admin to go hunt through Manage
+Users/Dashboards for the offending portfolio(s), a blocked delete attempt now opens a pop-up
+listing every portfolio still bound to that template (owner email + portfolio name), each with
+its own inline delete action — the block resolves from the same screen. **Real bug found+fixed
+live**: deleting a bound portfolio from inside this pop-up hit the exact same
+`useDeletePortfolio` query-cache race the standalone Dashboard delete flow had already been fixed
+for once (see Global 401 Self-Healing Session below for the general shared-hook fix) — the
+pop-up's own portfolio list was fetching independently rather than going through the already-fixed
+`removeQueries`-based hook, so a just-deleted portfolio could still flash back into the list until
+the next full refetch. Fixed by wiring the pop-up onto the same shared `useDeletePortfolio` hook
+instead of a bespoke fetch-and-refresh.
+
+**Unattached Flex Portfolios (View + Delete)**: while testing the above, the user found a real
+orphaned portfolio in the dev DB — "Charles-Schwab - Complete," stuck at
+`flex_template_status = 'Flex-Err'` (created via Flex, then abandoned before either Save Template
+or Delete Portfolio, exactly the "needs attention" state the original design anticipated) — with
+no UI anywhere surfacing that it existed; the original design's own caveat ("a web app can't
+literally force a user to stay on a page and choose... left in an explicit error/needs-attention
+state") had never been paired with anything that actually *showed* that state to anyone. **Per the
+user's explicit placement instruction** — inside the existing Admin Module → Portfolio Templates
+tab, not an independent menu item — new `listUnattachedFlexPortfolios()`/
+`deleteUnattachedFlexPortfolio()` in `portfolio.service.ts`, scoped strictly to
+`flex_template_status = 'Flex-Err'` (a resolved `'Flex'` portfolio or any Legacy portfolio is
+never touched by either function, by construction of the `WHERE` clause, not by an extra
+application-level check). New `GET`/`DELETE /portfolio-templates/unattached-portfolios(/:portfolioId)`
+routes, gated by the same `portfolio_template:manage_status` permission already governing the rest
+of that tab — no new permission needed, since this is squarely template-governance work, not a
+new capability. New `UnattachedFlexPortfoliosSection` component in
+`PortfolioTemplateApprovalPage.tsx`. **Live-verified**: the real orphaned Charles-Schwab
+portfolio appeared in the new section and was cleanly deleted; confirmed via a direct row check
+that its `tx_holdings`/`tx_uploads`/`tx_portfolio_action_hist` children cascade-deleted with it,
+same as any other portfolio deletion.
+
+### Header Persona Badge ✅ Done
+
+**Built 2026-08-27** — a small usability gap noticed while the user juggled multiple test
+accounts across different roles during manual RBAC/Flex QA: nothing in the header confirmed which
+account/role a given browser session was actually authenticated as, short of opening Admin →
+Manage Users or inspecting `GET /auth/me` directly. New `UserPersonaBadge.tsx` — an
+initials-seal badge (`data-testid="user-persona-badge"`) rendered in both `TabShell.tsx`'s and
+`AdminPage.tsx`'s headers, with a native `title` attribute tooltip showing the full email and
+role(s) on hover — no new dependency for a custom tooltip component, since the browser's own
+title-attribute tooltip was judged sufficient for this use case. Purely derived from the
+already-fetched `useSession()` data; no new migration, endpoint, or backend change of any kind.
+
+### Global 401 Self-Healing Session ✅ Done
+
+**Built 2026-08-27** — root-caused a recurring "the app looks like the backend is down" report
+that turned out to be entirely client-side, not an infra issue (all three services — frontend,
+backend, `analysis-service` — were confirmed healthy throughout via direct port/health checks
+each time this was investigated). `useSession()` was configured with `staleTime: Infinity`, so
+once the httpOnly `auth_token` cookie went stale for any reason (natural JWT expiry, or a backend
+restart during local dev rotating the signing secret and invalidating every existing token), the
+frontend kept trusting its cached "logged in" query state indefinitely and let every subsequent
+authenticated call fail with an uncaught `401` instead of ever re-prompting login. First surfaced
+indirectly, as a question about whether logging into two different roles from the same browser
+tab was supported — it isn't (the `auth_token` cookie is scoped per-origin, not per-tab, so a
+second login in another tab silently switches identity for both) — but chasing that question is
+what surfaced the real underlying staleness bug.
+
+**Fix — a single global choke point, not per-page handling.** New `frontend/src/lib/
+queryClient.ts` exports: `SESSION_EXPIRED_STORAGE_KEY` and `clearSession(client: QueryClient,
+options: { markExpired?: boolean } = {})` — clears the cached session/portfolio/etc. query state
+off the passed-in `QueryClient` instance, and, when `markExpired` is set, drops a
+`sessionStorage` flag for the very next page load to notice. `frontend/src/api/client.ts`'s
+`apiFetch` — the one function every API call in the frontend already funnels through — now calls
+`clearSession(queryClient, { markExpired: true })` on *any* `401` response from *any* call site,
+before throwing, rather than requiring every page to implement its own 401 handling.
+`useLogout` was refactored to reuse the same `clearSession()` (without `markExpired`, since an
+intentional logout isn't a "session ended unexpectedly" event) for the ordinary logout path,
+rather than keeping a separate, slightly different clearing routine. `LoginPage.tsx` checks and
+clears the `sessionStorage` flag on mount and shows a "Your session ended, please log back in"
+banner (`data-testid="login-session-expired"`) when it was set.
+
+**Real bug found+fixed during design, not after**: the first version of `clearSession` closed
+over the app's singleton `queryClient` import directly rather than taking one as a parameter —
+this broke `useLogout`'s pre-existing test, which constructs its own local `QueryClient` instance
+for isolation (never the app's real singleton). Fixed by making `clearSession` take the
+`QueryClient` as an explicit parameter, so every caller — real app code and tests alike — always
+passes the specific instance it actually means, rather than the function silently assuming which
+one is "the" client.
+
+**Also fixed the same day, found during the same investigation**: a `useDeletePortfolio` `404`
+console error on ordinary delete — a blanket `invalidateQueries(['portfolios'])` after a
+successful delete was refetching the *just-deleted* portfolio's own detail query before the
+caller's own state update had a chance to navigate the user away from it, producing a real (if
+harmless) `404` in the console on every delete. Fixed by switching to
+`queryClient.removeQueries({ queryKey: ['portfolios', id] })` for the specific deleted portfolio
+(no refetch possible — the query is gone, not just marked stale) plus an `exact`-scoped
+`invalidateQueries({ queryKey: ['portfolios'] })` for the list query only. This is the same
+shared hook later reused by the bound-portfolios pop-up's own delete action above, closing that
+race in a second call site for free.
+
+### "Login-as" Impersonation ✅ Done
+
+**Built 2026-08-28**, `/plan`-approved following a same-session design discussion the user opened
+with a direct question — "Heavy Lift or OK Lift?" — for an admin tool to view the app exactly as
+a specific user sees it, without their password, as a non-intrusive way to reproduce and
+troubleshoot role-specific issues during the ongoing multi-role rollout. Assessed as an OK lift:
+this codebase already had JWT/httpOnly-cookie auth, DB-backed RBAC permissions, an existing admin
+user list endpoint, and — from this same session's bound-portfolios/unattached-portfolios work
+directly above — the exact "admin acts regarding another user's identity/resource, tightly
+scoped" pattern this needs, just applied to a login session instead of a portfolio row. Per the
+user's explicit direction, the permission is **admin-master-only and granted via direct SQL
+only** — never through the Admin Console's Manage Permission screen — the same deliberate
+backend-only rollout precedent already used for `config_properties:manage`/
+`contrarian_finder:scan_history`.
+
+**Auth mechanism — a dual-identity JWT, not a second session store.**
+`auth.service.ts`'s `TokenPayload` gains an optional `impersonatedBy` (the admin's own user id,
+present only during an impersonation session):
+```ts
+export interface TokenPayload {
+  userId: string;
+  impersonatedBy?: string;
+}
+export function signToken(
+  userId: string,
+  options?: { impersonatedBy?: string; expiresIn?: string },
+): string { ... }
+```
+`requireAuth.ts` populates `req.user = impersonatedBy ? { id: userId, impersonatedBy } : { id:
+userId }` straight from the verified token — never re-derived from a lookup — and
+`types/express.d.ts`'s `Request.user` carries the same optional field. One cookie, one token,
+both identities always recoverable from it; no second cookie or session-store table needed.
+**Deliberately shorter expiry while impersonating** — new `env.impersonationExpiresIn` (default
+`1h`, vs. the normal 7-day `JWT_EXPIRES_IN`) — a tighter blast radius for a session that's
+elevated-but-borrowed. When it lapses, the Global 401 Self-Healing Session work directly above
+already handles it gracefully with zero new plumbing — a genuine same-session synergy, not a
+coincidence: the impersonation design was written with that existing mechanism in mind.
+
+**New `impersonation.service.ts`**:
+- `startImpersonation(adminId, targetUserId)` — `404`s (`TargetUserNotFoundError`) if the target
+  doesn't exist; blocks with `403` (`CannotImpersonateAdminError`) if the target holds *any*
+  admin-console permission (`roles:manage`/`permissions:manage`/`users:manage_roles`/
+  `functions:manage` — the exact same set `frontend/src/api/auth.ts`'s `hasAdminConsoleAccess`
+  already checks, mirrored backend-side so the two can never silently drift) — impersonating
+  another admin is a privilege-escalation path dressed as a support tool, blocked unconditionally,
+  not just discouraged in the UI. Inserts an audit row, returns the target's `{ id, email }`.
+- `endImpersonation(adminId, targetUserId)` — stamps `ended_at = now()` on the matching open audit
+  row.
+
+**New migration `032`**: an `m_function_master` row for `users:impersonate` — **not** granted to
+any role by the migration itself, matching the `config_properties:manage`/
+`contrarian_finder:scan_history` precedent exactly (grant to `admin-master` is a separate, direct
+`INSERT INTO m_role_permissions` run manually against the DB, never through the Admin Console).
+New `user_evt_impersonation_log` table (the `user_evt_` bucket — per-user event data, same
+category as `user_evt_usage`): `id`, `admin_user_id` FK, `target_user_id` FK, `started_at`,
+`ended_at` nullable, `WITH (ttl_expire_after = '180 days')` — deliberately longer than
+usage-tracking's own TTLs, since this is a security audit trail worth retaining longer than
+ordinary usage telemetry. `ended_at` stays `null` if a session simply expires or is abandoned
+rather than explicitly ended via "Return to my account" — accepted as how most audit systems
+handle an ungraceful end, not treated as a gap needing a background sweeper.
+`roles.service.ts`'s `ADMIN_MASTER_ONLY_PERMISSIONS` set gains `'users:impersonate'` — the actual
+enforcement point, same mechanism `config_properties:manage` already established.
+
+**Auth controller — two new handlers**: `impersonate` (`requireAuth` +
+`requirePermission('users:impersonate')`) rejects nested impersonation with `409` if
+`req.user.impersonatedBy` is already set — no impersonating from within an impersonation session,
+always return to your own account first — otherwise calls `startImpersonation`, signs a new
+short-lived token for the target with `impersonatedBy: req.user.id`, sets the cookie, and responds
+with the same session shape as `/auth/me`. `stopImpersonating` (`requireAuth` only — if you're
+holding a valid impersonation token, you're always allowed to end it, no separate permission
+gate) `400`s if `req.user.impersonatedBy` is unset, otherwise ends the audit row and signs a fresh
+normal-length token for the *original* admin identity. `GET /auth/me` gains one new field,
+`impersonating: boolean` (`!!req.user.impersonatedBy`) — everything else in that response
+(`email`/`roles`/`permissions`) already correctly reflects "whoever the token's primary `userId`
+currently is," impersonating or not, with no extra logic needed.
+
+**Frontend**: `User.impersonating: boolean`; new `switchIdentity(queryClient, user)` helper
+(`queryClient.clear()` — every cached query, portfolios/roles/everything, belongs to the identity
+being left — followed by a synchronous `setQueryData(['session'], user)`, avoiding a flash of
+"logged out" the same way `useLogin`/`useSignup` already do). **Deliberately no
+`clearSession`-style deferred-clear race guard here** — unlike the logout/expiry case, there's no
+window to protect: the new cookie is already valid by the instant `switchIdentity` runs, so any
+still-mounted query observer's immediate refetch (e.g. the Dashboard's `usePortfolios()`) just
+correctly returns the *new* identity's data rather than erroring against a cookie that's already
+gone. New `LoginAsModal.tsx` reuses the *existing* `useUsersWithRoles()`
+(`GET /users`, already gated by `users:manage_roles` — confirmed `admin-master` already holds
+that permission before deciding not to build a second, near-duplicate user-list endpoint) —
+search/filter, pick a user, an explicit confirm step, and a failed-attempt path that surfaces the
+backend's own error message inline rather than closing the modal. New
+`ImpersonationBanner.tsx` (`data-testid="impersonation-banner"`), rendered in both
+`TabShell.tsx` and `AdminPage.tsx` whenever `session.impersonating === true` — "You are viewing as
+{email}." plus a "Return to my account" button (`data-testid="return-to-my-account"`) that calls
+`useStopImpersonating()` then navigates back to `/admin`. `AdminPage.tsx` gains a "Login as User"
+header trigger, rendered only when `session.permissions.includes('users:impersonate')` — hidden
+entirely (not disabled) for every other admin, the same permission-gating pattern already used
+throughout that page's header controls.
+
+**Tests**: new `impersonation.service.test.ts` (4 tests — succeeds for an ordinary user, blocks a
+target holding any admin-console permission, `404`s a nonexistent target, `endImpersonation`
+stamps `ended_at`); extended `auth.controller.test.ts` (`403` without the permission, `409` if
+already impersonating, `200` sets a new cookie for the target on `/auth/impersonate`; `400` if not
+impersonating, `200` restores the admin's own session on `/auth/stop-impersonating`; `GET
+/auth/me` returns `impersonating: true` mid-impersonation); new `LoginAsModal.test.tsx` (4 tests
+— lists users, search filters by email, requires the confirm step before calling
+`POST /auth/impersonate` with the right id, surfaces a failed attempt's error without closing);
+new `ImpersonationBanner.test.tsx` (3 tests — hidden when not impersonating, shows the right
+email when impersonating, "Return to my account" calls `POST /auth/stop-impersonating` and
+navigates to `/admin`); extended `AdminPage.test.tsx` (2 new tests for the header trigger's
+permission gating); `UserPersonaBadge.test.tsx` updated for the new `impersonating` field on the
+test `User` fixture (typecheck fallout from the interface change, not a behavior change).
+`tsc`/lint clean both sides.
+
+**Known gap, not yet closed — live verification.** Every layer above is unit/integration-tested
+and `tsc`/lint-clean, but the plan's own verification section calls for a live, two-real-account
+walkthrough that hasn't been run yet: impersonate a plain `user`, confirm the banner and Dashboard
+genuinely reflect that target's real portfolio data (not a cached admin view), confirm "Return to
+my account" cleanly restores the admin-master session, confirm attempting to impersonate another
+admin/admin-master account is blocked end-to-end (not just at the unit-test level), and confirm
+the `user_evt_impersonation_log` audit row gets a non-null `ended_at` after returning — see
+Section 2.
+
 ---
 
 ## Section 2 — Next Step
@@ -979,6 +1459,11 @@ Approved-template list, confirming the full template-governance loop end-to-end.
 follow-up) are now done** — see Section 1 above for full detail (RBAC + Admin Console; Stock
 Universe/`m_tickers` sync; SP500 expansion to top 400). What's left, in rough priority order:
 
+- **Login-as live verification** — the "Login-as" Impersonation feature (Section 1, built
+  2026-08-28) is fully built and test-covered but not yet walked through live with two real
+  accounts: confirm the banner/Dashboard genuinely reflect a real target's data, "Return to my
+  account" restores admin-master cleanly, impersonating another admin/admin-master is blocked
+  end-to-end, and `user_evt_impersonation_log.ended_at` populates correctly on return.
 - **Usage Tracking, the part of item 6 not yet built.** The RBAC schema includes
   `user_evt_usage`/`user_evt_usage_summary_monthly` and a `usageTracking.service.ts` exists
   (logs `contrarian_finder_scan` events today), but the broader "measure per-user usage across

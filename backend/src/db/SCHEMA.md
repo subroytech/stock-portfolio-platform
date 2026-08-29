@@ -16,7 +16,8 @@ counts and can show 0 even when tables exist (see `SHOW TABLES`/SQL Shell instea
 Tables are prefixed by category (settled 2026-07-10):
 - **`m_`** — master/reference data (`m_tickers`, `m_index_master`, `m_index_constituent`,
   `m_roles`, `m_role_permissions`, `m_function_master`,
-  `m_portfolio_template_mapping_master`/`_dtls`).
+  `m_portfolio_template_mapping_master`/`_dtls`, `m_config_group`, `m_config_property`,
+  `m_config_property_value`).
 - **`tx_`** — transactional, portfolio-scoped data (`tx_portfolios`, `tx_holdings`,
   `tx_cash_positions`, `tx_uploads`). **Exception: `tx_shared_contrarian_run`** (added
   2026-08-04) is `tx_`-prefixed despite being neither portfolio-scoped nor per-user — the
@@ -36,13 +37,13 @@ Tables are prefixed by category (settled 2026-07-10):
   child of the account itself — per-user assignment data, not reference/static data (that's
   what keeps `users_roles` out of `m_`, even though it's *about* roles).
 - **`user_evt_`** — per-user event/log data (added 2026-07-31: `user_evt_usage`,
-  `user_evt_usage_summary_monthly`). A new bucket, added when usage tracking didn't fit any of
-  the other three: `tx_` is explicitly portfolio-scoped (usage events are user-scoped, not
-  portfolio-scoped), `sys_` is explicitly internal-bookkeeping-not-app-data (usage events are
-  real business data), and `m_`/unprefixed are both for relatively static, non-growing data
-  (the opposite of an append-only event log). Does **not** apply to non-user-scoped event/cache
-  data (e.g. a future shared quote cache, keyed by symbol not by user) — that would need its
-  own bucket if/when it's built.
+  `user_evt_usage_summary_monthly`; `user_evt_impersonation_log` added 2026-08-28). A new
+  bucket, added when usage tracking didn't fit any of the other three: `tx_` is explicitly
+  portfolio-scoped (usage events are user-scoped, not portfolio-scoped), `sys_` is explicitly
+  internal-bookkeeping-not-app-data (usage events are real business data), and `m_`/unprefixed
+  are both for relatively static, non-growing data (the opposite of an append-only event log).
+  Does **not** apply to non-user-scoped event/cache data (e.g. a future shared quote cache,
+  keyed by symbol not by user) — that would need its own bucket if/when it's built.
 
 Tables were originally created unprefixed (migrations 001–008) and renamed in two follow-up
 migrations: `009_rename_master_tables.sql` (the 3 `m_` tables) and
@@ -68,11 +69,15 @@ users (1) ──< tx_portfolios (many)
      ├──< users_roles (many) >── m_roles (1) ──< m_role_permissions (many) >── m_function_master (1, via FK on permission_key)
      ├──< user_evt_usage (many)
      ├──< user_evt_usage_summary_monthly (many)
+     ├──< user_evt_impersonation_log (many, via admin_user_id AND target_user_id — 2 FKs to users)
      └──< m_portfolio_template_mapping_master (many, via created_by/reviewed_by, both nullable)
 
 m_index_master (1) ──< m_index_constituent (many)
 
 m_portfolio_template_mapping_master (1) ──< m_portfolio_template_mapping_dtls (many)
+
+m_config_group (1) ──< m_config_property (many) ──< m_config_property_value (many)
+     m_config_property_value.changed_by ──> users (many, nullable, ON DELETE SET NULL)
 
 m_tickers  — standalone reference table, not FK'd from anywhere
 ```
@@ -186,6 +191,14 @@ Indexes: `m_role_permissions_pkey` (composite PK on `role_id, permission_key`).
 `permission_key` also carries a **FK** to `m_function_master(permission_key)` as of migration
 `016` — a role can never be granted a permission key that isn't a real registered function.
 
+**One key, `config_properties:manage`, is additionally app-level restricted to only ever be
+granted to the `admin-master` role** (added 2026-08-24, alongside `m_config_property` below) —
+a small hardcoded `ADMIN_MASTER_ONLY_PERMISSIONS` set in `roles.service.ts`'s
+`grantPermission()`, not a DB constraint. This is a deliberate, narrow exception to "every gate
+in this app is DB-driven, never a hardcoded role-name check" — the permission mechanism itself
+stays fully DB-driven (still a real, revocable row here, still checked by `requirePermission`
+like everything else); only *which role this one specific key can be granted to* is hardcoded.
+
 ### `m_function_master`
 Added by migration `016`, 2026-08-01 (Admin Console, Architecture.md Section 3 item 6
 follow-up). Catalogs only the app "functions" that are genuine **exceptions** to the default
@@ -255,6 +268,30 @@ was first created."
 Indexes: `user_evt_usage_summary_monthly_pkey` (PK),
 `user_evt_usage_summary_monthly_user_id_feature_month_key` (unique on `user_id, feature,
 month` — this is what makes the `ON CONFLICT` upsert work).
+
+### `user_evt_impersonation_log`
+Added by migration `032`, 2026-08-28 ("Login-as" Impersonation). Audit trail for
+`admin-master`-only "Login-as" sessions — one row per impersonation session started via
+`POST /auth/impersonate`, closed via `POST /auth/stop-impersonating`. Retained via TTL
+(`WITH (ttl_expire_after = '180 days')`) — deliberately longer than `user_evt_usage`'s 35 days
+or `user_evt_usage_summary_monthly`'s 366 days' per-row reset behavior would suggest at a
+glance; this is a security audit trail, not ordinary usage telemetry, so it's kept longer on
+its own fixed schedule rather than reusing either existing retention window.
+
+`ended_at` stays `NULL` if the impersonation session simply expires (the shorter
+`impersonationExpiresIn`, default `1h`) or is abandoned rather than explicitly ended via
+"Return to my account" — accepted as the normal shape for an ungraceful end, not treated as a
+gap needing a background sweeper.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `admin_user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` — the impersonating admin-master account |
+| `target_user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` — the account being viewed as |
+| `started_at` | `TIMESTAMPTZ` | default `now()` |
+| `ended_at` | `TIMESTAMPTZ` | nullable — set by `endImpersonation()` on an explicit "Return to my account"; stays `NULL` on expiry/abandonment, see above |
+
+Indexes: `user_evt_impersonation_log_pkey` (PK).
 
 ### `tx_portfolios`
 | Column | Type | Notes |
@@ -466,6 +503,8 @@ one-time seed, the same characteristic that already justifies `m_tickers`' `m_` 
 | `created_by` / `reviewed_by` | `INT8` | both FK → `users(id)`, `ON DELETE SET NULL`, both nullable — `created_by` drives the "Admin/Admin-Master/yourself" visibility filter on the Approved list; `reviewed_by` records who approved/rejected it |
 | `reviewed_at` | `TIMESTAMPTZ` | nullable |
 | `sample_preview` | `JSONB` | nullable — the top-5-mapped-records snapshot captured at "Inspect Data" time, so an admin reviewing a Pending template later doesn't need the original file re-uploaded |
+| `footer_marker_row` | `INT8` | nullable; added by migration `028`, 2026-08-25 (Footer & Cash Row Markers). The row index (within the uploaded file, above which real holdings data ends) the user clicked to mark as "everything at/below this row is a trailing footer/summary block" — `flexParser.service.ts` truncates before parsing. `NULL` means no footer marker was set for this template (most files don't need one) |
+| `cash_config` | `JSONB` | nullable; added by migration `031`, 2026-08-27, **replacing 3 flat columns added and dropped the same week by migration `030`** (never shipped to a real release — no backfill concern). Discriminated union: `{ rowMarker: string; value: { kind: 'column'; column: string } \| { kind: 'embedded'; pattern: string } } \| null` — `rowMarker` identifies which row holds the cash/money-market position; `value.kind: 'column'` covers a broker exporting cash's dollar value in its own adjacent column, `value.kind: 'embedded'` covers a broker embedding it as text inside a labelled cell (e.g. a "Description" column literally containing `"CASH & CASH EQUIVALENTS $12,345.67"`), parsed via `flexParser.service.ts`'s `extractEmbeddedCashAmt()`/`coerceCashConfig()`. `NULL` means no cash row identified for this template |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
 
 Indexes: `m_portfolio_template_mapping_master_pkey` (PK),
@@ -484,6 +523,71 @@ Added by migration `022`. One row per mapped field within a template.
 Indexes: `m_portfolio_template_mapping_dtls_pkey` (PK),
 `m_portfolio_template_mapping_dtls_template_id_target_field_key` (unique on
 `template_id, target_field`).
+
+### `m_config_group`
+Added by migration `027`, 2026-08-24 (Config Properties framework — CLAUDE.md's "Config
+Properties framework" section). A free-standing category label for admin-configurable
+settings — not tied to a specific file/service (that's now what `m_config_property.description`
+documents instead), since one property's group could plausibly apply to a value used by
+multiple services.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `name` | `VARCHAR(100)` | `NOT NULL`, unique |
+| `description` | `TEXT`/`STRING` | nullable |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_config_group_pkey` (PK), `m_config_group_name_key` (unique).
+
+### `m_config_property`
+Added by migration `027`. The property *definition* — metadata only, never itself versioned
+(that's `m_config_property_value` below). `property_key` is globally unique and immutable
+after creation, same reasoning as `m_function_master.permission_key`: real code (e.g.
+`contrarianFinder.service.ts`'s `getConfigInt()` call) looks it up directly by string. A
+property can never exist with zero value rows — `configProperty.service.ts`'s
+`createProperty()` inserts the definition and its initial value transactionally.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `group_id` | `INT8` | FK → `m_config_group(id)` |
+| `property_key` | `VARCHAR(150)` | `NOT NULL`, unique |
+| `name` | `VARCHAR(150)` | `NOT NULL` |
+| `description` | `TEXT`/`STRING` | nullable — the one place documenting which file/service reads this property |
+| `value_type` | `VARCHAR(20)` | `NOT NULL` — `'integer'` \| `'string'` today (`'date'` deliberately deferred — the `TEXT`-typed `value`/`min_value`/`max_value` columns need zero schema change to add it later), app-enforced vocabulary, not a DB check constraint |
+| `min_value` / `max_value` | `TEXT`/`STRING` | nullable — only enforced when `value_type` is numeric; ignored for `'string'` |
+| `status` | `VARCHAR(20)` | `NOT NULL`, default `'active'` — `'active'`\|`'inactive'`, never delete, only status-change, mirroring `m_function_master` |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_config_property_pkey` (PK), `m_config_property_property_key_key` (unique).
+
+### `m_config_property_value`
+Added by migration `027`. **Append-only value history** — every change inserts a new row and
+flips the previous active row's `is_active` to `false`, transactionally
+(`configProperty.service.ts`'s `setPropertyValue()`), the same "transactional flip" shape as
+`roles.service.ts`'s `setUserRole()` and `contrarianFinder.service.ts`'s `saveLastScan()`
+user-tier branch. Real consumers read via `getConfigValue()`/`getConfigInt()` — always a live
+`SELECT ... WHERE is_active = true`, no caching layer.
+
+`effective_timestamp` always equals `created_at` today — no real future-dated scheduling logic
+is built yet, but the column exists as its own field (separate from `created_at`) specifically
+so that can be added later with zero migration. `version` increments per `property_id` from 1.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `property_id` | `INT8` | FK → `m_config_property(id)`, `ON DELETE CASCADE` |
+| `value` | `TEXT`/`STRING` | `NOT NULL` — always stored as text regardless of `value_type`, parsed/validated at the app layer |
+| `version` | `INT8` | `NOT NULL` — increments per `property_id`, starting at 1 |
+| `effective_timestamp` | `TIMESTAMPTZ` | `NOT NULL`, default `now()` — see note above |
+| `is_active` | `BOOL` | `NOT NULL`, default `true` — exactly one `true` row per `property_id` at a time, app-enforced (transactional flip), not a DB partial-unique-index |
+| `changed_by` | `INT8` | nullable FK → `users(id)`, `ON DELETE SET NULL` — audit trail, same pattern as `tx_shared_contrarian_run.started_by` |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_config_property_value_pkey` (PK), `idx_config_property_value_property_id`
+(covers both the live-read `WHERE property_id = $1 AND is_active = true` lookup and the
+value-history list's `WHERE property_id = $1 ORDER BY version DESC`).
 
 ### `sys_schema_migrations`
 Internal bookkeeping table created/maintained by `migrate.js` (not part of the app schema)
