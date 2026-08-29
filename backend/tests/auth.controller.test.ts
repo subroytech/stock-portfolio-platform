@@ -1,11 +1,19 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
+jest.mock('../src/services/impersonation.service', () => ({
+  ...jest.requireActual('../src/services/impersonation.service'),
+  startImpersonation: jest.fn(),
+  endImpersonation: jest.fn(),
+}));
 import request from 'supertest';
 import { pool } from '../src/db/pool';
 import { hashPassword, signToken } from '../src/services/auth.service';
+import * as impersonationService from '../src/services/impersonation.service';
 import app from '../src/app';
 
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockConnect = pool.connect as unknown as jest.Mock;
+const mockStartImpersonation = impersonationService.startImpersonation as jest.Mock;
+const mockEndImpersonation = impersonationService.endImpersonation as jest.Mock;
 
 // signup() also assigns the new user the baseline 'user' role
 // (roles.service.ts's setUserRole, transactional via pool.connect()) - a
@@ -162,7 +170,7 @@ describe('GET /auth/me', () => {
 
     const res = await request(app).get('/auth/me').set('Cookie', authCookie);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['contrarian_finder:scan'] });
+    expect(res.body).toEqual({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['contrarian_finder:scan'], impersonating: false });
   });
 
   test('401 if the session references a user that no longer exists', async () => {
@@ -171,5 +179,114 @@ describe('GET /auth/me', () => {
 
     const res = await request(app).get('/auth/me').set('Cookie', authCookie);
     expect(res.status).toBe(401);
+  });
+
+  test('impersonating: true when the token carries impersonatedBy', async () => {
+    const authCookie = `auth_token=${signToken('2', { impersonatedBy: '1' })}`;
+    mockQuery.mockImplementation((text: string) => {
+      if (text.includes('FROM users WHERE id')) return Promise.resolve({ rows: [{ id: '2', email: 'target@b.com' }] });
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await request(app).get('/auth/me').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.impersonating).toBe(true);
+  });
+});
+
+// Shared query mock for impersonate/stop-impersonating - requirePermission's own check query
+// also contains "m_role_permissions" (same substring-matching precedent as GET /auth/me's own
+// test above), so a non-empty `permissions` list doubles as "the gate passes."
+function mockSessionQueries(userRow: { id: string; email: string } | null, roles: string[] = [], permissions: string[] = []) {
+  mockQuery.mockImplementation((text: string) => {
+    if (text.includes('FROM users WHERE id')) return Promise.resolve({ rows: userRow ? [userRow] : [] });
+    if (text.includes('m_role_permissions')) return Promise.resolve({ rows: permissions.map((p) => ({ permission_key: p })) });
+    if (text.includes('users_roles')) return Promise.resolve({ rows: roles.map((r) => ({ name: r })) });
+    return Promise.resolve({ rows: [] });
+  });
+}
+
+describe('POST /auth/impersonate', () => {
+  beforeEach(() => {
+    mockQuery.mockReset();
+    mockStartImpersonation.mockReset();
+    mockEndImpersonation.mockReset();
+  });
+
+  test('403 without users:impersonate', async () => {
+    mockSessionQueries(null, [], []); // no permissions granted
+    const authCookie = `auth_token=${signToken('1')}`;
+    const res = await request(app).post('/auth/impersonate').set('Cookie', authCookie).send({ userId: '2' });
+    expect(res.status).toBe(403);
+    expect(mockStartImpersonation).not.toHaveBeenCalled();
+  });
+
+  test('409 when already impersonating', async () => {
+    mockSessionQueries(null, [], ['users:impersonate']);
+    const authCookie = `auth_token=${signToken('2', { impersonatedBy: '1' })}`;
+    const res = await request(app).post('/auth/impersonate').set('Cookie', authCookie).send({ userId: '3' });
+    expect(res.status).toBe(409);
+    expect(mockStartImpersonation).not.toHaveBeenCalled();
+  });
+
+  test('200 sets a new cookie for the target user', async () => {
+    mockSessionQueries({ id: '2', email: 'target@b.com' }, ['user'], ['users:impersonate']);
+    mockStartImpersonation.mockResolvedValue({ id: '2', email: 'target@b.com' });
+    const authCookie = `auth_token=${signToken('1')}`;
+
+    const res = await request(app).post('/auth/impersonate').set('Cookie', authCookie).send({ userId: '2' });
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe('2');
+    expect(res.body.impersonating).toBe(true);
+    expect(mockStartImpersonation).toHaveBeenCalledWith('1', '2');
+    expect(getCookie(res)).toMatch(/^auth_token=.+; Max-Age=/);
+  });
+
+  test('404 when the target does not exist', async () => {
+    const { TargetUserNotFoundError } = jest.requireActual('../src/services/impersonation.service');
+    mockSessionQueries(null, [], ['users:impersonate']);
+    mockStartImpersonation.mockRejectedValue(new TargetUserNotFoundError('gone'));
+    const authCookie = `auth_token=${signToken('1')}`;
+
+    const res = await request(app).post('/auth/impersonate').set('Cookie', authCookie).send({ userId: '999' });
+    expect(res.status).toBe(404);
+  });
+
+  test('403 when the target holds admin-console access', async () => {
+    const { CannotImpersonateAdminError } = jest.requireActual('../src/services/impersonation.service');
+    mockSessionQueries(null, [], ['users:impersonate']);
+    mockStartImpersonation.mockRejectedValue(new CannotImpersonateAdminError('blocked'));
+    const authCookie = `auth_token=${signToken('1')}`;
+
+    const res = await request(app).post('/auth/impersonate').set('Cookie', authCookie).send({ userId: '2' });
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('POST /auth/stop-impersonating', () => {
+  beforeEach(() => {
+    mockQuery.mockReset();
+    mockStartImpersonation.mockReset();
+    mockEndImpersonation.mockReset();
+  });
+
+  test('400 when not currently impersonating', async () => {
+    const authCookie = `auth_token=${signToken('1')}`;
+    const res = await request(app).post('/auth/stop-impersonating').set('Cookie', authCookie);
+    expect(res.status).toBe(400);
+    expect(mockEndImpersonation).not.toHaveBeenCalled();
+  });
+
+  test('200 restores the original admin\'s own session', async () => {
+    mockSessionQueries({ id: '1', email: 'admin@b.com' }, ['admin-master'], ['users:impersonate']);
+    mockEndImpersonation.mockResolvedValue(undefined);
+    const authCookie = `auth_token=${signToken('2', { impersonatedBy: '1' })}`;
+
+    const res = await request(app).post('/auth/stop-impersonating').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe('1');
+    expect(res.body.impersonating).toBe(false);
+    expect(mockEndImpersonation).toHaveBeenCalledWith('1', '2');
+    expect(getCookie(res)).toMatch(/^auth_token=.+; Max-Age=/);
   });
 });

@@ -12,8 +12,8 @@ export default function requireAuth(req: Request, res: Response, next: NextFunct
   }
 
   try {
-    const { userId } = verifyToken(token);
-    req.user = { id: userId };
+    const { userId, impersonatedBy } = verifyToken(token);
+    req.user = impersonatedBy ? { id: userId, impersonatedBy } : { id: userId };
     next();
   } catch {
     res.status(401).json({ error: 'Invalid or expired session.' });

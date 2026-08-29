@@ -8,6 +8,10 @@ import FunctionsPage from './FunctionsPage';
 import RolePermissionsPage from './RolePermissionsPage';
 import RolesPage from './RolesPage';
 import PortfolioTemplateApprovalPage from './PortfolioTemplateApprovalPage';
+import ConfigPropertiesPage from './ConfigPropertiesPage';
+import UserPersonaBadge from '../components/UserPersonaBadge';
+import ImpersonationBanner from '../components/ImpersonationBanner';
+import LoginAsModal from '../components/LoginAsModal';
 
 const TABS = [
   { id: 'apis', label: 'My API(s)' },
@@ -17,6 +21,7 @@ const TABS = [
   { id: 'permissions', label: 'Manage Permission' },
   { id: 'roles', label: 'Manage Role' },
   { id: 'portfolioTemplates', label: 'Portfolio Templates' },
+  { id: 'configProperties', label: 'Config Properties' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -42,7 +47,16 @@ export default function AdminPage() {
   // section) - hidden entirely (not disabled) for an admin session that hasn't been granted
   // this specific Function, same pattern as apis/masterData above.
   const canManagePortfolioTemplates = session?.permissions?.includes('portfolio_template:manage_status') ?? false;
+  // Config Properties (2026-08-24) - grantable only to admin-master (roles.service.ts's
+  // ADMIN_MASTER_ONLY_PERMISSIONS), so this tab is invisible to every other admin session,
+  // same hidden-not-disabled pattern as apis/masterData/portfolioTemplates above.
+  const canManageConfigProperties = session?.permissions?.includes('config_properties:manage') ?? false;
+  // "Login-as" (CLAUDE.md's "Login-as" section) - grantable only to admin-master
+  // (roles.service.ts's ADMIN_MASTER_ONLY_PERMISSIONS), same hidden-not-disabled pattern as
+  // every other permission-gated header control on this page.
+  const canImpersonate = session?.permissions?.includes('users:impersonate') ?? false;
   const [activeTab, setActiveTab] = useState<TabId>('apis');
+  const [showLoginAs, setShowLoginAs] = useState(false);
 
   // Client-side convenience only - every proxied endpoint's own requirePermission is the
   // real enforcement, same principle as the Contrarian Finder scan button's admin check.
@@ -52,6 +66,7 @@ export default function AdminPage() {
     if (tab.id === 'apis') return canManageOwnKeys;
     if (tab.id === 'masterData') return canManageMasterData;
     if (tab.id === 'portfolioTemplates') return canManagePortfolioTemplates;
+    if (tab.id === 'configProperties') return canManageConfigProperties;
     return true;
   });
 
@@ -75,7 +90,27 @@ export default function AdminPage() {
             </button>
           ))}
         </nav>
+
+        {/* ml-auto pins the persona badge to the right edge, mirroring TabShell's header. */}
+        <div className="ml-auto flex items-center gap-3">
+          {canImpersonate && (
+            <button
+              type="button"
+              onClick={() => setShowLoginAs(true)}
+              className="text-sm text-text-secondary hover:text-accent"
+            >
+              Login as User
+            </button>
+          )}
+          {session && <UserPersonaBadge user={session} />}
+        </div>
       </header>
+
+      {session && <ImpersonationBanner session={session} returnPath="/admin" />}
+
+      {showLoginAs && (
+        <LoginAsModal onClose={() => setShowLoginAs(false)} onImpersonated={() => setShowLoginAs(false)} />
+      )}
 
       <main className="p-4 sm:p-6">
         {activeTab === 'apis' && canManageOwnKeys && <SubscriptionsPage />}
@@ -85,6 +120,7 @@ export default function AdminPage() {
         {activeTab === 'permissions' && <RolePermissionsPage />}
         {activeTab === 'roles' && <RolesPage />}
         {activeTab === 'portfolioTemplates' && canManagePortfolioTemplates && <PortfolioTemplateApprovalPage />}
+        {activeTab === 'configProperties' && canManageConfigProperties && <ConfigPropertiesPage />}
       </main>
     </div>
   );

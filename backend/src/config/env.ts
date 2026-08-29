@@ -27,6 +27,11 @@ export interface Env {
   jwtSecret: string;
   jwtExpiresIn: string;
   jwtExpiresInMs: number;
+  // "Login-as" impersonation sessions deliberately expire far sooner than a normal login - a
+  // tighter blast radius for an elevated-but-borrowed session. Its own httpOnly cookie's maxAge
+  // is set to this, same "derived, can't drift" reasoning as jwtExpiresInMs above.
+  impersonationExpiresIn: string;
+  impersonationExpiresInMs: number;
   frontendOrigin: string;
   nodeEnv: string;
 
@@ -59,6 +64,8 @@ const env: Readonly<Env> = {
   // Derived from jwtExpiresIn (not a separate env var) so the JWT lifetime and
   // the cookie's maxAge can't drift out of sync with each other.
   jwtExpiresInMs: ms((process.env.JWT_EXPIRES_IN || '7d') as ms.StringValue),
+  impersonationExpiresIn: process.env.IMPERSONATION_EXPIRES_IN || '1h',
+  impersonationExpiresInMs: ms((process.env.IMPERSONATION_EXPIRES_IN || '1h') as ms.StringValue),
   frontendOrigin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000',
   nodeEnv: process.env.NODE_ENV || 'development',
 

@@ -133,6 +133,13 @@ describe('TabShell', () => {
     expect(screen.queryByRole('button', { name: 'API Keys' })).not.toBeInTheDocument();
   });
 
+  test('the header shows a persona badge with the session\'s email/role in its tooltip', async () => {
+    renderShell();
+    const badge = await screen.findByTestId('user-persona-badge');
+    expect(badge).toHaveTextContent('A');
+    expect(badge).toHaveAttribute('title', 'a@b.com\nRole: user');
+  });
+
   test('API Keys button opens the modal, and Close dismisses it', async () => {
     renderShell();
     expect(screen.queryByRole('button', { name: 'Close' })).not.toBeInTheDocument();

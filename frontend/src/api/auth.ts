@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch, ApiError } from './client';
+import { clearSession } from '../lib/queryClient';
 
 export interface User {
   id: string;
@@ -9,8 +10,6 @@ export interface User {
   // "Login-as" (CLAUDE.md's "Login-as" section) - true only while the current session is an
   // admin-master impersonating this user. Everything else about `User` (email/roles/
   // permissions) already reflects the impersonated identity, not the real admin's own.
-  // Added here (Session/Persona commit) rather than in the later Login-as commit, since
-  // UserPersonaBadge.test.tsx's User fixture already needs it - keeps every commit compiling.
   impersonating: boolean;
 }
 
@@ -79,26 +78,36 @@ export function useLogout() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => apiFetch<{ success: true }>('/auth/logout', { method: 'POST' }),
-    onSuccess: () => {
-      // Two-step, in this order, to dodge two different races with the same root cause:
-      // "an active query observer sees its cached data disappear and immediately refetches
-      // with the now-cleared auth cookie," producing a real (if usually harmless) 401.
-      //
-      // 1. setQueryData(['session'], null) FIRST - this alone makes ProtectedRoute redirect
-      //    to /login and unmount the entire authenticated tree (Dashboard's /portfolios
-      //    query included) on its very next render. Session ends up "present but null," not
-      //    missing, so useSession() itself has no reason to refetch either.
-      // 2. clear() deferred past that render/commit via setTimeout(0) - by the time it runs,
-      //    everything that used to be mounted (portfolios, users, roles, whatever tab was
-      //    open) has already unmounted and is no longer an active observer, so removing
-      //    their cached data doesn't trigger a refetch for any of them. Re-affirming session
-      //    as null right after clear() is belt-and-suspenders in case anything still mounted
-      //    (e.g. a future useSession() call from LoginPage) re-subscribes in that instant.
-      queryClient.setQueryData(['session'], null);
-      setTimeout(() => {
-        queryClient.clear();
-        queryClient.setQueryData(['session'], null);
-      }, 0);
-    },
+    // No markExpired - a deliberate Log out never shows LoginPage's "your session ended"
+    // banner, unlike apiFetch's own global 401 handling (see lib/queryClient.ts's
+    // clearSession, which this shares with).
+    onSuccess: () => clearSession(queryClient),
+  });
+}
+
+// "Login-as" (CLAUDE.md's "Login-as" section, users:impersonate - admin-master only). Unlike
+// clearSession's deferred two-step (built to dodge a stale-observer-refetches-a-dead-cookie
+// race on logout), there's no such race here - the new cookie is already valid by the time this
+// runs, so wiping every cached query and immediately seeding the new identity just makes any
+// still-mounted observer (e.g. Dashboard's portfolios list) correctly refetch as the new user,
+// not error.
+function switchIdentity(queryClient: ReturnType<typeof useQueryClient>, user: User) {
+  queryClient.clear();
+  queryClient.setQueryData(['session'], user);
+}
+
+export function useImpersonate() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (userId: string) => apiFetch<User>('/auth/impersonate', { method: 'POST', body: JSON.stringify({ userId }) }),
+    onSuccess: (user) => switchIdentity(queryClient, user),
+  });
+}
+
+export function useStopImpersonating() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiFetch<User>('/auth/stop-impersonating', { method: 'POST' }),
+    onSuccess: (user) => switchIdentity(queryClient, user),
   });
 }

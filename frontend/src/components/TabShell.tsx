@@ -3,6 +3,8 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { hasAdminConsoleAccess, useLogout, useSession } from '../api/auth';
 import { ApiKeysModalContext } from '../lib/apiKeysModal';
 import { TickerHandoffContext, type HandoffTarget, type TickerHandoff } from '../lib/tickerHandoff';
+import UserPersonaBadge from './UserPersonaBadge';
+import ImpersonationBanner from './ImpersonationBanner';
 import DashboardPage from '../pages/DashboardPage';
 import FlexPortfolioPage from '../pages/FlexPortfolioPage';
 import MomentumPage from '../pages/MomentumPage';
@@ -101,6 +103,8 @@ export default function TabShell() {
             )}
           </div>
 
+          {session && <UserPersonaBadge user={session} />}
+
           <button
             type="button"
             onClick={() => logout.mutate()}
@@ -109,6 +113,8 @@ export default function TabShell() {
             Log out
           </button>
         </header>
+
+        {session && <ImpersonationBanner session={session} returnPath="/admin" />}
 
         <div data-testid="tab-panel-portfolio" className={location.pathname === '/' ? '' : 'hidden'}>
           {canLegacy && canFlex && (

@@ -29,10 +29,15 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
 
 export interface TokenPayload {
   userId: string;
+  // Present only during a "Login-as" impersonation session (backend/src/services/
+  // impersonation.service.ts) - the admin's own user id, so the session can always find its
+  // way back without a second cookie/session-store. Absent on every normal login.
+  impersonatedBy?: string;
 }
 
-export function signToken(userId: string): string {
-  return jwt.sign({ userId }, env.jwtSecret, { expiresIn: env.jwtExpiresIn } as jwt.SignOptions);
+export function signToken(userId: string, options?: { impersonatedBy?: string; expiresIn?: string }): string {
+  const payload: TokenPayload = options?.impersonatedBy ? { userId, impersonatedBy: options.impersonatedBy } : { userId };
+  return jwt.sign(payload, env.jwtSecret, { expiresIn: options?.expiresIn ?? env.jwtExpiresIn } as jwt.SignOptions);
 }
 
 export function verifyToken(token: string): TokenPayload {

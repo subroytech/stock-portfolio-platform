@@ -44,6 +44,34 @@ describe('AdminPage', () => {
     expect(screen.getByRole('button', { name: 'Manage Role' })).toBeInTheDocument();
   });
 
+  test('"Login as User" is hidden without users:impersonate, even for other admin-console permissions', async () => {
+    mockAdminSession(); // default helper - no users:impersonate
+    renderPage();
+    await screen.findByText('FMP (Financial Modeling Prep)');
+    expect(screen.queryByRole('button', { name: 'Login as User' })).not.toBeInTheDocument();
+  });
+
+  test('"Login as User" opens the LoginAsModal when granted users:impersonate', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'admin-master@b.com', roles: ['admin-master'], permissions: ['api_keys:manage_own', 'users:manage_roles', 'users:impersonate'] });
+      if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
+      if (url === '/users') return Promise.resolve({ users: [{ id: '2', email: 'plain-user@b.com', roles: ['user'], apiKeyProviders: [], status: 'active' }] });
+      return Promise.resolve({});
+    });
+    renderPage();
+    await screen.findByText('FMP (Financial Modeling Prep)');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Login as User' }));
+    expect(await screen.findByText('plain-user@b.com')).toBeInTheDocument();
+  });
+
+  test('the header shows a persona badge with the session\'s email/role in its tooltip', async () => {
+    mockAdminSession();
+    renderPage();
+    const badge = await screen.findByTestId('user-persona-badge');
+    expect(badge).toHaveAttribute('title', 'admin@b.com\nRole: admin');
+  });
+
   test('switching tabs renders the corresponding panel', async () => {
     mockAdminSession();
     renderPage();
@@ -139,5 +167,27 @@ describe('AdminPage', () => {
     renderPage();
     await screen.findByText('FMP (Financial Modeling Prep)');
     expect(screen.queryByRole('button', { name: 'Portfolio Templates' })).not.toBeInTheDocument();
+  });
+
+  test('a session with config_properties:manage sees the "Config Properties" tab and can switch to it', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'admin-master@b.com', roles: ['admin-master'], permissions: ['api_keys:manage_own', 'users:manage_roles', 'config_properties:manage'] });
+      if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
+      if (url === '/config-properties/groups') return Promise.resolve({ groups: [] });
+      if (url === '/config-properties/properties') return Promise.resolve({ properties: [] });
+      return Promise.resolve({});
+    });
+    renderPage();
+    await screen.findByText('FMP (Financial Modeling Prep)');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Config Properties' }));
+    expect(await screen.findByText('No config properties have been created yet.')).toBeInTheDocument();
+  });
+
+  test('a session without config_properties:manage does not see the "Config Properties" tab', async () => {
+    mockAdminSession(); // default helper - no config_properties:manage
+    renderPage();
+    await screen.findByText('FMP (Financial Modeling Prep)');
+    expect(screen.queryByRole('button', { name: 'Config Properties' })).not.toBeInTheDocument();
   });
 });
