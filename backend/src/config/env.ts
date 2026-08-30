@@ -32,6 +32,10 @@ export interface Env {
   // is set to this, same "derived, can't drift" reasoning as jwtExpiresInMs above.
   impersonationExpiresIn: string;
   impersonationExpiresInMs: number;
+  // Self-Registration & Password Policy - Forgot Password's challenge/reset tokens (auth
+  // .service.ts's signPasswordResetChallengeToken/signPasswordResetToken) are short-lived,
+  // stateless, single-purpose JWTs, same pattern as impersonationExpiresIn above.
+  passwordResetExpiresIn: string;
   frontendOrigin: string;
   nodeEnv: string;
 
@@ -66,6 +70,7 @@ const env: Readonly<Env> = {
   jwtExpiresInMs: ms((process.env.JWT_EXPIRES_IN || '7d') as ms.StringValue),
   impersonationExpiresIn: process.env.IMPERSONATION_EXPIRES_IN || '1h',
   impersonationExpiresInMs: ms((process.env.IMPERSONATION_EXPIRES_IN || '1h') as ms.StringValue),
+  passwordResetExpiresIn: process.env.PASSWORD_RESET_EXPIRES_IN || '10m',
   frontendOrigin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000',
   nodeEnv: process.env.NODE_ENV || 'development',
 

@@ -1,4 +1,12 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
+// This file's test count grew a lot with Self-Registration & Password Policy's new endpoints -
+// enough real requests against the real /auth router (mounted with rateLimiters in app.ts) to
+// trip the actual per-IP/per-user limiter mid-run. Same no-op mock already used by
+// portfolio.controller.test.ts for the same reason.
+jest.mock('../src/middleware/rateLimit', () => ({
+  __esModule: true,
+  default: [(_req: unknown, _res: unknown, next: () => void) => next(), (_req: unknown, _res: unknown, next: () => void) => next()],
+}));
 jest.mock('../src/services/impersonation.service', () => ({
   ...jest.requireActual('../src/services/impersonation.service'),
   startImpersonation: jest.fn(),
@@ -6,7 +14,7 @@ jest.mock('../src/services/impersonation.service', () => ({
 }));
 import request from 'supertest';
 import { pool } from '../src/db/pool';
-import { hashPassword, signToken } from '../src/services/auth.service';
+import { hashPassword, signToken, signPasswordResetChallengeToken, signPasswordResetToken } from '../src/services/auth.service';
 import * as impersonationService from '../src/services/impersonation.service';
 import app from '../src/app';
 
@@ -15,16 +23,46 @@ const mockConnect = pool.connect as unknown as jest.Mock;
 const mockStartImpersonation = impersonationService.startImpersonation as jest.Mock;
 const mockEndImpersonation = impersonationService.endImpersonation as jest.Mock;
 
-// signup() also assigns the new user the baseline 'user' role
-// (roles.service.ts's setUserRole, transactional via pool.connect()) - a
-// mock client so that transaction succeeds without needing real role rows.
-function mockRoleAssignmentClient() {
+// Self-Registration & Password Policy: signup() no longer assigns a role (that's now an admin
+// step, see the describe block below) but DOES save 7 security answers transactionally via
+// pool.connect() (securityQuestion.service.ts's saveUserAnswers) - a mock client so that
+// transaction succeeds without needing a real DB.
+function mockSecurityAnswerClient() {
   const query = jest.fn((sql: string) => {
     if (sql.startsWith('BEGIN') || sql.startsWith('COMMIT') || sql.startsWith('ROLLBACK')) return Promise.resolve({});
-    if (sql.includes('SELECT id FROM m_roles')) return Promise.resolve({ rows: [{ id: 'role-user' }] });
-    return Promise.resolve({ rows: [] });
+    return Promise.resolve({ rows: [] }); // INSERT INTO users_security_answers
   });
   return { query, release: jest.fn() };
+}
+
+// A password meeting every rule (15-25 chars, upper+number+special, no name/email overlap) and
+// 7 distinct security answers - the minimum a signup request needs to get past validation.
+const VALID_SIGNUP_PAYLOAD = {
+  email: 'new@example.com',
+  firstName: 'Jordan',
+  lastName: 'Rivera',
+  password: 'Str0ng!PasswordXYZ',
+  securityAnswers: ['q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q7'].map((id, i) => ({ questionId: id, answer: `Answer${i}` })),
+};
+
+// Keyed on distinguishing SQL substrings (not just startsWith('SELECT'/'INSERT'), since a full
+// signup issues several different SELECTs/INSERTs each needing its own response) - same
+// substring-matching precedent as this file's own mockSessionQueries() below.
+function mockSignupDb({ existingUser, insertedUser }: {
+  existingUser?: DbUserRow;
+  insertedUser?: { id: string; email: string; status: string; first_name: string; last_name: string };
+} = {}) {
+  mockQuery.mockImplementation((text: string, params?: unknown[]) => {
+    if (text.includes('FROM users WHERE email')) return Promise.resolve({ rows: existingUser ? [existingUser] : [] });
+    if (text.startsWith('INSERT INTO users ')) return Promise.resolve({ rows: insertedUser ? [insertedUser] : [] });
+    if (text.includes('FROM m_security_question')) {
+      // Echoes back exactly the ids that were asked about, simulating "all valid & active."
+      const ids = (params?.[0] as string[] | undefined) ?? [];
+      return Promise.resolve({ rows: ids.map((id) => ({ id })) });
+    }
+    if (text.includes('FROM users WHERE id')) return Promise.resolve({ rows: insertedUser ? [insertedUser] : [] });
+    return Promise.resolve({ rows: [] }); // password-history insert/prune, roles/permissions lookups
+  });
 }
 
 interface DbUserRow {
@@ -64,38 +102,51 @@ describe('POST /auth/signup', () => {
   beforeEach(() => {
     mockQuery.mockReset();
     mockConnect.mockReset();
-    mockConnect.mockResolvedValue(mockRoleAssignmentClient());
+    mockConnect.mockResolvedValue(mockSecurityAnswerClient());
   });
 
-  test('creates a user and sets the auth cookie', async () => {
-    mockDb({ insertedUser: { id: '1', email: 'new@example.com' } });
-    const res = await request(app).post('/auth/signup').send({ email: 'new@example.com', password: 'longenoughpassword' });
+  test('registers a pending account (no role assigned) and sets the auth cookie', async () => {
+    mockSignupDb({ insertedUser: { id: '1', email: 'new@example.com', status: 'pending', first_name: 'Jordan', last_name: 'Rivera' } });
+    const res = await request(app).post('/auth/signup').send(VALID_SIGNUP_PAYLOAD);
     expect(res.status).toBe(201);
-    expect(res.body).toEqual({ user: { id: '1', email: 'new@example.com' } });
+    expect(res.body.id).toBe('1');
+    expect(res.body.status).toBe('pending');
+    // Self-Registration & Password Policy's core behavior change from the old signup: no
+    // baseline role is granted - only an admin assigning one (Manage Users) unlocks the account.
+    // (resolveSession() still legitimately READS users_roles afterward to confirm zero roles -
+    // that's not what's being asserted against here, only an actual INSERT would be.)
+    expect(mockQuery.mock.calls.some(([sql]) => String(sql).startsWith('INSERT INTO users_roles'))).toBe(false);
     expect(getCookie(res)).toMatch(/^auth_token=.+; Max-Age=/);
   });
 
-  test('assigns the baseline "user" role to every new signup', async () => {
-    mockDb({ insertedUser: { id: '1', email: 'new@example.com' } });
-    const client = mockRoleAssignmentClient();
-    mockConnect.mockResolvedValue(client);
-    await request(app).post('/auth/signup').send({ email: 'new@example.com', password: 'longenoughpassword' });
-    expect(client.query).toHaveBeenCalledWith('INSERT INTO users_roles (user_id, role_id) VALUES ($1, $2)', ['1', 'role-user']);
-  });
-
   test('rejects an already-registered email with 409', async () => {
-    mockDb({ existingUser: { id: '1', email: 'dup@example.com', password_hash: 'x' } });
-    const res = await request(app).post('/auth/signup').send({ email: 'dup@example.com', password: 'longenoughpassword' });
+    mockSignupDb({ existingUser: { id: '1', email: 'dup@example.com', password_hash: 'x' } });
+    const res = await request(app).post('/auth/signup').send({ ...VALID_SIGNUP_PAYLOAD, email: 'dup@example.com' });
     expect(res.status).toBe(409);
   });
 
   test('rejects an invalid email with 400', async () => {
-    const res = await request(app).post('/auth/signup').send({ email: 'not-an-email', password: 'longenoughpassword' });
+    const res = await request(app).post('/auth/signup').send({ ...VALID_SIGNUP_PAYLOAD, email: 'not-an-email' });
     expect(res.status).toBe(400);
   });
 
-  test('rejects a too-short password with 400', async () => {
-    const res = await request(app).post('/auth/signup').send({ email: 'new@example.com', password: 'short' });
+  test('rejects a password that fails the policy with 400', async () => {
+    const res = await request(app).post('/auth/signup').send({ ...VALID_SIGNUP_PAYLOAD, password: 'short' });
+    expect(res.status).toBe(400);
+  });
+
+  test('rejects a password containing the user\'s first name with 400', async () => {
+    const res = await request(app).post('/auth/signup').send({ ...VALID_SIGNUP_PAYLOAD, password: 'Jordan1234567890!Extra' });
+    expect(res.status).toBe(400);
+  });
+
+  test('rejects fewer than 7 security answers with 400', async () => {
+    const res = await request(app).post('/auth/signup').send({ ...VALID_SIGNUP_PAYLOAD, securityAnswers: VALID_SIGNUP_PAYLOAD.securityAnswers.slice(0, 5) });
+    expect(res.status).toBe(400);
+  });
+
+  test('missing first/last name is rejected with 400', async () => {
+    const res = await request(app).post('/auth/signup').send({ ...VALID_SIGNUP_PAYLOAD, firstName: '' });
     expect(res.status).toBe(400);
   });
 });
@@ -108,8 +159,17 @@ describe('POST /auth/login', () => {
     mockDb({ existingUser: { id: '1', email: 'a@b.com', password_hash: passwordHash } });
     const res = await request(app).post('/auth/login').send({ email: 'a@b.com', password: 'correctpassword' });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ user: { id: '1', email: 'a@b.com' } });
+    expect(res.body.id).toBe('1');
+    expect(res.body.email).toBe('a@b.com');
     expect(getCookie(res)).toMatch(/^auth_token=.+; Max-Age=/);
+  });
+
+  test('a pending account can still log in (frontend, not login itself, gates it to the banner)', async () => {
+    const passwordHash = await hashPassword('correctpassword');
+    mockDb({ existingUser: { id: '1', email: 'a@b.com', password_hash: passwordHash, status: 'pending' } });
+    const res = await request(app).post('/auth/login').send({ email: 'a@b.com', password: 'correctpassword' });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('pending');
   });
 
   test('rejects a wrong password with 401', async () => {
@@ -260,6 +320,161 @@ describe('POST /auth/impersonate', () => {
 
     const res = await request(app).post('/auth/impersonate').set('Cookie', authCookie).send({ userId: '2' });
     expect(res.status).toBe(403);
+  });
+});
+
+describe('POST /auth/change-password', () => {
+  beforeEach(() => mockQuery.mockReset());
+
+  function mockChangePasswordDb({ currentPasswordHash, reusedHashes = [] }: { currentPasswordHash: string; reusedHashes?: string[] }) {
+    mockQuery.mockImplementation((text: string) => {
+      if (text.includes('FROM users WHERE id')) {
+        return Promise.resolve({ rows: [{ id: '1', email: 'a@b.com', status: 'active', first_name: 'Jordan', last_name: 'Rivera', password_hash: currentPasswordHash }] });
+      }
+      if (text.includes('FROM user_evt_password_history')) {
+        return Promise.resolve({ rows: reusedHashes.map((h) => ({ password_hash: h })) });
+      }
+      return Promise.resolve({ rows: [] }); // UPDATE users / INSERT+DELETE user_evt_password_history
+    });
+  }
+
+  test('401 without a session', async () => {
+    const res = await request(app).post('/auth/change-password').send({ currentPassword: 'x', newPassword: 'y' });
+    expect(res.status).toBe(401);
+  });
+
+  test('401 when the current password is wrong', async () => {
+    mockChangePasswordDb({ currentPasswordHash: await hashPassword('CorrectCurrent1!Xyz') });
+    const res = await request(app).post('/auth/change-password').set('Cookie', `auth_token=${signToken('1')}`)
+      .send({ currentPassword: 'WrongOne1!Xyz', newPassword: 'NewStr0ng!PasswordAbc' });
+    expect(res.status).toBe(401);
+  });
+
+  test('400 when the new password fails the policy', async () => {
+    mockChangePasswordDb({ currentPasswordHash: await hashPassword('CorrectCurrent1!Xyz') });
+    const res = await request(app).post('/auth/change-password').set('Cookie', `auth_token=${signToken('1')}`)
+      .send({ currentPassword: 'CorrectCurrent1!Xyz', newPassword: 'short' });
+    expect(res.status).toBe(400);
+  });
+
+  test('400 when the new password repeats one of the last 5', async () => {
+    const reusedHash = await hashPassword('OldPassword1!Xyz00');
+    mockChangePasswordDb({ currentPasswordHash: await hashPassword('CorrectCurrent1!Xyz'), reusedHashes: [reusedHash] });
+    const res = await request(app).post('/auth/change-password').set('Cookie', `auth_token=${signToken('1')}`)
+      .send({ currentPassword: 'CorrectCurrent1!Xyz', newPassword: 'OldPassword1!Xyz00' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/last 5/i);
+  });
+
+  test('200 on success, and records the new password in history', async () => {
+    mockChangePasswordDb({ currentPasswordHash: await hashPassword('CorrectCurrent1!Xyz') });
+    const res = await request(app).post('/auth/change-password').set('Cookie', `auth_token=${signToken('1')}`)
+      .send({ currentPassword: 'CorrectCurrent1!Xyz', newPassword: 'NewStr0ng!PasswordAbc' });
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_evt_password_history'))).toBe(true);
+  });
+});
+
+describe('POST /auth/forgot-password/start', () => {
+  beforeEach(() => mockQuery.mockReset());
+
+  test('404 when no account exists for that email', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).post('/auth/forgot-password/start').send({ email: 'nobody@example.com' });
+    expect(res.status).toBe(404);
+  });
+
+  test('404 when the account has no saved security answers', async () => {
+    mockQuery.mockImplementation((text: string) => {
+      if (text.includes('FROM users WHERE email')) return Promise.resolve({ rows: [{ id: '1', email: 'a@b.com', status: 'active' }] });
+      if (text.includes('users_security_answers')) return Promise.resolve({ rows: [] });
+      return Promise.resolve({ rows: [] });
+    });
+    const res = await request(app).post('/auth/forgot-password/start').send({ email: 'a@b.com' });
+    expect(res.status).toBe(404);
+  });
+
+  test('200 with 4 challenge questions + a challenge token when the account has saved answers', async () => {
+    const saved = Array.from({ length: 7 }, (_, i) => ({ question_id: String(i + 1), question_text: `Q${i + 1}` }));
+    mockQuery.mockImplementation((text: string) => {
+      if (text.includes('FROM users WHERE email')) return Promise.resolve({ rows: [{ id: '1', email: 'a@b.com', status: 'active' }] });
+      if (text.includes('users_security_answers')) return Promise.resolve({ rows: saved });
+      return Promise.resolve({ rows: [] });
+    });
+    const res = await request(app).post('/auth/forgot-password/start').send({ email: 'a@b.com' });
+    expect(res.status).toBe(200);
+    expect(res.body.questions).toHaveLength(4);
+    expect(typeof res.body.challengeToken).toBe('string');
+  });
+});
+
+describe('POST /auth/forgot-password/verify', () => {
+  beforeEach(() => mockQuery.mockReset());
+
+  test('401 with an invalid/expired/tampered challenge token', async () => {
+    const res = await request(app).post('/auth/forgot-password/verify').send({
+      challengeToken: 'not-a-real-token',
+      answers: [{ questionId: '1', answer: 'x' }, { questionId: '2', answer: 'x' }, { questionId: '3', answer: 'x' }, { questionId: '4', answer: 'x' }],
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test('400 when the submitted question ids do not match what was challenged', async () => {
+    const token = signPasswordResetChallengeToken('1', ['1', '2', '3', '4']);
+    const res = await request(app).post('/auth/forgot-password/verify').send({
+      challengeToken: token,
+      answers: [{ questionId: '1', answer: 'x' }, { questionId: '2', answer: 'x' }, { questionId: '3', answer: 'x' }, { questionId: '999', answer: 'x' }],
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test('401 when any answer is wrong; 200 with a resetToken when all 4 are correct', async () => {
+    const bcrypt = jest.requireActual('bcrypt');
+    const hashes = await Promise.all(['ans1', 'ans2', 'ans3', 'ans4'].map((a) => bcrypt.hash(a, 4)));
+    const token = signPasswordResetChallengeToken('1', ['1', '2', '3', '4']);
+    const answerRows = hashes.map((h, i) => ({ question_id: String(i + 1), answer_hash: h }));
+
+    mockQuery.mockResolvedValueOnce({ rows: answerRows });
+    const wrongRes = await request(app).post('/auth/forgot-password/verify').send({
+      challengeToken: token,
+      answers: [{ questionId: '1', answer: 'ans1' }, { questionId: '2', answer: 'ans2' }, { questionId: '3', answer: 'ans3' }, { questionId: '4', answer: 'WRONG' }],
+    });
+    expect(wrongRes.status).toBe(401);
+
+    mockQuery.mockResolvedValueOnce({ rows: answerRows });
+    const correctRes = await request(app).post('/auth/forgot-password/verify').send({
+      challengeToken: token,
+      answers: [{ questionId: '1', answer: 'ans1' }, { questionId: '2', answer: 'ans2' }, { questionId: '3', answer: 'ans3' }, { questionId: '4', answer: 'ans4' }],
+    });
+    expect(correctRes.status).toBe(200);
+    expect(typeof correctRes.body.resetToken).toBe('string');
+  });
+});
+
+describe('POST /auth/forgot-password/reset', () => {
+  beforeEach(() => mockQuery.mockReset());
+
+  test('401 with an invalid/expired reset token', async () => {
+    const res = await request(app).post('/auth/forgot-password/reset').send({ resetToken: 'nope', newPassword: 'NewStr0ng!PasswordAbc' });
+    expect(res.status).toBe(401);
+  });
+
+  test('400 when the new password fails policy, given a real reset token', async () => {
+    const token = signPasswordResetToken('1');
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: '1', email: 'a@b.com', status: 'active', first_name: null, last_name: null }] });
+    const res = await request(app).post('/auth/forgot-password/reset').send({ resetToken: token, newPassword: 'short' });
+    expect(res.status).toBe(400);
+  });
+
+  test('200 on success, and records the new password in history', async () => {
+    const token = signPasswordResetToken('1');
+    mockQuery.mockImplementation((text: string) => {
+      if (text.includes('FROM users WHERE id')) return Promise.resolve({ rows: [{ id: '1', email: 'a@b.com', status: 'active', first_name: null, last_name: null }] });
+      return Promise.resolve({ rows: [] });
+    });
+    const res = await request(app).post('/auth/forgot-password/reset').send({ resetToken: token, newPassword: 'NewStr0ng!PasswordAbc' });
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_evt_password_history'))).toBe(true);
   });
 });
 

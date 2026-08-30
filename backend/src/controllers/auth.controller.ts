@@ -2,10 +2,18 @@ import { Request, Response, NextFunction, CookieOptions } from 'express';
 import * as authService from '../services/auth.service';
 import * as rolesService from '../services/roles.service';
 import * as impersonationService from '../services/impersonation.service';
+import * as securityQuestionService from '../services/securityQuestion.service';
+import * as passwordHistoryService from '../services/passwordHistory.service';
+import * as usersService from '../services/users.service';
+import { validatePasswordPolicy } from '../utils/passwordPolicy';
 import env from '../config/env';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const MIN_PASSWORD_LENGTH = 8;
+// Self-Registration & Password Policy - how many questions are offered/answered at registration
+// vs. challenged at Forgot Password time. Confirmed with the user: all 7 offered are answered
+// and saved (not just 5); 4 of those 7 are randomly challenged on Forgot Password.
+const REGISTRATION_QUESTION_COUNT = 7;
+const CHALLENGE_QUESTION_COUNT = 4;
 
 function cookieOptions(maxAge: number = env.jwtExpiresInMs): CookieOptions {
   return {
@@ -25,16 +33,44 @@ async function resolveSession(userId: string, impersonating: boolean) {
   return { ...user, roles, permissions, impersonating };
 }
 
+function emailLocalPart(email: string): string {
+  return email.split('@')[0] ?? '';
+}
+
+// Self-Registration & Password Policy: full "Register New User" flow, replacing the old bare
+// email+8-char-password signup in place (same POST /auth/signup route - no rename). Two
+// deliberate behavior changes from the old signup: the account starts `status: 'pending'`
+// instead of `'active'`, and it is NOT given the baseline 'user' role - both a manual admin
+// step now (Manage Users), see CLAUDE.md's "Self-Registration & Password Policy" section.
 export async function signup(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const { email, password } = req.body || {};
+  const { email, password, firstName, lastName, securityAnswers } = req.body || {};
 
   if (typeof email !== 'string' || !EMAIL_RE.test(email)) {
     res.status(400).json({ error: 'A valid email is required.' });
     return;
   }
-  if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
-    res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` });
+  if (typeof firstName !== 'string' || !firstName.trim() || typeof lastName !== 'string' || !lastName.trim()) {
+    res.status(400).json({ error: 'First name and last name are required.' });
     return;
+  }
+  if (typeof password !== 'string') {
+    res.status(400).json({ error: 'A password is required.' });
+    return;
+  }
+  const policyErrors = validatePasswordPolicy(password, { firstName, lastName, emailLocalPart: emailLocalPart(email) });
+  if (policyErrors.length) {
+    res.status(400).json({ error: policyErrors[0], errors: policyErrors });
+    return;
+  }
+  if (!Array.isArray(securityAnswers) || securityAnswers.length !== REGISTRATION_QUESTION_COUNT) {
+    res.status(400).json({ error: `Exactly ${REGISTRATION_QUESTION_COUNT} security question answers are required.` });
+    return;
+  }
+  for (const a of securityAnswers) {
+    if (typeof a?.questionId !== 'string' || typeof a?.answer !== 'string' || !a.answer.trim() || a.answer.trim().length > 20) {
+      res.status(400).json({ error: 'Each security question answer must be 1-20 characters.' });
+      return;
+    }
   }
 
   try {
@@ -45,19 +81,20 @@ export async function signup(req: Request, res: Response, next: NextFunction): P
     }
 
     const passwordHash = await authService.hashPassword(password);
-    const user = await authService.createUser(email, passwordHash);
-    // Every new signup starts with the baseline 'user' role - without this,
-    // a new account would be roleless (migration 015 only backfilled users
-    // that existed at migration time), failing any future requirePermission
-    // check gated on having *any* role, not just the admin-only ones.
-    await rolesService.setUserRole(user.id, 'user');
+    const user = await authService.createUser(email, passwordHash, 'pending', firstName.trim(), lastName.trim());
+    await securityQuestionService.saveUserAnswers(user.id, securityAnswers, REGISTRATION_QUESTION_COUNT);
+    await passwordHistoryService.recordPassword(user.id, passwordHash);
     const token = authService.signToken(user.id);
 
     res.cookie(authService.AUTH_COOKIE_NAME, token, cookieOptions());
-    res.status(201).json({ user });
+    res.status(201).json(await resolveSession(user.id, false));
   } catch (err) {
     if (err instanceof authService.EmailAlreadyExistsError) {
       res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof securityQuestionService.InvalidQuestionSelectionError) {
+      res.status(400).json({ error: err.message });
       return;
     }
     next(err);
@@ -77,7 +114,10 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     const token = authService.signToken(user.id);
 
     res.cookie(authService.AUTH_COOKIE_NAME, token, cookieOptions());
-    res.json({ user });
+    // 'pending' accounts log in successfully (Self-Registration & Password Policy) - the
+    // frontend is what gates them down to the banner-only view (ProtectedRoute.tsx), based on
+    // this same status field returned here (and by GET /auth/me right after).
+    res.json(await resolveSession(user.id, false));
   } catch (err) {
     if (err instanceof authService.InvalidCredentialsError) {
       res.status(401).json({ error: err.message });
@@ -104,7 +144,7 @@ export async function me(req: Request, res: Response, next: NextFunction): Promi
     }
     const roles = await rolesService.getUserRoles(user.id);
     const permissions = await rolesService.getUserPermissions(user.id);
-    res.json({ id: user.id, email: user.email, roles, permissions, impersonating: !!req.user!.impersonatedBy });
+    res.json({ ...user, roles, permissions, impersonating: !!req.user!.impersonatedBy });
   } catch (err) {
     next(err);
   }
@@ -161,6 +201,173 @@ export async function stopImpersonating(req: Request, res: Response, next: NextF
     const token = authService.signToken(adminId);
     res.cookie(authService.AUTH_COOKIE_NAME, token, cookieOptions());
     res.json(await resolveSession(adminId, false));
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /auth/security-questions/random - public, feeds the registration form's 7 questions.
+// Stateless (see securityQuestion.service.ts's own note) - nothing is recorded about what was
+// offered to a given page load.
+export async function securityQuestionsRandom(_req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const questions = await securityQuestionService.getRandomActiveQuestions(REGISTRATION_QUESTION_COUNT);
+    res.json({ questions });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /auth/change-password - requireAuth. The logged-in "I know my current password" path,
+// distinct from the security-question-based Forgot Password flow below.
+export async function changePassword(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const { currentPassword, newPassword } = req.body || {};
+  if (typeof currentPassword !== 'string' || typeof newPassword !== 'string') {
+    res.status(400).json({ error: 'Current and new password are required.' });
+    return;
+  }
+
+  try {
+    const userId = req.user!.id;
+    const [currentHash, user] = await Promise.all([authService.getPasswordHashById(userId), authService.findUserById(userId)]);
+    if (!currentHash || !user) {
+      res.status(401).json({ error: 'Invalid or expired session.' });
+      return;
+    }
+    if (!(await authService.verifyPassword(currentPassword, currentHash))) {
+      res.status(401).json({ error: 'Current password is incorrect.' });
+      return;
+    }
+
+    const policyErrors = validatePasswordPolicy(newPassword, {
+      firstName: user.firstName, lastName: user.lastName, emailLocalPart: emailLocalPart(user.email),
+    });
+    if (policyErrors.length) {
+      res.status(400).json({ error: policyErrors[0], errors: policyErrors });
+      return;
+    }
+    if (await passwordHistoryService.isPasswordReused(userId, newPassword)) {
+      res.status(400).json({ error: 'New password must not match any of your last 5 passwords.' });
+      return;
+    }
+
+    const newHash = await authService.hashPassword(newPassword);
+    await usersService.updateUserPassword(userId, newHash);
+    await passwordHistoryService.recordPassword(userId, newHash);
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /auth/forgot-password/start - public. { email } -> 4 randomly-challenged questions from
+// the account's own 7 saved answers, plus a short-lived signed challenge token carrying exactly
+// which 4 question ids were offered (so /verify below can't be tricked into checking a
+// different set than what the user actually saw). Deliberately not anti-enumeration-safe (404s
+// plainly) - see the plan's own "deliberate scope boundaries" note; matches this app's existing
+// precedent of not hiding account existence everywhere (e.g. signup's 409 on a duplicate email).
+export async function forgotPasswordStart(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const { email } = req.body || {};
+  if (typeof email !== 'string' || !EMAIL_RE.test(email)) {
+    res.status(400).json({ error: 'A valid email is required.' });
+    return;
+  }
+
+  try {
+    const user = await authService.findUserByEmail(email);
+    if (!user) {
+      res.status(404).json({ error: 'No account found with that email.' });
+      return;
+    }
+    const questions = await securityQuestionService.getRandomChallengeQuestions(user.id, CHALLENGE_QUESTION_COUNT);
+    const challengeToken = authService.signPasswordResetChallengeToken(user.id, questions.map((q) => q.id));
+    res.json({ challengeToken, questions });
+  } catch (err) {
+    if (err instanceof securityQuestionService.NoSecurityAnswersError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    next(err);
+  }
+}
+
+// POST /auth/forgot-password/verify - public. { challengeToken, answers[4] } -> a resetToken
+// once ALL 4 are correct. Never reveals which answer(s) were wrong (same anti-tamper spirit as
+// login's own generic-error precedent).
+export async function forgotPasswordVerify(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const { challengeToken, answers } = req.body || {};
+  if (typeof challengeToken !== 'string' || !Array.isArray(answers) || answers.length !== CHALLENGE_QUESTION_COUNT) {
+    res.status(400).json({ error: `A challenge token and ${CHALLENGE_QUESTION_COUNT} answers are required.` });
+    return;
+  }
+
+  let userId: string;
+  let questionIds: string[];
+  try {
+    ({ userId, questionIds } = authService.verifyPasswordResetChallengeToken(challengeToken));
+  } catch {
+    res.status(401).json({ error: 'This verification has expired or is invalid - please start over.' });
+    return;
+  }
+
+  const answeredIds = new Set(answers.map((a: { questionId?: unknown }) => a?.questionId));
+  if (answeredIds.size !== questionIds.length || !questionIds.every((id) => answeredIds.has(id))) {
+    res.status(400).json({ error: 'Answers do not match the challenged questions.' });
+    return;
+  }
+
+  try {
+    const correct = await securityQuestionService.verifyAnswers(userId, answers);
+    if (!correct) {
+      res.status(401).json({ error: 'One or more answers were incorrect.' });
+      return;
+    }
+    res.json({ resetToken: authService.signPasswordResetToken(userId) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /auth/forgot-password/reset - public. { resetToken, newPassword } -> sets the new
+// password, same policy + last-5-history checks as everywhere else.
+export async function forgotPasswordReset(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const { resetToken, newPassword } = req.body || {};
+  if (typeof resetToken !== 'string' || typeof newPassword !== 'string') {
+    res.status(400).json({ error: 'A reset token and new password are required.' });
+    return;
+  }
+
+  let userId: string;
+  try {
+    ({ userId } = authService.verifyPasswordResetToken(resetToken));
+  } catch {
+    res.status(401).json({ error: 'This reset link has expired or is invalid - please start over.' });
+    return;
+  }
+
+  try {
+    const user = await authService.findUserById(userId);
+    if (!user) {
+      res.status(404).json({ error: 'Account not found.' });
+      return;
+    }
+
+    const policyErrors = validatePasswordPolicy(newPassword, {
+      firstName: user.firstName, lastName: user.lastName, emailLocalPart: emailLocalPart(user.email),
+    });
+    if (policyErrors.length) {
+      res.status(400).json({ error: policyErrors[0], errors: policyErrors });
+      return;
+    }
+    if (await passwordHistoryService.isPasswordReused(userId, newPassword)) {
+      res.status(400).json({ error: 'New password must not match any of your last 5 passwords.' });
+      return;
+    }
+
+    const newHash = await authService.hashPassword(newPassword);
+    await usersService.updateUserPassword(userId, newHash);
+    await passwordHistoryService.recordPassword(userId, newHash);
+    res.json({ success: true });
   } catch (err) {
     next(err);
   }
