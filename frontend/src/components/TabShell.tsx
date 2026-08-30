@@ -105,6 +105,10 @@ export default function TabShell() {
 
           {session && <UserPersonaBadge user={session} />}
 
+          <Link to="/change-password" className="text-sm text-text-secondary hover:text-accent">
+            Change Password
+          </Link>
+
           <button
             type="button"
             onClick={() => logout.mutate()}

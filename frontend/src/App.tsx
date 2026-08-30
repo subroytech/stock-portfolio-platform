@@ -5,6 +5,8 @@ import ProtectedRoute from './components/ProtectedRoute';
 import TabShell from './components/TabShell';
 import LoginPage from './pages/LoginPage';
 import SignupPage from './pages/SignupPage';
+import ForgotPasswordPage from './pages/ForgotPasswordPage';
+import ChangePasswordPage from './pages/ChangePasswordPage';
 import ImportPreviewPage from './pages/ImportPreviewPage';
 import AdminPage from './pages/AdminPage';
 
@@ -15,7 +17,11 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/signup" element={<SignupPage />} />
+          {/* Public - this is exactly the flow for someone who's locked out and has no
+              session at all (Self-Registration & Password Policy). */}
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
           <Route element={<ProtectedRoute />}>
+            <Route path="/change-password" element={<ChangePasswordPage />} />
             <Route path="/portfolios/:id/import-preview" element={<ImportPreviewPage />} />
             {/* Static segments like /admin rank above the /* splat below regardless of
                 declaration order (React Router v6), so this is safely matched first. A

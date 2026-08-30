@@ -11,6 +11,17 @@ export interface User {
   // admin-master impersonating this user. Everything else about `User` (email/roles/
   // permissions) already reflects the impersonated identity, not the real admin's own.
   impersonating: boolean;
+  // Self-Registration & Password Policy - 'pending' accounts can hold a valid session (login()
+  // allows it through) but ProtectedRoute.tsx renders only PendingReviewPage for them, never
+  // the real app, until an admin assigns a role and flips this to 'active'.
+  status: string;
+  firstName: string | null;
+  lastName: string | null;
+}
+
+export interface SecurityQuestion {
+  id: string;
+  questionText: string;
 }
 
 // Any one of these implies real Admin Console capability. Checking permissions rather than a
@@ -58,11 +69,62 @@ async function loginAndFetchSession(path: '/auth/signup' | '/auth/login', input:
   return apiFetch<User>('/auth/me');
 }
 
+// Self-Registration & Password Policy - full "Register New User" payload. Same POST
+// /auth/signup route as before, just a much richer body; the account comes back 'pending'
+// with no role, per that section's own confirmed spec.
+export interface SignupInput {
+  email: string;
+  password: string;
+  firstName: string;
+  lastName: string;
+  securityAnswers: { questionId: string; answer: string }[];
+}
+
 export function useSignup() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { email: string; password: string }) => loginAndFetchSession('/auth/signup', input),
+    mutationFn: (input: SignupInput) => loginAndFetchSession('/auth/signup', input),
     onSuccess: (user) => queryClient.setQueryData(['session'], user),
+  });
+}
+
+// GET /auth/security-questions/random - public, feeds the registration form's 7 questions.
+export function useRandomSecurityQuestions() {
+  return useQuery<{ questions: SecurityQuestion[] }>({
+    queryKey: ['security-questions-random'],
+    queryFn: () => apiFetch<{ questions: SecurityQuestion[] }>('/auth/security-questions/random'),
+    staleTime: Infinity, // a fresh set only makes sense per registration attempt, not per refetch
+  });
+}
+
+// POST /auth/change-password - requireAuth, the logged-in "I know my current password" path.
+export function useChangePassword() {
+  return useMutation({
+    mutationFn: (input: { currentPassword: string; newPassword: string }) =>
+      apiFetch<{ success: true }>('/auth/change-password', { method: 'POST', body: JSON.stringify(input) }),
+  });
+}
+
+// Forgot Password's 3 stateless steps (Self-Registration & Password Policy) - each hook maps
+// 1:1 to one of auth.controller.ts's forgotPasswordStart/Verify/Reset handlers.
+export function useForgotPasswordStart() {
+  return useMutation({
+    mutationFn: (input: { email: string }) =>
+      apiFetch<{ challengeToken: string; questions: SecurityQuestion[] }>('/auth/forgot-password/start', { method: 'POST', body: JSON.stringify(input) }),
+  });
+}
+
+export function useForgotPasswordVerify() {
+  return useMutation({
+    mutationFn: (input: { challengeToken: string; answers: { questionId: string; answer: string }[] }) =>
+      apiFetch<{ resetToken: string }>('/auth/forgot-password/verify', { method: 'POST', body: JSON.stringify(input) }),
+  });
+}
+
+export function useForgotPasswordReset() {
+  return useMutation({
+    mutationFn: (input: { resetToken: string; newPassword: string }) =>
+      apiFetch<{ success: true }>('/auth/forgot-password/reset', { method: 'POST', body: JSON.stringify(input) }),
   });
 }
 
