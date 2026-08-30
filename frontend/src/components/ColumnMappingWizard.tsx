@@ -376,7 +376,7 @@ export default function ColumnMappingWizard({ onReady, onCancel }: ColumnMapping
         Next →
       </button>
     ) : (
-      <span className="text-sm text-text-muted">Confirm the header row to continue</span>
+      <span className="text-sm font-semibold text-warning">Confirm the header row to continue</span>
     );
   } else if (wizardStep === 'footer') {
     stageActions = (
@@ -534,21 +534,47 @@ export default function ColumnMappingWizard({ onReady, onCancel }: ColumnMapping
               {stageActions}
             </div>
             <div className="w-px shrink-0 bg-border" />
-            <div className="flex flex-wrap items-center gap-1 bg-bg-card px-3 py-2" data-testid="wizard-stepper">
+            {/* A track/progress-bar look (numbered circles + connecting line), deliberately NOT
+                reusing the buttons' solid rounded-btn/bg-accent treatment - live feedback was
+                that the old pill-shaped "current" step read as a clickable button. Only the
+                circle itself is filled for "current" as a thin accent ring, never solid. */}
+            <div className="flex flex-1 items-center gap-0 bg-bg-primary px-3 py-2" data-testid="wizard-stepper">
               {DISPLAY_STEPS.map((step, i) => {
                 const status = stepStatus(step.key);
                 return (
-                  <span key={step.key} className="flex items-center gap-1">
-                    <span
-                      data-testid={`wizard-step-${step.key}`}
-                      data-state={status}
-                      className={`rounded-btn px-2 py-1 font-medium ${
-                        status === 'current' ? 'bg-accent text-white' : status === 'done' ? 'text-success' : 'text-text-muted'
-                      }`}
-                    >
-                      {status === 'done' ? '✓ ' : `${i + 1}. `}{step.label}
+                  <span key={step.key} className="flex flex-1 items-center last:flex-initial">
+                    <span className="flex flex-col items-center gap-1">
+                      <span
+                        data-testid={`wizard-step-${step.key}`}
+                        data-state={status}
+                        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${
+                          status === 'done'
+                            ? 'bg-success text-white'
+                            : status === 'current'
+                            ? 'border-2 border-accent bg-bg-card text-accent'
+                            : 'border border-border bg-bg-card text-text-muted'
+                        }`}
+                      >
+                        {status === 'done' ? '✓' : i + 1}
+                      </span>
+                      <span
+                        className={`whitespace-nowrap text-[10px] ${
+                          status === 'current'
+                            ? 'font-semibold text-accent'
+                            : status === 'done'
+                            ? 'font-medium text-success'
+                            : 'text-text-muted'
+                        }`}
+                      >
+                        {step.label}
+                      </span>
                     </span>
-                    {i < DISPLAY_STEPS.length - 1 && <span className="text-text-muted" aria-hidden="true">→</span>}
+                    {i < DISPLAY_STEPS.length - 1 && (
+                      <span
+                        aria-hidden="true"
+                        className={`mx-1 h-0.5 flex-1 rounded-full ${status === 'done' ? 'bg-success' : 'bg-border'}`}
+                      />
+                    )}
                   </span>
                 );
               })}
@@ -557,7 +583,7 @@ export default function ColumnMappingWizard({ onReady, onCancel }: ColumnMapping
 
           {wizardStep === 'header' && (
             <>
-              <p className="mb-2 text-xs text-text-muted">
+              <p className="mb-2 text-xs font-normal text-accent/80">
                 Click the cell where your real header row and real data columns start (some files have summary rows
                 above the headers) — or type the row/column numbers directly.
               </p>
@@ -594,7 +620,7 @@ export default function ColumnMappingWizard({ onReady, onCancel }: ColumnMapping
 
           {wizardStep === 'footer' && (
             <>
-              <p className="mb-2 text-xs text-text-muted">
+              <p className="mb-2 text-xs font-normal text-accent/80">
                 Optionally click the cell that marks where footer content (totals, disclaimers) begins — everything
                 from that row on will be excluded. Skip if this file has no footer to trim.
               </p>
@@ -646,7 +672,7 @@ export default function ColumnMappingWizard({ onReady, onCancel }: ColumnMapping
 
           {wizardStep === 'cash' && (
             <>
-              <p className="mb-2 text-xs text-text-muted">
+              <p className="mb-2 text-xs font-normal text-accent/80">
                 Optionally click a cell identifying cash/cash-equivalent rows (e.g. "Cash & Cash Investments") —
                 every matching row is excluded from holdings and its value added to the portfolio's cash balance
                 instead. Skip if this file has no cash rows to identify.
