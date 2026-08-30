@@ -164,6 +164,7 @@ listed in `.gitignore`) and fill in yourself.
 | `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX_PER_USER`, `RATE_LIMIT_MAX_PER_IP` | Rate-limiting knobs |
 | `JWT_SECRET` | The secret key used to sign login tokens — if this leaks, anyone can forge a valid login |
 | `JWT_EXPIRES_IN` | How long a login stays valid (`7d`) |
+| `IMPERSONATION_EXPIRES_IN` | How long an admin-master's "Login-as" session stays valid (`1h`) — deliberately much shorter than a normal login, since it's a borrowed, elevated session (see `02` §2.3) |
 | `FRONTEND_ORIGIN` | Which URL is allowed to make authenticated requests to the backend (CORS) |
 | `API_KEY_ENCRYPTION_KEY` | The key used to encrypt users' own FMP/Finnhub keys before storing them in the database |
 | `NODE_ENV` | `development` locally, `production` when deployed |

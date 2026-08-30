@@ -91,6 +91,16 @@ These are two different questions the app answers separately:
   but the *real* enforcement always happens on the backend, since a user could otherwise
   just call the API directly and skip the UI.
 
+- **"Login-as" (impersonation)** — a special, narrower case of authentication: a single
+  `admin-master` account (and only that role — enforced backend-side, not just hidden in
+  the UI) can temporarily *become* another user for troubleshooting, without their
+  password. Under the hood, the same JWT gains one extra field, `impersonatedBy` (the
+  admin's own id) — there's no second cookie or session store, just one token that can
+  prove both "who you're acting as" and "who's really behind the wheel." These sessions
+  expire much sooner than a normal login (`IMPERSONATION_EXPIRES_IN`, default `1h` vs. the
+  normal `7d`), and impersonating another admin is blocked outright — this is a support
+  tool, not a privilege-escalation path.
+
 ---
 
 ## 2.4 Walk-through #1: Logging in
@@ -163,6 +173,20 @@ This single feature demonstrates the general pattern this whole app follows: **N
 (backend) owns all data access and business rules; the frontend is a thin, permission-aware
 presentation layer; nothing trusts the frontend's own UI restrictions as actual security.**
 
+**Extended since the walk-through above was written**: real broker files surfaced two more
+patterns the wizard needed to handle, so step 2's "map columns" screen actually grew into a
+6-step guided sequence — **Header → Footer → Cash → Map Columns → Inspect Data → Confirm
+Mapping** — with a visible progress-bar stepper, plus two new optional marker steps: a
+*footer marker* (click the row where a trailing "Totals"/disclaimer block starts, so it gets
+excluded from parsing) and a *cash-row marker* (click the row holding a cash/money-market
+balance, either as its own column or embedded inside another cell's text, e.g. `"CASH &
+CASH EQUIVALENTS $12,345.67"`). Both are saved as part of the template (`footer_marker_row`,
+`cash_config` on `m_portfolio_template_mapping_master`), so a reused template auto-applies
+them without re-asking. The Admin Console's Portfolio Templates tab also gained template
+hard-delete, a pop-up showing every portfolio still bound to a template before deleting it,
+and a section listing any Flex portfolio abandoned mid-flow (`flex_template_status =
+'Flex-Err'`) so it's never invisible.
+
 ---
 
 ## 2.6 Where the Python service fits in
@@ -186,7 +210,22 @@ then had its pure-math portion extracted into Python once the pattern was valida
 
 ---
 
-## 2.7 Feature map — where to look for each screen
+## 2.7 Config Properties — changing business rules without a code deploy
+
+Some numbers in this app were originally hardcoded constants in TypeScript — e.g. "keep the
+60 most recent admin scan-history rows" or "which roles fall back to the shared admin key."
+Changing either used to mean editing code and redeploying. The **Config Properties**
+framework moves values like this into the database instead: `admin-master` (and only that
+role) can view/change them from the Admin Console's Config Properties tab, and the backend
+always reads the *current* value live (no caching, no restart needed) via a small pair of
+helper functions, `getConfigInt()`/`getConfigStringList()`. Every change is kept as a full
+version history (never overwritten, only superseded), so it's always clear what the value
+was at any point in time and who changed it. This is deliberately reusable infrastructure,
+not a one-off fix — new tunable values can be added the same way going forward.
+
+---
+
+## 2.8 Feature map — where to look for each screen
 
 | Screen | Frontend page | Backend routes/controller | Backend service(s) |
 |---|---|---|---|
@@ -198,6 +237,8 @@ then had its pure-math portion extracted into Python once the pattern was valida
 | Momentum | `MomentumPage.tsx` | `momentum.routes.ts` | `momentum.service.ts` (+ Python `momentum.py`) |
 | Long-Term Analysis | `LongTermAnalysisPage.tsx` | `analysis.routes.ts` | `longTermAnalysisData.service.ts` (+ Python `long_term.py`) |
 | Contrarian Comeback | `ContrarianComebackPage.tsx` | `analysis.routes.ts` | `contrarianComebackData.service.ts` (+ Python) |
-| Admin Console | `AdminPage.tsx` and its sub-pages (`RolesPage`, `RolePermissionsPage`, `UserRolesPage`, `FunctionsPage`, `MasterDataPage`, `PortfolioTemplateApprovalPage`) | `roles.routes.ts`, `functionMaster.routes.ts`, `users.routes.ts`, `portfolioTemplate.routes.ts` | `roles.service.ts`, `functionMaster.service.ts`, `users.service.ts` |
+| Admin Console | `AdminPage.tsx` and its sub-pages (`RolesPage`, `RolePermissionsPage`, `UserRolesPage`, `FunctionsPage`, `MasterDataPage`, `PortfolioTemplateApprovalPage`, `ConfigPropertiesPage`) | `roles.routes.ts`, `functionMaster.routes.ts`, `users.routes.ts`, `portfolioTemplate.routes.ts`, `configProperty.routes.ts` | `roles.service.ts`, `functionMaster.service.ts`, `users.service.ts`, `configProperty.service.ts` |
+| Config Properties (admin-master only) | `ConfigPropertiesPage.tsx` (an Admin Console tab, not its own route) | `configProperty.routes.ts` | `configProperty.service.ts` |
+| "Login-as" (admin-master only) | `LoginAsModal.tsx` + `ImpersonationBanner.tsx` (in `TabShell.tsx`/`AdminPage.tsx`, not their own route) | `auth.routes.ts` (`/auth/impersonate`, `/auth/stop-impersonating`) | `impersonation.service.ts`, `auth.service.ts` |
 
 For the full database structure behind all of this, see `backend/src/db/SCHEMA.md`.

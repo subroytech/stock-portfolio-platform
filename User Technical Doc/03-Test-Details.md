@@ -117,16 +117,24 @@ and neither substitutes for the other.
 
 ---
 
-## 3.6 Current state (as of 2026-08-15)
+## 3.6 Current state (as of 2026-08-28)
 
-- All four CI jobs (backend, frontend, analysis-service, e2e) have been green together at
-  least once (see `CLAUDE.md`'s "Contrarian Finder Stock Universe" entry).
-- The current uncommitted branch (`analysis-service/scaffolding`) contains the Flex
-  upload feature (built + automated-tested + verified live back on 2026-08-07/14), which
-  is now going through its manual QA pass using `Manual-TestScript/
-  portfolio-upload-flex-test-plan.md` — that pass is in progress, not yet complete.
-- Known gap: the `analysis-service/Dockerfile` has never actually been built/run, because
-  Docker isn't installed on the current dev machine — only the plain `poetry run uvicorn`
-  path has been tested. This isn't invisible risk being ignored — it's tracked explicitly
-  in both `Architecture.md` and `CLAUDE.md` as a known, deliberate gap to close before any
-  real deployment.
+- All four CI jobs (backend, frontend, analysis-service, e2e) have been green together
+  multiple times (see `CLAUDE.md`'s "Contrarian Finder Stock Universe" entry onward).
+- The Flex upload feature's manual QA pass (`Manual-TestScript/
+  portfolio-upload-flex-test-plan.md`) is complete — 3 real bugs were found and fixed during
+  that pass, and all throwaway test accounts/data were cleaned up afterward.
+- Everything built through this point — Flex (plus its later footer/cash-row-marker and
+  guided-stepper follow-ons, and the admin template-governance tools), the Config Properties
+  framework, the global session-expiry fix, the header persona badge, and "Login-as"
+  impersonation — is now committed and pushed to `analysis-service/scaffolding` (6 focused
+  commits, one per feature area, each individually verified to typecheck/lint/test clean).
+- Known gap, still open: **"Login-as" impersonation is built and fully test-covered, but its
+  own live two-real-account walkthrough hasn't been run yet** — see `Architecture.md`
+  Section 2 for the exact checklist (banner correctness, clean return-to-admin, blocked
+  same-admin impersonation, the audit log's `ended_at` populating).
+- Known gap, unchanged: the `analysis-service/Dockerfile` has never actually been built/run,
+  because Docker isn't installed on the current dev machine — only the plain `poetry run
+  uvicorn` path has been tested. This isn't invisible risk being ignored — it's tracked
+  explicitly in both `Architecture.md` and `CLAUDE.md` as a known, deliberate gap to close
+  before any real deployment.
