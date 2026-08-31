@@ -24,7 +24,7 @@ const mockStartImpersonation = impersonationService.startImpersonation as jest.M
 const mockEndImpersonation = impersonationService.endImpersonation as jest.Mock;
 
 // Self-Registration & Password Policy: signup() no longer assigns a role (that's now an admin
-// step, see the describe block below) but DOES save 7 security answers transactionally via
+// step, see the describe block below) but DOES save 5 security answers transactionally via
 // pool.connect() (securityQuestion.service.ts's saveUserAnswers) - a mock client so that
 // transaction succeeds without needing a real DB.
 function mockSecurityAnswerClient() {
@@ -36,13 +36,13 @@ function mockSecurityAnswerClient() {
 }
 
 // A password meeting every rule (15-25 chars, upper+number+special, no name/email overlap) and
-// 7 distinct security answers - the minimum a signup request needs to get past validation.
+// 5 distinct security answers - the minimum a signup request needs to get past validation.
 const VALID_SIGNUP_PAYLOAD = {
   email: 'new@example.com',
   firstName: 'Jordan',
   lastName: 'Rivera',
   password: 'Str0ng!PasswordXYZ',
-  securityAnswers: ['q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q7'].map((id, i) => ({ questionId: id, answer: `Answer${i}` })),
+  securityAnswers: ['q1', 'q2', 'q3', 'q4', 'q5'].map((id, i) => ({ questionId: id, answer: `Answer${i}` })),
 };
 
 // Keyed on distinguishing SQL substrings (not just startsWith('SELECT'/'INSERT'), since a full
@@ -140,8 +140,8 @@ describe('POST /auth/signup', () => {
     expect(res.status).toBe(400);
   });
 
-  test('rejects fewer than 7 security answers with 400', async () => {
-    const res = await request(app).post('/auth/signup').send({ ...VALID_SIGNUP_PAYLOAD, securityAnswers: VALID_SIGNUP_PAYLOAD.securityAnswers.slice(0, 5) });
+  test('rejects fewer than 5 security answers with 400', async () => {
+    const res = await request(app).post('/auth/signup').send({ ...VALID_SIGNUP_PAYLOAD, securityAnswers: VALID_SIGNUP_PAYLOAD.securityAnswers.slice(0, 3) });
     expect(res.status).toBe(400);
   });
 
@@ -375,6 +375,88 @@ describe('POST /auth/change-password', () => {
   });
 });
 
+describe('GET /auth/security-questions', () => {
+  beforeEach(() => mockQuery.mockReset());
+
+  test('200 with all 15 questions, public (no session needed)', async () => {
+    const all15 = Array.from({ length: 15 }, (_, i) => ({ id: String(i + 1), question_text: `Question ${i + 1}` }));
+    mockQuery.mockResolvedValueOnce({ rows: all15 });
+    const res = await request(app).get('/auth/security-questions');
+    expect(res.status).toBe(200);
+    expect(res.body.questions).toHaveLength(15);
+  });
+});
+
+describe('GET /auth/security-questions/mine', () => {
+  beforeEach(() => mockQuery.mockReset());
+
+  test('401 without a session', async () => {
+    const res = await request(app).get('/auth/security-questions/mine');
+    expect(res.status).toBe(401);
+  });
+
+  test('200 with the account\'s currently-saved questions', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ question_id: '3', question_text: 'Question 3' }] });
+    const res = await request(app).get('/auth/security-questions/mine').set('Cookie', `auth_token=${signToken('1')}`);
+    expect(res.status).toBe(200);
+    expect(res.body.questions).toEqual([{ id: '3', questionText: 'Question 3' }]);
+  });
+
+  test('200 with an empty list for an admin-created account with none saved', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).get('/auth/security-questions/mine').set('Cookie', `auth_token=${signToken('1')}`);
+    expect(res.status).toBe(200);
+    expect(res.body.questions).toEqual([]);
+  });
+});
+
+describe('PUT /auth/security-questions', () => {
+  beforeEach(() => {
+    mockQuery.mockReset();
+    mockConnect.mockReset();
+  });
+
+  const fiveAnswers = Array.from({ length: 5 }, (_, i) => ({ questionId: String(i + 1), answer: `Answer${i}` }));
+
+  function mockUpdateSecurityQuestionsDb(currentPasswordHash: string) {
+    mockQuery.mockImplementation((text: string) => {
+      if (text.includes('FROM users WHERE id')) return Promise.resolve({ rows: [{ password_hash: currentPasswordHash }] });
+      if (text.includes('FROM m_security_question')) return Promise.resolve({ rows: fiveAnswers.map((a) => ({ id: a.questionId })) });
+      return Promise.resolve({ rows: [] }); // DELETE/INSERT inside the transaction client, not pool.query
+    });
+  }
+
+  test('401 without a session', async () => {
+    const res = await request(app).put('/auth/security-questions').send({ currentPassword: 'x', securityAnswers: fiveAnswers });
+    expect(res.status).toBe(401);
+  });
+
+  test('401 when the current password is wrong', async () => {
+    mockUpdateSecurityQuestionsDb(await hashPassword('CorrectCurrent1!Xyz'));
+    const res = await request(app).put('/auth/security-questions').set('Cookie', `auth_token=${signToken('1')}`)
+      .send({ currentPassword: 'WrongOne1!Xyz', securityAnswers: fiveAnswers });
+    expect(res.status).toBe(401);
+  });
+
+  test('400 when fewer than 5 answers are submitted', async () => {
+    mockUpdateSecurityQuestionsDb(await hashPassword('CorrectCurrent1!Xyz'));
+    const res = await request(app).put('/auth/security-questions').set('Cookie', `auth_token=${signToken('1')}`)
+      .send({ currentPassword: 'CorrectCurrent1!Xyz', securityAnswers: fiveAnswers.slice(0, 3) });
+    expect(res.status).toBe(400);
+  });
+
+  test('200 on success, replacing the full set (works the same for a first-time setup with none existing)', async () => {
+    mockUpdateSecurityQuestionsDb(await hashPassword('CorrectCurrent1!Xyz'));
+    mockConnect.mockResolvedValue({
+      query: jest.fn((sql: string) => (sql.startsWith('BEGIN') || sql.startsWith('COMMIT') || sql.startsWith('ROLLBACK') ? Promise.resolve({}) : Promise.resolve({ rows: [] }))),
+      release: jest.fn(),
+    });
+    const res = await request(app).put('/auth/security-questions').set('Cookie', `auth_token=${signToken('1')}`)
+      .send({ currentPassword: 'CorrectCurrent1!Xyz', securityAnswers: fiveAnswers });
+    expect(res.status).toBe(200);
+  });
+});
+
 describe('POST /auth/forgot-password/start', () => {
   beforeEach(() => mockQuery.mockReset());
 
@@ -394,8 +476,8 @@ describe('POST /auth/forgot-password/start', () => {
     expect(res.status).toBe(404);
   });
 
-  test('200 with 4 challenge questions + a challenge token when the account has saved answers', async () => {
-    const saved = Array.from({ length: 7 }, (_, i) => ({ question_id: String(i + 1), question_text: `Q${i + 1}` }));
+  test('200 with 3 challenge questions + a challenge token when the account has saved answers', async () => {
+    const saved = Array.from({ length: 5 }, (_, i) => ({ question_id: String(i + 1), question_text: `Q${i + 1}` }));
     mockQuery.mockImplementation((text: string) => {
       if (text.includes('FROM users WHERE email')) return Promise.resolve({ rows: [{ id: '1', email: 'a@b.com', status: 'active' }] });
       if (text.includes('users_security_answers')) return Promise.resolve({ rows: saved });
@@ -403,7 +485,7 @@ describe('POST /auth/forgot-password/start', () => {
     });
     const res = await request(app).post('/auth/forgot-password/start').send({ email: 'a@b.com' });
     expect(res.status).toBe(200);
-    expect(res.body.questions).toHaveLength(4);
+    expect(res.body.questions).toHaveLength(3);
     expect(typeof res.body.challengeToken).toBe('string');
   });
 });
@@ -414,37 +496,37 @@ describe('POST /auth/forgot-password/verify', () => {
   test('401 with an invalid/expired/tampered challenge token', async () => {
     const res = await request(app).post('/auth/forgot-password/verify').send({
       challengeToken: 'not-a-real-token',
-      answers: [{ questionId: '1', answer: 'x' }, { questionId: '2', answer: 'x' }, { questionId: '3', answer: 'x' }, { questionId: '4', answer: 'x' }],
+      answers: [{ questionId: '1', answer: 'x' }, { questionId: '2', answer: 'x' }, { questionId: '3', answer: 'x' }],
     });
     expect(res.status).toBe(401);
   });
 
   test('400 when the submitted question ids do not match what was challenged', async () => {
-    const token = signPasswordResetChallengeToken('1', ['1', '2', '3', '4']);
+    const token = signPasswordResetChallengeToken('1', ['1', '2', '3']);
     const res = await request(app).post('/auth/forgot-password/verify').send({
       challengeToken: token,
-      answers: [{ questionId: '1', answer: 'x' }, { questionId: '2', answer: 'x' }, { questionId: '3', answer: 'x' }, { questionId: '999', answer: 'x' }],
+      answers: [{ questionId: '1', answer: 'x' }, { questionId: '2', answer: 'x' }, { questionId: '999', answer: 'x' }],
     });
     expect(res.status).toBe(400);
   });
 
-  test('401 when any answer is wrong; 200 with a resetToken when all 4 are correct', async () => {
+  test('401 when any answer is wrong; 200 with a resetToken when all 3 are correct', async () => {
     const bcrypt = jest.requireActual('bcrypt');
-    const hashes = await Promise.all(['ans1', 'ans2', 'ans3', 'ans4'].map((a) => bcrypt.hash(a, 4)));
-    const token = signPasswordResetChallengeToken('1', ['1', '2', '3', '4']);
+    const hashes = await Promise.all(['ans1', 'ans2', 'ans3'].map((a) => bcrypt.hash(a, 4)));
+    const token = signPasswordResetChallengeToken('1', ['1', '2', '3']);
     const answerRows = hashes.map((h, i) => ({ question_id: String(i + 1), answer_hash: h }));
 
     mockQuery.mockResolvedValueOnce({ rows: answerRows });
     const wrongRes = await request(app).post('/auth/forgot-password/verify').send({
       challengeToken: token,
-      answers: [{ questionId: '1', answer: 'ans1' }, { questionId: '2', answer: 'ans2' }, { questionId: '3', answer: 'ans3' }, { questionId: '4', answer: 'WRONG' }],
+      answers: [{ questionId: '1', answer: 'ans1' }, { questionId: '2', answer: 'ans2' }, { questionId: '3', answer: 'WRONG' }],
     });
     expect(wrongRes.status).toBe(401);
 
     mockQuery.mockResolvedValueOnce({ rows: answerRows });
     const correctRes = await request(app).post('/auth/forgot-password/verify').send({
       challengeToken: token,
-      answers: [{ questionId: '1', answer: 'ans1' }, { questionId: '2', answer: 'ans2' }, { questionId: '3', answer: 'ans3' }, { questionId: '4', answer: 'ans4' }],
+      answers: [{ questionId: '1', answer: 'ans1' }, { questionId: '2', answer: 'ans2' }, { questionId: '3', answer: 'ans3' }],
     });
     expect(correctRes.status).toBe(200);
     expect(typeof correctRes.body.resetToken).toBe('string');

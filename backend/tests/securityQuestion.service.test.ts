@@ -2,8 +2,8 @@ jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn(
 
 import { pool } from '../src/db/pool';
 import {
-  getRandomActiveQuestions, saveUserAnswers, getRandomChallengeQuestions, verifyAnswers,
-  InvalidQuestionSelectionError, NoSecurityAnswersError,
+  listActiveQuestions, listUserAnswerQuestions, saveUserAnswers, replaceUserAnswers,
+  getRandomChallengeQuestions, verifyAnswers, InvalidQuestionSelectionError, NoSecurityAnswersError,
 } from '../src/services/securityQuestion.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
@@ -16,14 +16,26 @@ beforeEach(() => {
 
 const ALL_15 = Array.from({ length: 15 }, (_, i) => ({ id: String(i + 1), question_text: `Question ${i + 1}` }));
 
-describe('getRandomActiveQuestions', () => {
-  test('returns exactly n questions drawn from the active set', async () => {
+describe('listActiveQuestions', () => {
+  test('returns all active questions, unshuffled (the user picks their own N themselves now)', async () => {
     mockQuery.mockResolvedValueOnce({ rows: ALL_15 });
-    const questions = await getRandomActiveQuestions(7);
-    expect(questions).toHaveLength(7);
-    const ids = new Set(questions.map((q) => q.id));
-    expect(ids.size).toBe(7); // no duplicates
-    for (const q of questions) expect(ALL_15.some((r) => r.id === q.id)).toBe(true);
+    const questions = await listActiveQuestions();
+    expect(questions).toHaveLength(15);
+    expect(questions.map((q) => q.id)).toEqual(ALL_15.map((r) => r.id));
+  });
+});
+
+describe('listUserAnswerQuestions', () => {
+  test('returns the questions (id+text only) this account currently has saved', async () => {
+    const saved = [{ question_id: '3', question_text: 'Question 3' }, { question_id: '7', question_text: 'Question 7' }];
+    mockQuery.mockResolvedValueOnce({ rows: saved });
+    const questions = await listUserAnswerQuestions('1');
+    expect(questions).toEqual([{ id: '3', questionText: 'Question 3' }, { id: '7', questionText: 'Question 7' }]);
+  });
+
+  test('returns an empty array for an account with none saved (e.g. admin-created)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    expect(await listUserAnswerQuestions('1')).toEqual([]);
   });
 });
 
@@ -72,6 +84,52 @@ describe('saveUserAnswers', () => {
 
     await expect(saveUserAnswers('7', sevenAnswers, 7)).rejects.toThrow('insert failed');
     expect(client.query).toHaveBeenCalledWith('ROLLBACK');
+  });
+});
+
+describe('replaceUserAnswers', () => {
+  const sevenAnswers = Array.from({ length: 7 }, (_, i) => ({ questionId: String(i + 1), answer: `Answer${i}` }));
+
+  test('deletes the existing set then inserts the new 7, transactionally', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: sevenAnswers.map((a) => ({ id: a.questionId })) }); // validation SELECT
+    const client = mockTransactionClient();
+    mockConnect.mockResolvedValue(client);
+
+    await replaceUserAnswers('7', sevenAnswers, 7);
+
+    expect(client.query).toHaveBeenCalledWith('BEGIN');
+    expect(client.query).toHaveBeenCalledWith('DELETE FROM users_security_answers WHERE user_id = $1', ['7']);
+    expect(client.query).toHaveBeenCalledWith('COMMIT');
+    const inserts = client.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO users_security_answers'));
+    expect(inserts).toHaveLength(7);
+  });
+
+  test('the DELETE runs before any INSERT (a real full replace, not an append)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: sevenAnswers.map((a) => ({ id: a.questionId })) });
+    const client = mockTransactionClient();
+    mockConnect.mockResolvedValue(client);
+
+    await replaceUserAnswers('7', sevenAnswers, 7);
+
+    const calls = client.query.mock.calls.map(([sql]) => String(sql));
+    const deleteIdx = calls.findIndex((sql) => sql.startsWith('DELETE FROM users_security_answers'));
+    const firstInsertIdx = calls.findIndex((sql) => sql.includes('INSERT INTO users_security_answers'));
+    expect(deleteIdx).toBeGreaterThanOrEqual(0);
+    expect(deleteIdx).toBeLessThan(firstInsertIdx);
+  });
+
+  test('works fine for an account with no existing answers (the DELETE is just a no-op)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: sevenAnswers.map((a) => ({ id: a.questionId })) });
+    const client = mockTransactionClient(); // DELETE on an empty table still resolves normally
+    mockConnect.mockResolvedValue(client);
+
+    await expect(replaceUserAnswers('7', sevenAnswers, 7)).resolves.toBeUndefined();
+  });
+
+  test('rejects an invalid selection before ever connecting for the transaction', async () => {
+    const withDupe = [...sevenAnswers.slice(0, 6), { questionId: sevenAnswers[0].questionId, answer: 'dupe' }];
+    await expect(replaceUserAnswers('7', withDupe, 7)).rejects.toBeInstanceOf(InvalidQuestionSelectionError);
+    expect(mockConnect).not.toHaveBeenCalled();
   });
 });
 

@@ -1,8 +1,8 @@
 -- Security-question-based account recovery (CLAUDE.md's "Self-Registration & Password Policy"
 -- section) - a "Forgot Password" flow that doesn't depend on an email provider (none exists in
--- this repo). At registration, 7 questions are offered at random from this master list and the
--- user answers all 7; at Forgot Password time, 4 of the user's own 7 saved answers are randomly
--- challenged.
+-- this repo). At registration, the user picks 5 questions of their own choosing from this
+-- master list and answers all 5; at Forgot Password time, 3 of the user's own 5 saved answers
+-- are randomly challenged.
 
 -- m_-prefixed: a static, admin-seeded catalog (nobody user-authors a new question), same bucket
 -- as m_function_master. Seeded with the app's initial 15; status lets a question be retired

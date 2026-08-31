@@ -12,10 +12,14 @@ router.post('/logout', authController.logout);
 // login/logout must stay public) - /me needs it applied per-route instead.
 router.get('/me', requireAuth, authController.me);
 
-// Self-Registration & Password Policy - security questions feed the registration form;
-// Forgot Password's 3 steps stay public (that's the whole point - no session exists yet).
-// Change Password requires a valid session (it's "I know my current password," not recovery).
-router.get('/security-questions/random', authController.securityQuestionsRandom);
+// Self-Registration & Password Policy - security questions feed the registration form (public,
+// the full 15 for the user to pick 7 from) and the post-login "Manage Security Questions"
+// screen (requireAuth, both the "mine" read and the full-replace write). Forgot Password's 3
+// steps stay public (that's the whole point - no session exists yet). Change Password requires
+// a valid session (it's "I know my current password," not recovery).
+router.get('/security-questions', authController.securityQuestionsList);
+router.get('/security-questions/mine', requireAuth, authController.securityQuestionsMine);
+router.put('/security-questions', requireAuth, authController.updateSecurityQuestions);
 router.post('/change-password', requireAuth, authController.changePassword);
 router.post('/forgot-password/start', authController.forgotPasswordStart);
 router.post('/forgot-password/verify', authController.forgotPasswordVerify);

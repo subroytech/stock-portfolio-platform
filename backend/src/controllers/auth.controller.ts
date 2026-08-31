@@ -10,10 +10,10 @@ import env from '../config/env';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Self-Registration & Password Policy - how many questions are offered/answered at registration
-// vs. challenged at Forgot Password time. Confirmed with the user: all 7 offered are answered
-// and saved (not just 5); 4 of those 7 are randomly challenged on Forgot Password.
-const REGISTRATION_QUESTION_COUNT = 7;
-const CHALLENGE_QUESTION_COUNT = 4;
+// vs. challenged at Forgot Password time. Reduced from 7/4 to 5/3 - the original 7-question setup
+// was too tedious; 3 of the user's 5 saved answers are randomly challenged on Forgot Password.
+const REGISTRATION_QUESTION_COUNT = 5;
+const CHALLENGE_QUESTION_COUNT = 3;
 
 function cookieOptions(maxAge: number = env.jwtExpiresInMs): CookieOptions {
   return {
@@ -206,14 +206,66 @@ export async function stopImpersonating(req: Request, res: Response, next: NextF
   }
 }
 
-// GET /auth/security-questions/random - public, feeds the registration form's 7 questions.
-// Stateless (see securityQuestion.service.ts's own note) - nothing is recorded about what was
-// offered to a given page load.
-export async function securityQuestionsRandom(_req: Request, res: Response, next: NextFunction): Promise<void> {
+// GET /auth/security-questions - public, feeds the registration form's own question-picker (the
+// user selects which 7 of these to answer, rather than being handed a random 7).
+export async function securityQuestionsList(_req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const questions = await securityQuestionService.getRandomActiveQuestions(REGISTRATION_QUESTION_COUNT);
+    const questions = await securityQuestionService.listActiveQuestions();
     res.json({ questions });
   } catch (err) {
+    next(err);
+  }
+}
+
+// GET /auth/security-questions/mine - requireAuth. Which questions (id+text only, never the
+// answers) this account currently has saved - feeds the "Manage Security Questions" screen's
+// pre-checked selection, and lets an admin-created account (no answers from creation) know it
+// has none yet.
+export async function securityQuestionsMine(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const questions = await securityQuestionService.listUserAnswerQuestions(req.user!.id);
+    res.json({ questions });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// PUT /auth/security-questions - requireAuth. { currentPassword, securityAnswers[5] } -> full
+// replace (never a partial edit - see securityQuestion.service.ts's replaceUserAnswers). Current
+// password is required for the same reason Change Password requires it: this is sensitive
+// account-recovery configuration, not something a hijacked-but-not-fully-authenticated session
+// should be able to silently rewrite.
+export async function updateSecurityQuestions(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const { currentPassword, securityAnswers } = req.body || {};
+  if (typeof currentPassword !== 'string') {
+    res.status(400).json({ error: 'Current password is required.' });
+    return;
+  }
+  if (!Array.isArray(securityAnswers) || securityAnswers.length !== REGISTRATION_QUESTION_COUNT) {
+    res.status(400).json({ error: `Exactly ${REGISTRATION_QUESTION_COUNT} security question answers are required.` });
+    return;
+  }
+  for (const a of securityAnswers) {
+    if (typeof a?.questionId !== 'string' || typeof a?.answer !== 'string' || !a.answer.trim() || a.answer.trim().length > 20) {
+      res.status(400).json({ error: 'Each security question answer must be 1-20 characters.' });
+      return;
+    }
+  }
+
+  try {
+    const userId = req.user!.id;
+    const currentHash = await authService.getPasswordHashById(userId);
+    if (!currentHash || !(await authService.verifyPassword(currentPassword, currentHash))) {
+      res.status(401).json({ error: 'Current password is incorrect.' });
+      return;
+    }
+    await securityQuestionService.replaceUserAnswers(userId, securityAnswers, REGISTRATION_QUESTION_COUNT);
+    res.json({ success: true });
+  } catch (err) {
+    if (err instanceof securityQuestionService.InvalidQuestionSelectionError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     next(err);
   }
 }
@@ -260,9 +312,9 @@ export async function changePassword(req: Request, res: Response, next: NextFunc
   }
 }
 
-// POST /auth/forgot-password/start - public. { email } -> 4 randomly-challenged questions from
-// the account's own 7 saved answers, plus a short-lived signed challenge token carrying exactly
-// which 4 question ids were offered (so /verify below can't be tricked into checking a
+// POST /auth/forgot-password/start - public. { email } -> 3 randomly-challenged questions from
+// the account's own 5 saved answers, plus a short-lived signed challenge token carrying exactly
+// which 3 question ids were offered (so /verify below can't be tricked into checking a
 // different set than what the user actually saw). Deliberately not anti-enumeration-safe (404s
 // plainly) - see the plan's own "deliberate scope boundaries" note; matches this app's existing
 // precedent of not hiding account existence everywhere (e.g. signup's 409 on a duplicate email).
