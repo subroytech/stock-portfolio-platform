@@ -64,7 +64,10 @@ describe('useSignup', () => {
     const { result } = renderHook(() => useSignup(), { wrapper: wrapper(queryClient) });
 
     await act(async () => {
-      await result.current.mutateAsync({ email: 'new@b.com', password: 'whatever123' });
+      await result.current.mutateAsync({
+        email: 'new@b.com', password: 'whatever123', firstName: 'Jordan', lastName: 'Rivera',
+        securityAnswers: [{ questionId: 'q1', answer: 'a1' }],
+      });
     });
 
     expect(queryClient.getQueryData(['session'])).toEqual({ id: '2', email: 'new@b.com', roles: ['user'] });

@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import * as client from '../api/client';
 import ForgotPasswordPage from './ForgotPasswordPage';
 
-const CHALLENGE_QUESTIONS = Array.from({ length: 4 }, (_, i) => ({ id: `q${i + 1}`, questionText: `Question ${i + 1}` }));
+const CHALLENGE_QUESTIONS = Array.from({ length: 3 }, (_, i) => ({ id: `q${i + 1}`, questionText: `Question ${i + 1}` }));
 const VALID_PASSWORD = 'Br4nd!NewPasswordXY';
 
 function renderPage() {
@@ -23,7 +23,7 @@ function renderPage() {
 describe('ForgotPasswordPage', () => {
   beforeEach(() => vi.restoreAllMocks());
 
-  test('full happy path: email -> 4 questions -> new password -> done', async () => {
+  test('full happy path: email -> 3 questions -> new password -> done', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
       if (url === '/auth/forgot-password/start' && options?.method === 'POST') {
         return Promise.resolve({ challengeToken: 'challenge-abc', questions: CHALLENGE_QUESTIONS });
@@ -31,7 +31,7 @@ describe('ForgotPasswordPage', () => {
       if (url === '/auth/forgot-password/verify' && options?.method === 'POST') {
         const body = JSON.parse(options.body as string);
         expect(body.challengeToken).toBe('challenge-abc');
-        expect(body.answers).toHaveLength(4);
+        expect(body.answers).toHaveLength(3);
         return Promise.resolve({ resetToken: 'reset-xyz' });
       }
       if (url === '/auth/forgot-password/reset' && options?.method === 'POST') {

@@ -7,6 +7,7 @@ import LoginPage from './pages/LoginPage';
 import SignupPage from './pages/SignupPage';
 import ForgotPasswordPage from './pages/ForgotPasswordPage';
 import ChangePasswordPage from './pages/ChangePasswordPage';
+import ManageSecurityQuestionsPage from './pages/ManageSecurityQuestionsPage';
 import ImportPreviewPage from './pages/ImportPreviewPage';
 import AdminPage from './pages/AdminPage';
 
@@ -22,6 +23,7 @@ export default function App() {
           <Route path="/forgot-password" element={<ForgotPasswordPage />} />
           <Route element={<ProtectedRoute />}>
             <Route path="/change-password" element={<ChangePasswordPage />} />
+            <Route path="/security-questions" element={<ManageSecurityQuestionsPage />} />
             <Route path="/portfolios/:id/import-preview" element={<ImportPreviewPage />} />
             {/* Static segments like /admin rank above the /* splat below regardless of
                 declaration order (React Router v6), so this is safely matched first. A

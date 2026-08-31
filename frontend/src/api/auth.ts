@@ -88,12 +88,34 @@ export function useSignup() {
   });
 }
 
-// GET /auth/security-questions/random - public, feeds the registration form's 7 questions.
-export function useRandomSecurityQuestions() {
+// GET /auth/security-questions - public, all 15 (well, however many are active) so the caller
+// can pick which 7 to answer (registration) or update their existing 7 (Manage Security
+// Questions) - nothing here is randomized anymore.
+export function useSecurityQuestions() {
   return useQuery<{ questions: SecurityQuestion[] }>({
-    queryKey: ['security-questions-random'],
-    queryFn: () => apiFetch<{ questions: SecurityQuestion[] }>('/auth/security-questions/random'),
-    staleTime: Infinity, // a fresh set only makes sense per registration attempt, not per refetch
+    queryKey: ['security-questions'],
+    queryFn: () => apiFetch<{ questions: SecurityQuestion[] }>('/auth/security-questions'),
+    staleTime: Infinity, // the 15-question catalog essentially never changes mid-session
+  });
+}
+
+// GET /auth/security-questions/mine - requireAuth. Which of the 15 this account currently has
+// saved, for ManageSecurityQuestionsPage.tsx's pre-checked selection.
+export function useMySecurityQuestions() {
+  return useQuery<{ questions: SecurityQuestion[] }>({
+    queryKey: ['security-questions-mine'],
+    queryFn: () => apiFetch<{ questions: SecurityQuestion[] }>('/auth/security-questions/mine'),
+  });
+}
+
+// PUT /auth/security-questions - requireAuth. Full replace, current-password-confirmed - see
+// backend/src/services/securityQuestion.service.ts's replaceUserAnswers.
+export function useUpdateSecurityQuestions() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { currentPassword: string; securityAnswers: { questionId: string; answer: string }[] }) =>
+      apiFetch<{ success: true }>('/auth/security-questions', { method: 'PUT', body: JSON.stringify(input) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['security-questions-mine'] }),
   });
 }
 

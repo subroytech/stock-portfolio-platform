@@ -1,32 +1,51 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useSignup, useRandomSecurityQuestions } from '../api/auth';
+import { useSignup, useSecurityQuestions } from '../api/auth';
 import { ApiError } from '../api/client';
 import { allPasswordRulesPass } from '../lib/passwordPolicy';
 import PasswordRequirementsChecklist from '../components/PasswordRequirementsChecklist';
+import SecurityQuestionPicker from '../components/SecurityQuestionPicker';
 
-const ANSWER_MAX_LENGTH = 20;
+const REQUIRED_QUESTION_COUNT = 5;
 
 // Self-Registration & Password Policy - "Register New User." Collects everything the account
-// needs up front (name, password meeting the full policy, and answers to all 7 randomly-
-// offered security questions) since the account is created 'pending' with no role - there's no
-// later "finish setting up" step for any of this.
+// needs up front (name, password meeting the full policy, and the user's own choice of 7 of
+// the 15 security questions, answered) since the account is created 'pending' with no role -
+// there's no later "finish setting up" step for any of this (though the questions can be
+// changed later via ManageSecurityQuestionsPage.tsx once logged in).
 export default function SignupPage() {
   const [email, setEmail] = useState('');
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  // Fixed 5 slots, each null until that slot picks a question - see SecurityQuestionPicker.tsx's
+  // own note for why (slot 1 offers all 15, slot 2 offers the 14 not picked elsewhere, etc.).
+  const [slotSelections, setSlotSelections] = useState<(string | null)[]>(Array(REQUIRED_QUESTION_COUNT).fill(null));
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const signup = useSignup();
-  const questionsQuery = useRandomSecurityQuestions();
+  const questionsQuery = useSecurityQuestions();
   const navigate = useNavigate();
 
   const emailLocalPart = email.split('@')[0] ?? '';
   const questions = questionsQuery.data?.questions ?? [];
-  const allAnswered = questions.length > 0 && questions.every((q) => (answers[q.id] ?? '').trim().length > 0);
+  const allAnswered = slotSelections.every((id) => id != null && (answers[id] ?? '').trim().length > 0);
   const passwordsMatch = password.length > 0 && password === confirmPassword;
   const canSubmit = allPasswordRulesPass(password, { firstName, lastName, emailLocalPart }) && passwordsMatch && allAnswered && !!firstName.trim() && !!lastName.trim();
+
+  function handleSlotChange(slotIndex: number, questionId: string | null) {
+    const previousId = slotSelections[slotIndex];
+    setSlotSelections((prev) => prev.map((id, i) => (i === slotIndex ? questionId : id)));
+    // The old question in this slot is no longer selected anywhere - drop its now-stale answer
+    // rather than leaving it orphaned in state (it'd never be submitted, but it's dead weight).
+    if (previousId && previousId !== questionId) {
+      setAnswers((prev) => {
+        const next = { ...prev };
+        delete next[previousId];
+        return next;
+      });
+    }
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -34,7 +53,7 @@ export default function SignupPage() {
     try {
       await signup.mutateAsync({
         email, password, firstName: firstName.trim(), lastName: lastName.trim(),
-        securityAnswers: questions.map((q) => ({ questionId: q.id, answer: (answers[q.id] ?? '').trim() })),
+        securityAnswers: slotSelections.map((id) => ({ questionId: id!, answer: (answers[id!] ?? '').trim() })),
       });
       navigate('/', { replace: true });
     } catch {
@@ -91,31 +110,27 @@ export default function SignupPage() {
           className="mb-1 w-full rounded-btn border border-border bg-bg-primary px-3 py-2 text-text-primary"
         />
         <p className="mb-4 text-xs text-danger" data-testid="signup-password-mismatch">
-          {confirmPassword.length > 0 && !passwordsMatch ? "Passwords don't match." : ' '}
+          {confirmPassword.length > 0 && !passwordsMatch ? "Passwords don't match." : ' '}
         </p>
 
         <h2 className="mb-1 text-sm font-semibold text-text-primary">Security questions</h2>
         <p className="mb-3 text-xs text-text-secondary">
-          Answer all {questions.length || 7} - these are used later to verify your identity if you forget your password. Each answer can be up to {ANSWER_MAX_LENGTH} characters.
+          Pick a question for each of the {REQUIRED_QUESTION_COUNT} slots below and answer it - these are used later to verify your identity if you forget your password.
         </p>
         {questionsQuery.isLoading && <p className="mb-4 text-sm text-text-secondary">Loading questions…</p>}
         {questionsQuery.isError && <p className="mb-4 text-sm text-danger">Could not load security questions. Please refresh and try again.</p>}
-        <div className="mb-4 space-y-3">
-          {questions.map((q) => (
-            <div key={q.id}>
-              <label className="mb-1 block text-sm text-text-secondary" htmlFor={`answer-${q.id}`}>{q.questionText}</label>
-              <input
-                id={`answer-${q.id}`}
-                required
-                maxLength={ANSWER_MAX_LENGTH}
-                value={answers[q.id] ?? ''}
-                onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
-                data-testid={`signup-answer-${q.id}`}
-                className="w-full rounded-btn border border-border bg-bg-primary px-3 py-2 text-text-primary"
-              />
-            </div>
-          ))}
-        </div>
+        {questions.length > 0 && (
+          <div className="mb-4">
+            <SecurityQuestionPicker
+              questions={questions}
+              requiredCount={REQUIRED_QUESTION_COUNT}
+              slotSelections={slotSelections}
+              answers={answers}
+              onSlotChange={handleSlotChange}
+              onAnswerChange={(id, value) => setAnswers((prev) => ({ ...prev, [id]: value }))}
+            />
+          </div>
+        )}
 
         {signup.isError && (
           <p className="mb-4 text-sm text-danger">

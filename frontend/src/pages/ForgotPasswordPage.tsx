@@ -10,7 +10,7 @@ type Step = 'email' | 'questions' | 'newPassword' | 'done';
 
 // Self-Registration & Password Policy - the security-question-based "Forgot Password" flow (no
 // email provider involved). Three stateless steps, each handing a short-lived signed token to
-// the next: email -> 4 challenge questions + challengeToken -> answers -> resetToken -> new
+// the next: email -> 3 challenge questions + challengeToken -> answers -> resetToken -> new
 // password.
 export default function ForgotPasswordPage() {
   const [step, setStep] = useState<Step>('email');

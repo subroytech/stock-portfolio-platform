@@ -103,9 +103,6 @@ export default function AdminPage() {
             </button>
           )}
           {session && <UserPersonaBadge user={session} />}
-          <Link to="/change-password" className="text-sm text-text-secondary hover:text-accent">
-            Change Password
-          </Link>
         </div>
       </header>
 

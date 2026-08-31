@@ -8,7 +8,7 @@ import ImpersonationBanner from './ImpersonationBanner';
 import type { User } from '../api/auth';
 
 function session(overrides: Partial<User> = {}): User {
-  return { id: '2', email: 'plain-user@b.com', roles: ['user'], permissions: [], impersonating: true, ...overrides };
+  return { id: '2', email: 'plain-user@b.com', roles: ['user'], permissions: [], impersonating: true, status: 'active', firstName: null, lastName: null, ...overrides };
 }
 
 function renderBanner(user: User) {
