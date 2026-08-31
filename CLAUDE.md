@@ -46,7 +46,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 08-28)
+# Current Build State (as of 08-30)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -837,6 +837,127 @@ new `impersonating` field on the test `User` fixture. `tsc`/lint clean both side
 not yet closed**: full live verification with two real accounts (banner correctness against a real
 target's real data, clean return-to-admin, blocked same-admin impersonation, and the audit row's
 `ended_at` populating on return) is still pending — see Next Up.
+
+## Flex Wizard — Progress-Bar Stepper Redesign ✅ Done
+
+Built 2026-08-29, in response to live feedback on the guided stepper (above): the "current step"
+badge reused the exact same solid `bg-accent`/`text-white` styling as the Next/Skip buttons, so it
+visually read as a clickable button rather than a progress indicator. Redesigned as a real
+numbered-circle track: done steps are filled green circles with a checkmark and a green connecting
+line, the current step is an **accent-outlined, not filled**, circle with a bold accent label,
+upcoming steps are plain gray-outlined circles. Also: "Confirm the header row to continue" is now
+bold amber (`text-warning`) instead of plain muted gray — a clearer "action needed" nudge, distinct
+from both ordinary secondary text and the buttons' own blue. The Header/Footer/Cash stage
+instructional paragraphs stay normal weight but are now a soft blue (`text-accent/80`) instead of
+blending into ordinary muted secondary text elsewhere on the page. No `data-testid`/`data-state`
+changes, so no test updates were needed — purely a styling pass.
+
+## Self-Registration, Password Policy & Security-Question Recovery ✅ Done
+
+Built 2026-08-29–30 across three rounds (the core feature, a selectable-questions/post-login-
+management refinement, then a question-count reduction) — closes the gap flagged when the user
+asked "how can a user change their password today?": until now, only an admin could rewrite a
+password via Manage Users, and public signup was a bare email+8-char-password form that
+immediately granted an active `user` account.
+
+**Registration**: `SignupPage.tsx` rewritten into "Register New User" — email, first/last name, a
+7-rule password (below), and the user's own choice of 5 of the app's 15 security questions
+(`SecurityQuestionPicker.tsx`, shared with the post-login Manage Security Questions screen — see
+below). New accounts are created `status: 'pending'` with **no role assigned** — a deliberate
+removal of the old auto-`user`-role signup behavior — and stay functionally locked out until an
+admin assigns a role and activates them via the existing Manage Users screen.
+`auth.service.ts`'s `login()` now lets `'pending'` through (only `deactivated`/`cancelled` still
+block) so a pending account can log in immediately and see **only** a new full-screen
+`PendingReviewPage.tsx` ("Thanks for Registering... under Review...") — `ProtectedRoute.tsx`
+renders it in place of `<Outlet />` for any `'pending'` session, uniformly across every protected
+route, not per-page.
+
+**Password policy** (`backend/src/utils/passwordPolicy.ts`, the sole enforcement authority; mirrored
+client-side in `frontend/src/lib/passwordPolicy.ts` for live feedback, same "two hand-maintained
+copies" precedent used elsewhere in this codebase) — 7 rules: 15–25 characters; ≥1 uppercase; ≥1
+number; ≥1 special character (`! @ # $ % ^ & * ( ) _ - + = ? .`); doesn't contain the user's first
+or last name; doesn't contain 5+ consecutive characters from the email's local-part; and — server-
+only, via new `passwordHistory.service.ts` (migration `035`'s `user_evt_password_history`,
+insert-then-prune to 5) — isn't a repeat of the last 5 passwords. `PasswordRequirementsChecklist
+.tsx` shows the first 6 as a live-updating ✓ checklist, the 7th as a static note (it needs a DB
+round-trip, can't be verified while typing) — one shared component, reused by Registration, Change
+Password, and Forgot Password's final step.
+
+**Forgot Password — security-question-based, not email** (no email provider exists in this repo,
+deliberately avoiding that dependency): migration `034` adds `m_security_question` (15 seeded, see
+`SCHEMA.md`) and `users_security_answers` (bcrypt-hashed, never plaintext). Three stateless
+endpoints — `/auth/forgot-password/start|verify|reset` — hand a short-lived signed challenge/reset
+token forward at each step (same pattern as Login-as's own token, no persisted reset-session table
+needed). `start` randomly challenges 3 of the account's 5 saved questions; all 3 must match
+(generic "one or more answers were incorrect," never revealing which) to get a reset token.
+Migration `033` adds nullable `first_name`/`last_name` to `users` (needed for the name-substring
+rule to have anything to check against).
+
+**Round 2 — selectable questions + post-login management, per explicit follow-up requests**: the
+registration form originally handed out a random subset of the 15 questions; changed so the user
+instead **picks their own**, via fixed "Question N" **dropdown slots** (`SecurityQuestionPicker
+.tsx`) — slot 1 offers all 15, each later slot's options narrow to exclude whatever's already
+picked in another slot (its own current pick stays selectable so switching back is possible). Built
+first as a flat checkbox list, then redesigned into this per-slot dropdown per explicit live
+feedback ("a better design" — a checkbox list doesn't guide a user toward exactly N distinct picks
+the way N numbered slots do). `GET /auth/security-questions` (renamed from `/random`, no more
+server-side randomization there — Forgot Password's own challenge pick is unaffected, still
+genuinely random). New post-login **`ManageSecurityQuestionsPage.tsx`** (`GET .../mine` + `PUT
+/auth/security-questions`, current-password-confirmed, full replace only — answers are one-way
+hashed, so nothing can be silently "kept," even a re-selected question needs its answer retyped)
+— also how an admin-created account (which never collects Q&A at creation) sets them up for the
+first time. Reached via a new **user-icon dropdown** (`UserPersonaBadge.tsx` is now a clickable
+menu trigger, backdrop-click-to-close, same pattern as `TabShell.tsx`'s existing API Keys modal)
+holding both "Change Password" and "Manage Security Questions" — consolidated out of the old
+standalone header link.
+
+**Round 2 also fixed a live-reported UX bug**: the checklist's name/email rules use negated logic
+("doesn't contain X"), so an *empty* password trivially read as passing them — fixed with a
+`MIN_CHARS_BEFORE_GATING = 4` floor in `frontend/src/lib/passwordPolicy.ts`: no rule shows green
+until at least 4 characters are typed, applied uniformly across all 6 live rules (display-only,
+doesn't affect what's actually enforced at submit).
+
+**Round 3 — question count reduced from 7 to 5** (2026-08-30, live-reported: "Setting up 7
+Questions is a little exhausting"): `REGISTRATION_QUESTION_COUNT` (backend `auth.controller.ts`)
+and `REQUIRED_QUESTION_COUNT` (frontend `SignupPage.tsx`/`ManageSecurityQuestionsPage.tsx`) both
+changed 7→5; `CHALLENGE_QUESTION_COUNT` changed 4→3, so Forgot Password now randomly challenges 3
+of the user's 5 saved answers instead of 4 of 7. Pure count change, no DB migration needed — the
+`securityQuestion.service.ts` functions were already generic on an explicit count parameter, so
+only the two controllers'/pages' constants and their comments/tests moved. Verified live against
+the real dev DB with a throwaway account: a 5-answer signup succeeds, a 6-answer signup is rejected
+`400`, and a Forgot Password challenge on that account returns exactly 3 questions.
+
+**Two real bugs found and fixed during the core build**:
+1. The special-character regex's character-class escaping didn't escape `-`, producing an invalid
+   range (`_-+` = "everything from `_` to `+`") — crashed the whole `auth.controller.test.ts` suite
+   at import time, caught immediately by the test run, not by `tsc`.
+2. **The frontend's typecheck command was a silent no-op for this entire multi-day feature.**
+   `npx tsc --noEmit -p tsconfig.json` against this project's `references`-based root
+   `tsconfig.json` (`"files": []`) checks nothing without `-b`. The correct command —
+   `npx tsc -b --noEmit`, matching `package.json`'s own `typecheck` script — surfaced 3 real,
+   previously-undetected errors (two test fixtures missing the newer `status`/`firstName`/
+   `lastName` fields, one stale `useSignup` test) the moment it was actually run correctly. Fixed
+   immediately; every frontend typecheck claim from this point forward in this file uses the real
+   command. Runtime tests (Vitest) were never affected — they don't depend on `tsc` — so this was a
+   compile-check-only gap, not a functional one.
+
+678 backend tests, 398 frontend tests (up from 373 before this feature), `tsc`/lint clean both
+sides (using the corrected command). **Verified live across all three rounds** against the real dev
+DB with throwaway accounts, cleaned up after each: (1) core build — register → `pending`/no-role →
+same session shows `active` + real permissions immediately after the DB-level equivalent of an
+admin's approval, without re-login → full Forgot Password round trip (wrong answer generically
+rejected, correct answers → reset → working new password) → reuse-from-history correctly blocked,
+a genuinely new password accepted; (2) round 2 — registered with a deliberately scattered question
+selection, confirmed `GET .../mine` matched exactly, replaced the whole set via `PUT`, confirmed
+Forgot Password's next challenge drew only from the *new* set; (3) round 3 — confirmed the 5/3
+counts above via a real signup + forgot-password-start call.
+
+**Known gaps, not yet closed**: no email-based recovery path exists at all (by design, but worth
+naming as a real limitation if a user loses access to both their password and their memory of their
+security answers); no rate-limiting/lockout specific to `forgot-password/verify` beyond the
+existing per-IP `rateLimiters` already wrapping `/auth`; `forgot-password/start` isn't anti-
+enumeration-safe (404s plainly on an unknown email), a deliberate simplicity tradeoff, consistent
+with this app's own existing precedent of not hiding account existence everywhere.
 
 ## Next Up
 

@@ -17,7 +17,7 @@ Tables are prefixed by category (settled 2026-07-10):
 - **`m_`** — master/reference data (`m_tickers`, `m_index_master`, `m_index_constituent`,
   `m_roles`, `m_role_permissions`, `m_function_master`,
   `m_portfolio_template_mapping_master`/`_dtls`, `m_config_group`, `m_config_property`,
-  `m_config_property_value`).
+  `m_config_property_value`, `m_security_question`).
 - **`tx_`** — transactional, portfolio-scoped data (`tx_portfolios`, `tx_holdings`,
   `tx_cash_positions`, `tx_uploads`). **Exception: `tx_shared_contrarian_run`** (added
   2026-08-04) is `tx_`-prefixed despite being neither portfolio-scoped nor per-user — the
@@ -30,20 +30,28 @@ Tables are prefixed by category (settled 2026-07-10):
   question `user_evt_`'s own note below flags (e.g. the on-hold shared quote cache) — future
   shared/global tables can follow this same `tx_` precedent instead of inventing a new bucket.
 - **`sys_`** — internal bookkeeping, not app data (`sys_schema_migrations`).
-- **unprefixed** — `users`, `users_subscriptions`, `users_roles`. Deliberately left out of the
+- **unprefixed** — `users`, `users_subscriptions`, `users_roles`, `users_security_answers`
+  (added 2026-08-29, Self-Registration & Password Policy). Deliberately left out of the
   `tx_` bucket (they're account-level, not portfolio-scoped transactional data) and don't fit
-  `m_`/`sys_` either. `users_subscriptions` (added 2026-07-12) and `users_roles` (added
-  2026-07-31) are grouped with `users` rather than given their own prefix, since both are a
-  child of the account itself — per-user assignment data, not reference/static data (that's
-  what keeps `users_roles` out of `m_`, even though it's *about* roles).
+  `m_`/`sys_` either. `users_subscriptions` (added 2026-07-12), `users_roles` (added
+  2026-07-31), and `users_security_answers` are all grouped with `users` rather than given
+  their own prefix, since each is a child of the account itself — per-user assignment data,
+  not reference/static data (that's what keeps `users_roles` out of `m_`, even though it's
+  *about* roles, and `users_security_answers` out of `m_` despite being *about*
+  `m_security_question`).
 - **`user_evt_`** — per-user event/log data (added 2026-07-31: `user_evt_usage`,
-  `user_evt_usage_summary_monthly`; `user_evt_impersonation_log` added 2026-08-28). A new
-  bucket, added when usage tracking didn't fit any of the other three: `tx_` is explicitly
-  portfolio-scoped (usage events are user-scoped, not portfolio-scoped), `sys_` is explicitly
-  internal-bookkeeping-not-app-data (usage events are real business data), and `m_`/unprefixed
-  are both for relatively static, non-growing data (the opposite of an append-only event log).
-  Does **not** apply to non-user-scoped event/cache data (e.g. a future shared quote cache,
-  keyed by symbol not by user) — that would need its own bucket if/when it's built.
+  `user_evt_usage_summary_monthly`; `user_evt_impersonation_log` added 2026-08-28;
+  `user_evt_password_history` added 2026-08-29). A new bucket, added when usage tracking
+  didn't fit any of the other three: `tx_` is explicitly portfolio-scoped (usage events are
+  user-scoped, not portfolio-scoped), `sys_` is explicitly internal-bookkeeping-not-app-data
+  (usage events are real business data), and `m_`/unprefixed are both for relatively static,
+  non-growing data (the opposite of an append-only event log). Does **not** apply to
+  non-user-scoped event/cache data (e.g. a future shared quote cache, keyed by symbol not by
+  user) — that would need its own bucket if/when it's built. **`user_evt_password_history` is
+  the one table in this bucket with no TTL** — every other `user_evt_` table expires old rows
+  automatically; this one needs "last 5" to survive indefinitely per account, so it's pruned
+  by application code (`passwordHistory.service.ts`) instead. Still belongs in this bucket
+  (per-user append log, real business data) despite the TTL exception.
 
 Tables were originally created unprefixed (migrations 001–008) and renamed in two follow-up
 migrations: `009_rename_master_tables.sql` (the 3 `m_` tables) and
@@ -67,9 +75,11 @@ users (1) ──< tx_portfolios (many)
      │
      ├──< users_subscriptions (many, one per provider e.g. fmp/finnhub)
      ├──< users_roles (many) >── m_roles (1) ──< m_role_permissions (many) >── m_function_master (1, via FK on permission_key)
+     ├──< users_security_answers (many, one per answered question) >── m_security_question (1)
      ├──< user_evt_usage (many)
      ├──< user_evt_usage_summary_monthly (many)
      ├──< user_evt_impersonation_log (many, via admin_user_id AND target_user_id — 2 FKs to users)
+     ├──< user_evt_password_history (many)
      └──< m_portfolio_template_mapping_master (many, via created_by/reviewed_by, both nullable)
 
 m_index_master (1) ──< m_index_constituent (many)
@@ -96,6 +106,7 @@ appearing in a portfolio or an index shouldn't be blocked by missing metadata co
 | `id` | `INT8` | PK, default `unique_rowid()` |
 | `email` | `VARCHAR(255)` | `NOT NULL`, unique |
 | `password_hash` | `VARCHAR(255)` | nullable; bcrypt hash, set/read by `auth.service.ts` since 2026-07-12 |
+| `first_name` / `last_name` | `VARCHAR(50)` | nullable; added by migration `033`, 2026-08-29 (Self-Registration & Password Policy). Required by self-registration (`POST /auth/signup`), needed for the password policy's own name-substring rule — nullable so existing rows and admin-created accounts (`users.service.ts`'s `createUserAccount`, which still doesn't collect a name) are unaffected; that rule just silently doesn't apply when these are `NULL` |
 | `created_at` | `TIMESTAMPTZ` | default `now()` |
 | `updated_at` | `TIMESTAMPTZ` | default `now()` |
 
@@ -588,6 +599,78 @@ so that can be added later with zero migration. `version` increments per `proper
 Indexes: `m_config_property_value_pkey` (PK), `idx_config_property_value_property_id`
 (covers both the live-read `WHERE property_id = $1 AND is_active = true` lookup and the
 value-history list's `WHERE property_id = $1 ORDER BY version DESC`).
+
+### `m_security_question`
+Added by migration `034`, 2026-08-29 (Self-Registration & Password Policy — security-question-
+based Forgot Password, since this repo has no email-sending capability). `m_`-prefixed: a
+static, admin-seeded catalog nobody user-authors a new row into, same bucket as
+`m_function_master`. Seeded with all 15 questions (drafted by the assistant in the style of 4
+examples the user provided, then 3 edited by the user before finalizing) — `status` lets a
+question be retired later without breaking already-saved `users_security_answers` rows that
+reference it.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `question_text` | `VARCHAR(100)` | `NOT NULL`, unique |
+| `status` | `VARCHAR(20)` | `NOT NULL`, default `'active'` — `'active'`\|`'inactive'`, app-enforced, no DB check constraint |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_security_question_pkey` (PK), `m_security_question_question_text_key` (unique).
+
+The 15 seeded questions: *Your father's middle name*; *Your mother's maiden name*; *Your
+paternal grandfather's birth city*; *Your favourite childhood cartoon character*; *Your maternal
+grandmother's first name*; *Your first pet's name*; *Your first school's name*; *Your childhood
+best friend's first name*; *Your favourite childhood teacher's first name*; *The city where your
+mother was born*; *Your first car's make and model*; *Your favourite childhood sport*; *The
+street you grew up on*; *Your first employer's name*; *Your favourite subject in middle school*.
+
+### `users_security_answers`
+Added by migration `034`. Unprefixed: per-user assignment data, a child of the account itself —
+same bucket as `users_roles`/`users_subscriptions` (not `m_`, since it's not itself reference
+data, even though it's *about* `m_security_question`). `answer_hash` is always bcrypt ciphertext,
+never plaintext — these are personal-identity answers, the same treatment as
+`users.password_hash`, not throwaway trivia. `securityQuestion.service.ts`'s
+`replaceUserAnswers()` does a full `DELETE` + re-`INSERT` on every update (Manage Security
+Questions), never a partial edit — there's no way to "keep" an existing answer silently anyway,
+since a hash can't be read back and re-shown.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` |
+| `question_id` | `INT8` | FK → `m_security_question(id)` |
+| `answer_hash` | `VARCHAR(255)` | `NOT NULL` — always bcrypt ciphertext |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `users_security_answers_pkey` (PK), `users_security_answers_user_id_question_id_key`
+(unique on `user_id, question_id` — mirrors `users_subscriptions`' own `(user_id, provider)`
+shape). Exactly 5 rows per account that has completed registration or Manage Security Questions
+(reduced from 7, 2026-08-30 — "Setting up 7 Questions is a little exhausting"; Forgot Password's
+own challenge count dropped in step, from 4-of-7 to 3-of-5, both driven by explicit count
+parameters passed into `securityQuestion.service.ts`'s functions, not a schema change); 0 rows for
+an admin-created account that hasn't set any up yet (Forgot Password 404s for such an account
+until it does).
+
+### `user_evt_password_history`
+Added by migration `035`. Backs password policy rule 7 ("not a repeat of the last 5 passwords") —
+see the **exception note** in the naming-convention section above: unlike every other
+`user_evt_` table, this one has **no TTL**, since "last 5" must survive indefinitely per account
+rather than expire on a fixed window. `passwordHistory.service.ts`'s `recordPassword()` inserts
+the new hash then prunes back to the 5 most-recent rows for that user on every call — same
+insert-then-prune shape as `contrarianFinder.service.ts`'s admin-tier scan history pruning.
+Written on every successful registration, password change, and password reset.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` |
+| `password_hash` | `VARCHAR(255)` | `NOT NULL` — bcrypt ciphertext, same as `users.password_hash` |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `user_evt_password_history_pkey` (PK), `idx_password_history_user_id` (composite on
+`(user_id, created_at)` — covers both `recordPassword()`'s prune query and
+`isPasswordReused()`'s "last 5 for this user" read, both ordered by `created_at DESC`).
 
 ### `sys_schema_migrations`
 Internal bookkeeping table created/maintained by `migrate.js` (not part of the app schema)

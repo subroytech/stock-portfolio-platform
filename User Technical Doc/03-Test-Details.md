@@ -64,6 +64,15 @@ lint`) — these aren't "tests" in the strict sense, but they catch a large clas
 (wrong types, unused variables, obvious mistakes) even faster than a test would, without
 needing to write one.
 
+**Use `npm run typecheck`, not an ad-hoc `tsc` invocation** — a real bug found live
+2026-08-30: `frontend/`'s `tsconfig.json` is a `references`-only root config
+(`{ "files": [], "references": [...] }`, the standard modern Vite scaffold shape). Running
+plain `tsc --noEmit -p tsconfig.json` against it checks *nothing* and exits clean no matter
+what's actually wrong — `-p` alone doesn't build referenced projects, only `tsc -b` does.
+`npm run typecheck` already runs the correct `tsc -b --noEmit` (see `frontend/package.json`),
+so always prefer the npm script over typing `tsc` directly, in this repo or any other
+using TypeScript project references.
+
 ---
 
 ## 3.3 What Continuous Integration (CI) enforces automatically
@@ -117,18 +126,22 @@ and neither substitutes for the other.
 
 ---
 
-## 3.6 Current state (as of 2026-08-28)
+## 3.6 Current state (as of 2026-08-30)
 
 - All four CI jobs (backend, frontend, analysis-service, e2e) have been green together
   multiple times (see `CLAUDE.md`'s "Contrarian Finder Stock Universe" entry onward).
 - The Flex upload feature's manual QA pass (`Manual-TestScript/
   portfolio-upload-flex-test-plan.md`) is complete — 3 real bugs were found and fixed during
   that pass, and all throwaway test accounts/data were cleaned up afterward.
-- Everything built through this point — Flex (plus its later footer/cash-row-marker and
-  guided-stepper follow-ons, and the admin template-governance tools), the Config Properties
-  framework, the global session-expiry fix, the header persona badge, and "Login-as"
-  impersonation — is now committed and pushed to `analysis-service/scaffolding` (6 focused
-  commits, one per feature area, each individually verified to typecheck/lint/test clean).
+- Self-Registration, Password Policy & Security-Question Recovery (new since the last update
+  to this doc) is built, fully tested (678 backend / 398 frontend tests), and live-verified
+  across all three build rounds — core flow, the selectable-questions/dropdown redesign, and the
+  7→5 question-count reduction (Forgot Password's challenge dropped 4-of-7 → 3-of-5 in step) —
+  against the real dev database with throwaway accounts, cleaned up after each. See
+  `CLAUDE.md`'s section of the same name for full detail, including the two real bugs found
+  during its build — one of which (§3.2's callout above, `tsc -b` vs. plain `tsc`) is worth
+  reading regardless of whether you touch this feature, since it affects how frontend
+  typechecking should be run going forward in this repo.
 - Known gap, still open: **"Login-as" impersonation is built and fully test-covered, but its
   own live two-real-account walkthrough hasn't been run yet** — see `Architecture.md`
   Section 2 for the exact checklist (banner correctness, clean return-to-admin, blocked

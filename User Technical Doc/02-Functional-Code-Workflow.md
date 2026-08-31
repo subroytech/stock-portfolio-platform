@@ -101,6 +101,19 @@ These are two different questions the app answers separately:
   normal `7d`), and impersonating another admin is blocked outright — this is a support
   tool, not a privilege-escalation path.
 
+- **Self-registration and the `'pending'` gate** — public signup (`POST /auth/signup`) now
+  collects a full name and a 15-25 character password meeting several rules (see
+  `backend/src/utils/passwordPolicy.ts`), plus answers to 5 personal security questions the
+  user picks themselves (reduced from 7, 2026-08-30 — see `auth.controller.ts`'s
+  `REGISTRATION_QUESTION_COUNT`). The new account is created with `status: 'pending'` and,
+  unlike the old signup, is **not** given any role. `login()` deliberately still lets a
+  `'pending'` account authenticate (get a valid cookie) — it's the frontend's
+  `ProtectedRoute.tsx` that renders nothing but a "your registration is under review" page for
+  such a session, until an admin assigns a role and flips the status to `'active'` via Manage
+  Users. Forgot Password reuses those same 5 security questions instead of an email link (this
+  repo has no email-sending capability) — 3 are randomly challenged (`CHALLENGE_QUESTION_COUNT`),
+  all 3 must match.
+
 ---
 
 ## 2.4 Walk-through #1: Logging in
@@ -229,7 +242,9 @@ not a one-off fix — new tunable values can be added the same way going forward
 
 | Screen | Frontend page | Backend routes/controller | Backend service(s) |
 |---|---|---|---|
-| Login/Signup | `LoginPage.tsx`, `SignupPage.tsx` | `auth.routes.ts` | `auth.service.ts` |
+| Login/Signup | `LoginPage.tsx`, `SignupPage.tsx` | `auth.routes.ts` | `auth.service.ts`, `securityQuestion.service.ts`, `passwordHistory.service.ts` |
+| Change Password / Forgot Password | `ChangePasswordPage.tsx`, `ForgotPasswordPage.tsx` | `auth.routes.ts` (`/change-password`, `/forgot-password/start\|verify\|reset`) | `auth.service.ts`, `passwordHistory.service.ts`, `securityQuestion.service.ts` |
+| Manage Security Questions | `ManageSecurityQuestionsPage.tsx` (via the header's user-icon menu, not its own nav tab) | `auth.routes.ts` (`/security-questions`, `/security-questions/mine`) | `securityQuestion.service.ts` |
 | Portfolio Dashboard (Legacy) | `DashboardPage.tsx` | `portfolio.routes.ts` | `portfolio.service.ts`, `parser.service.ts` |
 | Portfolio Dashboard (Flex) | `FlexPortfolioPage.tsx` | `portfolioTemplate.routes.ts`, `portfolio.routes.ts` | `flexParser.service.ts`, `portfolioTemplate.service.ts`, `portfolio.service.ts` |
 | API Keys | (modal, `apiKeysModal.ts`) | `userSubscription.routes.ts` | `userSubscription.service.ts`, `encryption.ts` |

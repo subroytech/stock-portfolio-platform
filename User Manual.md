@@ -1,14 +1,16 @@
-# User Manual — Roles, API Key Access, Contrarian Finder Retention, Portfolio Upload, Config Properties & Login-as
+# User Manual — Roles, API Key Access, Contrarian Finder Retention, Portfolio Upload, Config Properties, Login-as & Account Security
 
 This document describes the platform's role/permission model — as it relates to FMP/Finnhub API
 keys (who manages their own key, who doesn't, and how the app still works for the people who
 don't), to the Contrarian Finder shared last-scan result, to portfolio import, to the
-admin-configurable Config Properties framework, and to the `admin-master`-only Login-as
-troubleshooting tool. **Status: implemented and live-verified (2026-08-02 for the API key
-sections; 2026-08-05 for Contrarian Finder retention; 2026-08-07 for Portfolio Upload — Flex;
-2026-08-24 for Config Properties; 2026-08-27 for the Flex guided stepper, footer/cash row
-markers, and template-governance admin tools; 2026-08-28 for Login-as, built and test-covered but
-still pending its own live two-account walkthrough — see that section below).** Role names below
+admin-configurable Config Properties framework, to the `admin-master`-only Login-as
+troubleshooting tool, and to registration/password/account-recovery. **Status: implemented and
+live-verified (2026-08-02 for the API key sections; 2026-08-05 for Contrarian Finder retention;
+2026-08-07 for Portfolio Upload — Flex; 2026-08-24 for Config Properties; 2026-08-27 for the Flex
+guided stepper, footer/cash row markers, and template-governance admin tools; 2026-08-28 for
+Login-as, built and test-covered but still pending its own live two-account walkthrough — see
+that section below; 2026-08-30 for Registration, Password Policy & Security Questions, including
+the selectable-questions and post-login Manage Security Questions follow-ons).** Role names below
 use the exact casing as created in the database: `user-contra-withKey` (capital K),
 `user-contra-wokey` (lowercase), `admin-master`.
 
@@ -265,7 +267,76 @@ screen.
 - Every page header now shows a small badge with your initials, next to the Log out button —
   hover over it to see the exact email and role(s) your current session is signed in as. Useful
   whenever more than one account might be in play in the same browser (e.g. testing, or after
-  using Login-as above).
+  using Login-as above). **Since 2026-08-29, it's also clickable** — opens a small menu with
+  "Change Password" and "Manage Security Questions" (see the next section).
+
+## Registration, Password Policy & Security Questions
+
+**Status: implemented and live-verified (2026-08-29 for the core flow; 2026-08-30 for the
+selectable-questions/post-login Manage Security Questions follow-on and the 5-question reduction).**
+
+### Registering a new account
+
+The "Register New User" form (linked from the Login page) asks for your email, first and last
+name, a password meeting the policy below, and answers to **5 of 15 security questions of your
+own choosing** — 5 "Question N" slots, each a dropdown; pick a question in a slot and an answer
+box appears beneath it. Each slot's dropdown only offers questions not already picked in another
+slot, so you can never accidentally pick the same question twice. These questions are how you'll
+prove your identity later if you forget your password — see "Forgot Password" below.
+
+**Your account starts out `Pending`.** You can log in right away, but you won't see anything
+except a message confirming your registration is under review — no tabs, no data, nothing
+functional — until an admin assigns you a role and activates the account (Admin Console → Manage
+Users, the same screen used for everything else account-related). This is a deliberate approval
+gate, not a bug: self-registration no longer grants automatic access the way the old signup form
+used to.
+
+### Password requirements
+
+Shown as a live checklist while you type (on Registration, Change Password, and the final step of
+Forgot Password):
+
+1. 15–25 characters
+2. At least 1 uppercase letter
+3. At least 1 number
+4. At least 1 special character (`! @ # $ % ^ & * ( ) _ - + = ? .`)
+5. Doesn't contain your first or last name
+6. Doesn't contain 5 or more consecutive characters from your email address
+7. Isn't a repeat of any of your last 5 passwords (checked when you submit, not while typing —
+   this one needs a database lookup)
+
+The checklist stays neutral (nothing shown as satisfied) until you've typed at least 4 characters
+— fixed 2026-08-30 after a report that an *empty* password field was misleadingly showing some
+rules as already passed.
+
+### Changing your password (while logged in)
+
+Header → your initials badge → **Change Password**. Enter your current password, then a new one
+meeting the policy above.
+
+### Forgot Password
+
+Link on the Login page. Enter your email, then answer **3 randomly-chosen questions** out of the
+5 you set up at registration — all 3 must be correct (you won't be told which one was wrong if
+you get one incorrect) — then set a new password. No email is sent at any point in this flow;
+everything happens on-screen.
+
+### Managing your security questions after registration
+
+Header → your initials badge → **Manage Security Questions**. Shows your current 5 questions
+pre-filled into their slots; pick different questions in any slot if you want to change them (a
+re-picked question still needs its answer retyped — answers are never stored in a way that can be
+shown back to you, even to yourself), and confirm with your current password. This is also how an
+account created directly by an admin (which doesn't set up security questions automatically) sets
+them up for the first time — without doing this, Forgot Password won't work for that account.
+
+### Known limitations
+
+- There's no email-based account recovery at all — if you forget both your password and your
+  security-question answers, an admin has to reset your password manually via Manage Users.
+- Forgot Password will tell you outright if an email has no account (rather than staying vague
+  about it) — a deliberate simplicity choice, consistent with how the app already behaves
+  elsewhere (e.g. registering with an email that's already taken).
 
 ## Known leftover, not cleaned up yet
 
