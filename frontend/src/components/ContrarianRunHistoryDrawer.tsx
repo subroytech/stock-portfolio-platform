@@ -1,10 +1,17 @@
 import { useRunHistoryList, type RunHistoryListItem } from '../api/contrarianFinder';
-import { formatAsOf } from '../lib/format';
 
 interface ContrarianRunHistoryDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   onSelectRun: (run: RunHistoryListItem) => void;
+}
+
+// Deliberately more compact than lib/format.ts's formatAsOf() (which includes the year) - the
+// drawer's fixed max-w-sm width has no room for a full date and the run description on one
+// line otherwise. Year is safe to drop here: the list only ever shows runs from the current
+// retention window (weeks, not years), so "Aug 31, 8:18 PM" is never ambiguous in practice.
+function formatCompactTimestamp(iso: string): string {
+  return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
 // Contrarian Finder — Run History (2026-08-31). A right-side slide-over, not
@@ -63,9 +70,12 @@ export default function ContrarianRunHistoryDrawer({ isOpen, onClose, onSelectRu
               data-testid={`run-history-row-${run.id}`}
               className={`block w-full border-b border-border px-4 py-3 text-left hover:bg-border/40 ${index % 2 === 1 ? 'bg-bg-primary' : ''}`}
             >
-              <p className="text-sm text-text-primary">
-                <span className="font-semibold">{formatAsOf(run.completedAt)}</span>
-                <span className="text-text-secondary"> — {run.params.threshold}% Threshold - {run.params.scanDays} Day Window</span>
+              {/* truncate (nowrap + ellipsis) is a safety net, not the primary fix - the compact
+                  timestamp format above is what actually gets this onto one line at this width;
+                  truncate just guarantees it stays one line even for an outlier-long value. */}
+              <p className="truncate text-xs text-text-primary">
+                <span className="font-semibold">{formatCompactTimestamp(run.completedAt)}</span>
+                <span className="text-text-secondary"> · {run.params.threshold}% Threshold - {run.params.scanDays} Day Window</span>
               </p>
             </button>
           ))}

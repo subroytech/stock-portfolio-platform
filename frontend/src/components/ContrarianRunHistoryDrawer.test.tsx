@@ -46,6 +46,19 @@ describe('ContrarianRunHistoryDrawer', () => {
     expect(screen.getByTestId('run-history-row-1')).toHaveTextContent('30% Threshold - 7 Day Window');
   });
 
+  test('the timestamp is compact (no year, "Mon D, H:MM AM/PM") so the whole row description fits on one line at the drawer\'s fixed width', async () => {
+    vi.spyOn(client, 'apiFetch').mockResolvedValue({ runs: RUNS });
+    renderDrawer();
+
+    const row = await screen.findByTestId('run-history-row-2');
+    // No exact time-of-day assertion - that shifts with the test runner's local timezone.
+    // What must hold regardless of timezone: no 4-digit year, and the compact month/day/time shape.
+    expect(row).toHaveTextContent(/^[A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} (AM|PM)/);
+    expect((row.textContent ?? '')).not.toMatch(/\b\d{4}\b/);
+    const description = row.querySelector('p');
+    expect(description).toHaveClass('truncate');
+  });
+
   test('shows an empty state when no runs have ever been saved', async () => {
     vi.spyOn(client, 'apiFetch').mockResolvedValue({ runs: [] });
     renderDrawer();
