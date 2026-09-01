@@ -78,7 +78,7 @@ describe('ForgotPasswordPage', () => {
         return Promise.resolve({ challengeToken: 'challenge-abc', questions: CHALLENGE_QUESTIONS });
       }
       if (url === '/auth/forgot-password/verify' && options?.method === 'POST') {
-        return Promise.reject(new client.ApiError(401, 'One or more answers were incorrect.', null));
+        return Promise.reject(new client.ApiError(400, 'One or more answers were incorrect.', null));
       }
       return Promise.resolve({});
     });

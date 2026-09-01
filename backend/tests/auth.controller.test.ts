@@ -343,11 +343,11 @@ describe('POST /auth/change-password', () => {
     expect(res.status).toBe(401);
   });
 
-  test('401 when the current password is wrong', async () => {
+  test('400 when the current password is wrong (not 401 - a wrong current password must never trip the global session-expiry handler)', async () => {
     mockChangePasswordDb({ currentPasswordHash: await hashPassword('CorrectCurrent1!Xyz') });
     const res = await request(app).post('/auth/change-password').set('Cookie', `auth_token=${signToken('1')}`)
       .send({ currentPassword: 'WrongOne1!Xyz', newPassword: 'NewStr0ng!PasswordAbc' });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(400);
   });
 
   test('400 when the new password fails the policy', async () => {
@@ -431,11 +431,11 @@ describe('PUT /auth/security-questions', () => {
     expect(res.status).toBe(401);
   });
 
-  test('401 when the current password is wrong', async () => {
+  test('400 when the current password is wrong (not 401 - see the same reasoning in the change-password tests above)', async () => {
     mockUpdateSecurityQuestionsDb(await hashPassword('CorrectCurrent1!Xyz'));
     const res = await request(app).put('/auth/security-questions').set('Cookie', `auth_token=${signToken('1')}`)
       .send({ currentPassword: 'WrongOne1!Xyz', securityAnswers: fiveAnswers });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(400);
   });
 
   test('400 when fewer than 5 answers are submitted', async () => {
@@ -493,12 +493,12 @@ describe('POST /auth/forgot-password/start', () => {
 describe('POST /auth/forgot-password/verify', () => {
   beforeEach(() => mockQuery.mockReset());
 
-  test('401 with an invalid/expired/tampered challenge token', async () => {
+  test('400 with an invalid/expired/tampered challenge token (not 401 - this is a public, logged-out flow with no session to expire)', async () => {
     const res = await request(app).post('/auth/forgot-password/verify').send({
       challengeToken: 'not-a-real-token',
       answers: [{ questionId: '1', answer: 'x' }, { questionId: '2', answer: 'x' }, { questionId: '3', answer: 'x' }],
     });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(400);
   });
 
   test('400 when the submitted question ids do not match what was challenged', async () => {
@@ -510,7 +510,7 @@ describe('POST /auth/forgot-password/verify', () => {
     expect(res.status).toBe(400);
   });
 
-  test('401 when any answer is wrong; 200 with a resetToken when all 3 are correct', async () => {
+  test('400 when any answer is wrong; 200 with a resetToken when all 3 are correct', async () => {
     const bcrypt = jest.requireActual('bcrypt');
     const hashes = await Promise.all(['ans1', 'ans2', 'ans3'].map((a) => bcrypt.hash(a, 4)));
     const token = signPasswordResetChallengeToken('1', ['1', '2', '3']);
@@ -521,7 +521,7 @@ describe('POST /auth/forgot-password/verify', () => {
       challengeToken: token,
       answers: [{ questionId: '1', answer: 'ans1' }, { questionId: '2', answer: 'ans2' }, { questionId: '3', answer: 'WRONG' }],
     });
-    expect(wrongRes.status).toBe(401);
+    expect(wrongRes.status).toBe(400);
 
     mockQuery.mockResolvedValueOnce({ rows: answerRows });
     const correctRes = await request(app).post('/auth/forgot-password/verify').send({
@@ -536,9 +536,9 @@ describe('POST /auth/forgot-password/verify', () => {
 describe('POST /auth/forgot-password/reset', () => {
   beforeEach(() => mockQuery.mockReset());
 
-  test('401 with an invalid/expired reset token', async () => {
+  test('400 with an invalid/expired reset token (not 401 - same reasoning as the verify tests above)', async () => {
     const res = await request(app).post('/auth/forgot-password/reset').send({ resetToken: 'nope', newPassword: 'NewStr0ng!PasswordAbc' });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(400);
   });
 
   test('400 when the new password fails policy, given a real reset token', async () => {

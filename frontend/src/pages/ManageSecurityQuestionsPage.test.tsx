@@ -102,7 +102,7 @@ describe('ManageSecurityQuestionsPage', () => {
       if (url === '/auth/security-questions' && !options) return Promise.resolve({ questions: ALL_15 });
       if (url === '/auth/security-questions/mine') return Promise.resolve({ questions: [] });
       if (url === '/auth/security-questions' && options?.method === 'PUT') {
-        return Promise.reject(new client.ApiError(401, 'Current password is incorrect.', null));
+        return Promise.reject(new client.ApiError(400, 'Current password is incorrect.', null));
       }
       return Promise.resolve({});
     });

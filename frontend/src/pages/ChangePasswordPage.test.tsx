@@ -75,7 +75,7 @@ describe('ChangePasswordPage', () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
       if (url === '/auth/me') return Promise.resolve(SESSION);
       if (url === '/auth/change-password' && options?.method === 'POST') {
-        return Promise.reject(new client.ApiError(401, 'Current password is incorrect.', null));
+        return Promise.reject(new client.ApiError(400, 'Current password is incorrect.', null));
       }
       return Promise.resolve({});
     });

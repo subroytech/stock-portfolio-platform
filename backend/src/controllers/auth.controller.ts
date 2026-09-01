@@ -255,8 +255,12 @@ export async function updateSecurityQuestions(req: Request, res: Response, next:
   try {
     const userId = req.user!.id;
     const currentHash = await authService.getPasswordHashById(userId);
+    // 400, not 401 - this is a validation failure on an otherwise-valid, still-authenticated
+    // session, not an auth failure. apiFetch's global 401 handler (client.ts) treats ANY 401 as
+    // "the session token itself is invalid" and force-logs the user out - a wrong current
+    // password must never trip that.
     if (!currentHash || !(await authService.verifyPassword(currentPassword, currentHash))) {
-      res.status(401).json({ error: 'Current password is incorrect.' });
+      res.status(400).json({ error: 'Current password is incorrect.' });
       return;
     }
     await securityQuestionService.replaceUserAnswers(userId, securityAnswers, REGISTRATION_QUESTION_COUNT);
@@ -286,8 +290,9 @@ export async function changePassword(req: Request, res: Response, next: NextFunc
       res.status(401).json({ error: 'Invalid or expired session.' });
       return;
     }
+    // 400, not 401 - see the matching comment in updateSecurityQuestions above.
     if (!(await authService.verifyPassword(currentPassword, currentHash))) {
-      res.status(401).json({ error: 'Current password is incorrect.' });
+      res.status(400).json({ error: 'Current password is incorrect.' });
       return;
     }
 
@@ -358,7 +363,11 @@ export async function forgotPasswordVerify(req: Request, res: Response, next: Ne
   try {
     ({ userId, questionIds } = authService.verifyPasswordResetChallengeToken(challengeToken));
   } catch {
-    res.status(401).json({ error: 'This verification has expired or is invalid - please start over.' });
+    // 400, not 401 - this is a public, logged-out flow with no session to speak of. A 401 here
+    // would still trip apiFetch's global "session expired" handler (client.ts), which can leave
+    // a stale "Your session ended" banner primed for the next Login page visit even though the
+    // user was never logged in on this browser to begin with.
+    res.status(400).json({ error: 'This verification has expired or is invalid - please start over.' });
     return;
   }
 
@@ -370,8 +379,9 @@ export async function forgotPasswordVerify(req: Request, res: Response, next: Ne
 
   try {
     const correct = await securityQuestionService.verifyAnswers(userId, answers);
+    // 400, not 401 - see the matching comment above the challenge-token check in this function.
     if (!correct) {
-      res.status(401).json({ error: 'One or more answers were incorrect.' });
+      res.status(400).json({ error: 'One or more answers were incorrect.' });
       return;
     }
     res.json({ resetToken: authService.signPasswordResetToken(userId) });
@@ -393,7 +403,8 @@ export async function forgotPasswordReset(req: Request, res: Response, next: Nex
   try {
     ({ userId } = authService.verifyPasswordResetToken(resetToken));
   } catch {
-    res.status(401).json({ error: 'This reset link has expired or is invalid - please start over.' });
+    // 400, not 401 - same reasoning as forgotPasswordVerify's challenge-token check above.
+    res.status(400).json({ error: 'This reset link has expired or is invalid - please start over.' });
     return;
   }
 

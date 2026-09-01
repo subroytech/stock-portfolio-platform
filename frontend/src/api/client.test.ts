@@ -55,6 +55,21 @@ describe('apiFetch - global 401 handling', () => {
     expect(sessionStorage.getItem(SESSION_EXPIRED_STORAGE_KEY)).toBeNull();
   });
 
+  // Regression test for a real reported bug: change-password/security-questions used to return
+  // 401 for "your current password is wrong," which is a valid-session business-logic failure,
+  // not an auth failure - it was tripping this same global handler and force-logging the user
+  // out mid-form. Fixed by having those endpoints return 400 instead (see auth.controller.ts).
+  test('a 400 (e.g. wrong current password on Change Password) leaves the session and flag untouched', async () => {
+    const user = { id: '1', email: 'a@b.com', roles: ['user'], permissions: [] };
+    queryClient.setQueryData(['session'], user);
+    mockFetchOnce(400, { error: 'Current password is incorrect.' });
+
+    await expect(apiFetch('/auth/change-password', { method: 'POST', body: '{}' })).rejects.toBeInstanceOf(ApiError);
+
+    expect(queryClient.getQueryData(['session'])).toEqual(user);
+    expect(sessionStorage.getItem(SESSION_EXPIRED_STORAGE_KEY)).toBeNull();
+  });
+
   test('a successful response never touches the session or the flag', async () => {
     const user = { id: '1', email: 'a@b.com', roles: ['user'], permissions: [] };
     queryClient.setQueryData(['session'], user);
