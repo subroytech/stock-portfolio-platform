@@ -55,17 +55,17 @@ export default function ContrarianRunHistoryDrawer({ isOpen, onClose, onSelectRu
               No older runs yet — once more scans are run, they&apos;ll show up here.
             </p>
           )}
-          {history.data?.runs.map((run) => (
+          {history.data?.runs.map((run, index) => (
             <button
               key={run.id}
               type="button"
               onClick={() => onSelectRun(run)}
               data-testid={`run-history-row-${run.id}`}
-              className="block w-full border-b border-border px-4 py-3 text-left hover:bg-bg-primary"
+              className={`block w-full border-b border-border px-4 py-3 text-left hover:bg-border/40 ${index % 2 === 1 ? 'bg-bg-primary' : ''}`}
             >
-              <p className="text-sm font-medium text-text-primary">{formatAsOf(run.completedAt)}</p>
-              <p className="mt-0.5 text-xs text-text-secondary">
-                {run.params.threshold}% Threshold - {run.params.scanDays} Day Window
+              <p className="text-sm text-text-primary">
+                <span className="font-semibold">{formatAsOf(run.completedAt)}</span>
+                <span className="text-text-secondary"> — {run.params.threshold}% Threshold - {run.params.scanDays} Day Window</span>
               </p>
             </button>
           ))}
