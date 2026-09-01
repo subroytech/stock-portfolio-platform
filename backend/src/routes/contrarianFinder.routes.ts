@@ -30,4 +30,11 @@ router.post('/last-scan', requirePermission('contrarian_finder:scan'), contraria
 // can't run a scan themselves are exactly who this is for.
 router.get('/last-scan', contrarianFinderController.getLastScan);
 
+// Run History (2026-08-31) - unlike /last-scan above, this IS gated: an
+// Admin/Admin-Master must explicitly grant contrarian_finder:view_history to
+// a role before "View archived runs" becomes available to it (the user's
+// own explicit requirement, not "viewing isn't the action" reasoning).
+router.get('/run-history', requirePermission('contrarian_finder:view_history'), contrarianFinderController.listRunHistory);
+router.get('/run-history/:id', requirePermission('contrarian_finder:view_history'), contrarianFinderController.getRunHistoryDetail);
+
 export default router;

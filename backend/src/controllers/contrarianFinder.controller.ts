@@ -164,3 +164,28 @@ export async function getLastScan(req: Request, res: Response, next: NextFunctio
     next(err);
   }
 }
+
+// Run History (2026-08-31) - both gated by requirePermission('contrarian_finder:view_history')
+// at the route level, the real enforcement (frontend hides the entry point entirely as UX,
+// same split already used for contrarian_finder:scan).
+export async function listRunHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const runs = await cf.listRunHistory();
+    res.json({ runs });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getRunHistoryDetail(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const run = await cf.getRunById(String(req.params.id));
+    if (!run) {
+      res.status(404).json({ error: 'No archived run found with that id.' });
+      return;
+    }
+    res.json({ run });
+  } catch (err) {
+    next(err);
+  }
+}

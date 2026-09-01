@@ -562,3 +562,57 @@ export async function getLastScan(): Promise<LastScanRecord | null> {
     results: r.results,
   };
 }
+
+export interface RunHistoryListItem {
+  id: string;
+  completedAt: string;
+  universeSize: number;
+  scanned: number;
+  params: unknown;
+}
+
+// Run History (2026-08-31, gated by contrarian_finder:view_history - see
+// requirePermission on the routes below). Tier-agnostic, same "viewing
+// ignores tier" philosophy getLastScan() already established - run_tier is a
+// retention/storage concept only, never a viewing one. `results` (the
+// ~150KB-per-row JSONB blob) is deliberately excluded here to keep this
+// list call cheap; fetched only per-row, on demand, via getRunById below. No
+// pagination - a deliberate MVP simplification worth revisiting if retention
+// caps grow much larger than today's numbers.
+export async function listRunHistory(): Promise<RunHistoryListItem[]> {
+  const { rows } = await pool.query<{
+    id: string; completed_at: string; universe_size: string; scanned: string; params: unknown;
+  }>(
+    `SELECT id, completed_at, universe_size, scanned, params
+     FROM tx_shared_contrarian_run ORDER BY completed_at DESC`,
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    completedAt: r.completed_at,
+    universeSize: Number(r.universe_size),
+    scanned: Number(r.scanned),
+    params: r.params,
+  }));
+}
+
+// The full record (including `results`) for one archived run, keyed by id
+// instead of getLastScan()'s "most recent" - same shape either way so the
+// frontend can render both through identical components.
+export async function getRunById(id: string): Promise<LastScanRecord | null> {
+  const { rows } = await pool.query<{
+    completed_at: string; universe_size: string; scanned: string; params: unknown; results: unknown;
+  }>(
+    `SELECT completed_at, universe_size, scanned, params, results
+     FROM tx_shared_contrarian_run WHERE id = $1`,
+    [id],
+  );
+  if (!rows[0]) return null;
+  const r = rows[0];
+  return {
+    completedAt: r.completed_at,
+    universeSize: Number(r.universe_size),
+    scanned: Number(r.scanned),
+    params: r.params,
+    results: r.results,
+  };
+}

@@ -11,7 +11,7 @@ import * as analysisService from '../src/services/analysisService';
 import {
   buildBatches, filterCandidates, resolveQuality, assembleUniverse, scanStock, scanBatch,
   fetchStockData, assembleScanBatch, getUniverseTable, refreshTickerDataBatch,
-  saveLastScan, getLastScan, CF_MAX,
+  saveLastScan, getLastScan, listRunHistory, getRunById, CF_MAX,
 } from '../src/services/contrarianFinder.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
@@ -373,6 +373,56 @@ describe('saveLastScan / getLastScan', () => {
     // ORDER BY completed_at DESC LIMIT 1 - "the last scan" is always just the most recent row.
     const [sql] = mockQuery.mock.calls[0];
     expect(sql).toContain('ORDER BY completed_at DESC LIMIT 1');
+  });
+});
+
+describe('listRunHistory / getRunById', () => {
+  test('listRunHistory returns metadata only, newest first, no results blob', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        { id: '2', completed_at: '2026-08-31T10:00:00Z', universe_size: '458', scanned: '458', params: { threshold: 25 } },
+        { id: '1', completed_at: '2026-08-29T10:00:00Z', universe_size: '458', scanned: '450', params: { threshold: 30 } },
+      ],
+    });
+
+    const result = await listRunHistory();
+    expect(result).toEqual([
+      { id: '2', completedAt: '2026-08-31T10:00:00Z', universeSize: 458, scanned: 458, params: { threshold: 25 } },
+      { id: '1', completedAt: '2026-08-29T10:00:00Z', universeSize: 458, scanned: 450, params: { threshold: 30 } },
+    ]);
+
+    const [sql] = mockQuery.mock.calls[0];
+    expect(sql).toContain('ORDER BY completed_at DESC');
+    expect(sql).not.toContain('results');
+  });
+
+  test('listRunHistory returns an empty array when nothing has ever been saved', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    expect(await listRunHistory()).toEqual([]);
+  });
+
+  test('getRunById returns null for an unknown id', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    expect(await getRunById('999')).toBeNull();
+  });
+
+  test('getRunById returns the full record (including results) for a real id', async () => {
+    mockQuery.mockReset();
+    const params = { threshold: 25 };
+    const results = [{ symbol: 'AAPL', filterFail: false }];
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ completed_at: '2026-08-29T10:00:00Z', universe_size: '458', scanned: '450', params, results }],
+    });
+
+    const result = await getRunById('1');
+    expect(result).toEqual({ completedAt: '2026-08-29T10:00:00Z', universeSize: 458, scanned: 450, params, results });
+
+    const [sql, values] = mockQuery.mock.calls[0];
+    expect(sql).toContain('WHERE id = $1');
+    expect(values).toEqual(['1']);
   });
 });
 

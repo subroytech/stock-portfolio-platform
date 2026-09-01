@@ -7,12 +7,23 @@ jest.mock('../src/services/contrarianFinder.service', () => ({
   refreshTickerDataBatch: jest.fn(),
   saveLastScan: jest.fn(),
   getLastScan: jest.fn(),
+  listRunHistory: jest.fn(),
+  getRunById: jest.fn(),
 }));
 jest.mock('../src/services/userSubscription.service', () => ({
   ...jest.requireActual('../src/services/userSubscription.service'),
   getDecryptedKey: jest.fn(),
 }));
 jest.mock('../src/services/usageTracking.service');
+// This file's test count grew with Run History's new endpoints - enough real
+// requests against the real /contrarian-finder router (mounted with
+// rateLimiters in app.ts) to trip the actual per-IP/per-user limiter
+// mid-run. Same no-op mock already used by auth.controller.test.ts/
+// portfolio.controller.test.ts for the same reason.
+jest.mock('../src/middleware/rateLimit', () => ({
+  __esModule: true,
+  default: [(_req: unknown, _res: unknown, next: () => void) => next(), (_req: unknown, _res: unknown, next: () => void) => next()],
+}));
 
 import request from 'supertest';
 import { pool } from '../src/db/pool';
@@ -29,6 +40,8 @@ const mockGetUniverseTable = cf.getUniverseTable as jest.Mock;
 const mockRefreshTickerDataBatch = cf.refreshTickerDataBatch as jest.Mock;
 const mockSaveLastScan = cf.saveLastScan as jest.Mock;
 const mockGetLastScan = cf.getLastScan as jest.Mock;
+const mockListRunHistory = cf.listRunHistory as jest.Mock;
+const mockGetRunById = cf.getRunById as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockLogUsage = usageTracking.logUsage as jest.Mock;
@@ -63,6 +76,10 @@ beforeEach(() => {
   mockSaveLastScan.mockResolvedValue(undefined);
   mockGetLastScan.mockReset();
   mockGetLastScan.mockResolvedValue(null);
+  mockListRunHistory.mockReset();
+  mockListRunHistory.mockResolvedValue([]);
+  mockGetRunById.mockReset();
+  mockGetRunById.mockResolvedValue(null);
 });
 
 describe('GET /contrarian-finder/universe', () => {
@@ -330,5 +347,62 @@ describe('GET /contrarian-finder/last-scan', () => {
     const res = await request(app).get('/contrarian-finder/last-scan').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ lastScan: fakeRecord });
+  });
+});
+
+describe('GET /contrarian-finder/run-history', () => {
+  test('401 without a session cookie', async () => {
+    const res = await request(app).get('/contrarian-finder/run-history');
+    expect(res.status).toBe(401);
+  });
+
+  test('403 for a signed-in user without contrarian_finder:view_history (unlike /last-scan, this IS gated)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).get('/contrarian-finder/run-history').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(mockListRunHistory).not.toHaveBeenCalled();
+  });
+
+  test('200 with the run list for a caller who has the permission', async () => {
+    const fakeList = [
+      { id: '2', completedAt: '2026-08-31T10:00:00Z', universeSize: 458, scanned: 458, params: { threshold: 25 } },
+      { id: '1', completedAt: '2026-08-29T10:00:00Z', universeSize: 458, scanned: 450, params: { threshold: 30 } },
+    ];
+    mockListRunHistory.mockResolvedValue(fakeList);
+    const res = await request(app).get('/contrarian-finder/run-history').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ runs: fakeList });
+  });
+});
+
+describe('GET /contrarian-finder/run-history/:id', () => {
+  test('401 without a session cookie', async () => {
+    const res = await request(app).get('/contrarian-finder/run-history/1');
+    expect(res.status).toBe(401);
+  });
+
+  test('403 for a signed-in user without contrarian_finder:view_history', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).get('/contrarian-finder/run-history/1').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(mockGetRunById).not.toHaveBeenCalled();
+  });
+
+  test('404 for an id with no matching archived run', async () => {
+    mockGetRunById.mockResolvedValue(null);
+    const res = await request(app).get('/contrarian-finder/run-history/999').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+  });
+
+  test('200 with the full archived record for a real id', async () => {
+    const fakeRun = {
+      completedAt: '2026-08-29T10:00:00Z', universeSize: 458, scanned: 450,
+      params: { threshold: 30 }, results: [{ symbol: 'AAPL', filterFail: false }],
+    };
+    mockGetRunById.mockResolvedValue(fakeRun);
+    const res = await request(app).get('/contrarian-finder/run-history/1').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ run: fakeRun });
+    expect(mockGetRunById).toHaveBeenCalledWith('1');
   });
 });
