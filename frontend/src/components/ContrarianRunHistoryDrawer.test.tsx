@@ -42,9 +42,8 @@ describe('ContrarianRunHistoryDrawer', () => {
 
     expect(await screen.findByTestId('run-history-row-2')).toBeInTheDocument();
     expect(screen.getByTestId('run-history-row-1')).toBeInTheDocument();
-    expect(screen.getByTestId('run-history-row-2')).toHaveTextContent('458 of 458 scanned');
-    expect(screen.getByTestId('run-history-row-2')).toHaveTextContent('25% threshold');
-    expect(screen.getByTestId('run-history-row-1')).toHaveTextContent('Relaxed quality');
+    expect(screen.getByTestId('run-history-row-2')).toHaveTextContent('25% Threshold - 7 Day Window');
+    expect(screen.getByTestId('run-history-row-1')).toHaveTextContent('30% Threshold - 7 Day Window');
   });
 
   test('shows an empty state when no runs have ever been saved', async () => {

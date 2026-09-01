@@ -527,14 +527,14 @@ describe('ContrarianFinderPage — Run History', () => {
     mockRoutedFetch();
     renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), ADMIN_SESSION);
     await screen.findByRole('button', { name: 'Run scan' });
-    expect(screen.queryByTestId('view-archived-runs-link-empty')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('view-archived-runs-button')).not.toBeInTheDocument();
     expect(screen.queryByTestId('run-history-drawer')).not.toBeInTheDocument();
   });
 
   test('the entry point opens the drawer for a session with the permission, listing the real stored runs', async () => {
     mockRoutedFetch();
     renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), VIEW_HISTORY_SESSION);
-    await userEvent.click(await screen.findByTestId('view-archived-runs-link-empty'));
+    await userEvent.click(await screen.findByTestId('view-archived-runs-button'));
     expect(await screen.findByTestId('run-history-row-r1')).toBeInTheDocument();
   });
 
@@ -542,7 +542,7 @@ describe('ContrarianFinderPage — Run History', () => {
     mockRoutedFetch();
     renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), VIEW_HISTORY_SESSION);
 
-    await userEvent.click(await screen.findByTestId('view-archived-runs-link-empty'));
+    await userEvent.click(await screen.findByTestId('view-archived-runs-button'));
     await userEvent.click(await screen.findByTestId('run-history-row-r1'));
 
     expect(await screen.findByTestId('archived-run-banner')).toHaveTextContent('Viewing an archived run');
@@ -556,7 +556,7 @@ describe('ContrarianFinderPage — Run History', () => {
     mockRoutedFetch();
     renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), VIEW_HISTORY_SESSION);
 
-    await userEvent.click(await screen.findByTestId('view-archived-runs-link-empty'));
+    await userEvent.click(await screen.findByTestId('view-archived-runs-button'));
     await userEvent.click(await screen.findByTestId('run-history-row-r1'));
     await screen.findByTestId('archived-run-banner');
 
@@ -569,7 +569,7 @@ describe('ContrarianFinderPage — Run History', () => {
     mockRoutedFetch();
     renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), VIEW_HISTORY_SESSION);
 
-    await userEvent.click(await screen.findByTestId('view-archived-runs-link-empty'));
+    await userEvent.click(await screen.findByTestId('view-archived-runs-button'));
     await userEvent.click(await screen.findByTestId('run-history-row-r1'));
     await screen.findByTestId('archived-run-banner');
 

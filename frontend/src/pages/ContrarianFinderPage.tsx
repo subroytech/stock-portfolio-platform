@@ -175,14 +175,24 @@ export default function ContrarianFinderPage() {
               {archivedRun.data.run.params.threshold}% threshold · {archivedRun.data.run.params.scanDays}-day window ·{' '}
               {archivedRun.data.run.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
             </p>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
               {canViewHistory && (
-                <button type="button" onClick={() => setHistoryDrawerOpen(true)} data-testid="archived-run-view-other" className="font-medium underline hover:no-underline">
-                  🕘 View archived runs
+                <button
+                  type="button"
+                  onClick={() => setHistoryDrawerOpen(true)}
+                  data-testid="archived-run-view-other"
+                  className="rounded-btn bg-warning/20 px-2.5 py-1 text-xs font-semibold text-warning transition-colors hover:bg-warning/30"
+                >
+                  🕘 View Archived Runs
                 </button>
               )}
-              <button type="button" onClick={() => setArchivedRunId(null)} data-testid="archived-run-back-to-current" className="font-medium underline hover:no-underline">
-                ← Back to current run
+              <button
+                type="button"
+                onClick={() => setArchivedRunId(null)}
+                data-testid="archived-run-back-to-current"
+                className="rounded-btn bg-warning/20 px-2.5 py-1 text-xs font-semibold text-warning transition-colors hover:bg-warning/30"
+              >
+                ← Back to Current Run
               </button>
             </div>
           </div>
@@ -196,18 +206,6 @@ export default function ContrarianFinderPage() {
           <p className="text-xs text-danger">Could not load that archived run.</p>
         )}
 
-        {/* Entry point for a session that hasn't seen a live/fallback scan yet
-            in this tab (scan.data is still null) - the "Last scan used" line
-            below never renders in that case, but Run History should still be
-            reachable regardless of whether anything live is currently shown. */}
-        {!isArchiveMode && !scan.data && canViewHistory && (
-          <p className="text-xs">
-            <button type="button" onClick={() => setHistoryDrawerOpen(true)} data-testid="view-archived-runs-link-empty" className="text-accent hover:underline">
-              🕘 View archived runs
-            </button>
-          </p>
-        )}
-
         {/* Last-run details - the read-only record of what actually produced
             the results currently on screen, independent of the (possibly
             since-edited) live form below. Guarded for sessionStorage data
@@ -216,14 +214,6 @@ export default function ContrarianFinderPage() {
           <p className="text-xs italic text-text-secondary">
             Last scan used: {scan.data.params.threshold}% threshold · {scan.data.params.scanDays}-day window · batch size {scan.data.params.batchSize} · max {scan.data.params.maxBatches} batches · {scan.data.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
             {scan.data.completedAt && <> · run {formatAsOf(scan.data.completedAt)}</>}
-            {canViewHistory && (
-              <>
-                {' '}·{' '}
-                <button type="button" onClick={() => setHistoryDrawerOpen(true)} data-testid="view-archived-runs-link" className="text-accent hover:underline">
-                  🕘 View archived runs
-                </button>
-              </>
-            )}
           </p>
         )}
 
@@ -257,6 +247,21 @@ export default function ContrarianFinderPage() {
             >
               📋 Stock Universe ({universe.data ? universe.data.stocks.length : universeOpen ? '…' : '?'} stocks) {universeOpen ? '▴' : '▾'}
             </button>
+
+            {/* A real button, not a buried text link (2026-08-31, per explicit feedback that the
+                original inline link wasn't prominent enough) - same visual weight as Advanced/
+                Stock Universe, always visible for a session with the permission regardless of
+                whether any live scan has been seen yet in this tab. */}
+            {canViewHistory && (
+              <button
+                type="button"
+                onClick={() => setHistoryDrawerOpen(true)}
+                data-testid="view-archived-runs-button"
+                className="rounded-btn bg-sky-500/10 px-3 py-1.5 text-sm font-medium text-sky-600 transition-colors hover:bg-sky-500/20"
+              >
+                🕘 View Archived Runs
+              </button>
+            )}
 
             {canScan ? (
               <div className="ml-auto flex flex-col items-end gap-1.5">

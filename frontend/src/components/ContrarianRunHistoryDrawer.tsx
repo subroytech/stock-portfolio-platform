@@ -65,8 +65,7 @@ export default function ContrarianRunHistoryDrawer({ isOpen, onClose, onSelectRu
             >
               <p className="text-sm font-medium text-text-primary">{formatAsOf(run.completedAt)}</p>
               <p className="mt-0.5 text-xs text-text-secondary">
-                {run.scanned} of {run.universeSize} scanned · {run.params.threshold}% threshold ·{' '}
-                {run.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
+                {run.params.threshold}% Threshold - {run.params.scanDays} Day Window
               </p>
             </button>
           ))}
