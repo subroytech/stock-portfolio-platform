@@ -48,4 +48,21 @@ describe('LoginPage', () => {
     expect(await screen.findByText('Invalid email or password.')).toBeInTheDocument();
     expect(screen.queryByTestId('login-session-expired')).not.toBeInTheDocument();
   });
+
+  test('the password field starts masked and toggles to plain text and back via the Show/Hide control', async () => {
+    renderPage();
+    const passwordInput = screen.getByTestId('login-password');
+    const toggle = screen.getByTestId('login-password-toggle');
+
+    expect(passwordInput).toHaveAttribute('type', 'password');
+    expect(toggle).toHaveTextContent('Show');
+
+    await userEvent.click(toggle);
+    expect(passwordInput).toHaveAttribute('type', 'text');
+    expect(toggle).toHaveTextContent('Hide');
+
+    await userEvent.click(toggle);
+    expect(passwordInput).toHaveAttribute('type', 'password');
+    expect(toggle).toHaveTextContent('Show');
+  });
 });
