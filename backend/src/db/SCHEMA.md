@@ -440,6 +440,16 @@ upsert's `DELETE ... WHERE started_by = $1 AND run_tier = 'user'` and partially 
 admin-tier prune's `ORDER BY completed_at DESC LIMIT 60` scan). Previously both did a full
 table scan — accepted while the table was small; closed once asked about explicitly.
 
+**Run History reads, added 2026-08-31** (no schema change — same table, two additional read
+paths, both gated by the new `contrarian_finder:view_history` permission, migration `036`, zero
+default grants — unlike `GET /contrarian-finder/last-scan` above, browsing *older* runs is
+deliberately opt-in per role): `GET /contrarian-finder/run-history` (`listRunHistory()` —
+`SELECT id, completed_at, universe_size, scanned, params ... ORDER BY completed_at DESC`,
+**excluding `results`** to keep the list call cheap against a ~150KB-per-row average) and
+`GET /contrarian-finder/run-history/:id` (`getRunById()` — the same shape `getLastScan()`
+returns, keyed by `id` instead of "most recent"). Both are tier-agnostic, same "viewing ignores
+`run_tier`" philosophy as `getLastScan()` — tier is a retention/storage concept only.
+
 ### `m_tickers`
 Stock/ETF metadata reference table — **the single source of truth for ticker
 name/sector** (confirmed 2026-08-02), fed continuously from two independent paths, not just

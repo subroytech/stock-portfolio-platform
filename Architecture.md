@@ -1,6 +1,6 @@
 ## Rebuild Plan — From Single-User Client-Side App to a Scalable Multi-User Platform
 
-**Last updated:** 2026-08-30
+**Last updated:** 2026-08-31
 
 **Why this section exists:** the user identified the single biggest shortcoming of the current app: it's a 100% client-side, single-user project (no backend, no database, no auth — `localStorage` is the only persistence layer) and therefore cannot scale beyond "one person, one browser." This doc started as a forward-looking rebuild plan and has since become a **living status document** — Section 1 tracks what's actually built, Section 2 is the immediate next action, Section 3 is the full ordered backlog. Update it as work lands rather than letting it drift back into a stale one-time plan. For a compact, fast-scan version of Section 1, see `CLAUDE.md`'s "Current Build State" — this doc carries the detail and rationale; that one carries the quick summary.
 
@@ -53,7 +53,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 08-30
+## Section 1 — Accomplished Till 08-31
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -1693,6 +1693,114 @@ generic per-IP `rateLimiters` already wrapping all of `/auth`; `forgot-password/
 anti-enumeration-safe (a plain `404` on an unknown email reveals account existence) — a deliberate
 simplicity tradeoff, consistent with this app's own pre-existing precedent of not hiding account
 existence universally (e.g. signup's `409` on a duplicate email already does the same).
+
+**Real bug found+fixed 2026-08-31, live-reported**: entering a wrong current password on Change
+Password (or Manage Security Questions) immediately logged the user out with a "Your session
+ended" message, which the user correctly identified as a bug rather than intended behavior. Root
+cause: `changePassword`/`updateSecurityQuestions` returned `401` for "current password is
+incorrect" — a validation failure on an otherwise-perfectly-valid, still-authenticated session —
+which collided with `apiFetch`'s Global 401 Self-Healing Session rule (above) that treats *any*
+`401`, from *any* endpoint, as proof the session token itself is invalid, and force-logs the user
+out. While auditing every `401` in `auth.controller.ts` for the same class of bug, three more
+were found in Forgot Password (`verify`'s invalid-challenge-token and wrong-answers cases,
+`reset`'s invalid-reset-token case) — all public/logged-out endpoints, so the immediate symptom
+was milder, but the same mislabeled `401` could still prime a spurious "session ended" banner for
+whoever logged in normally right after. All five changed to `400`; `requireAuth`'s own genuine
+session-invalid `401`s are untouched. A new regression test was added to `client.test.ts`
+(`apiFetch - global 401 handling`) that exercises the real `apiFetch`, not a mock of it — the
+existing per-page tests (`ChangePasswordPage.test.tsx` etc.) all mock `apiFetch` itself, which is
+exactly why the original bug shipped without being caught: the interceptor that actually causes
+the bug never ran in those tests at all. Verified live: a wrong current password now returns `400`
+and a follow-up `GET /auth/me` on the same cookie confirms the session is still valid.
+
+---
+
+## Contrarian Finder — Run History (view archived runs) ✅ Done
+
+**Built 2026-08-31**, `/plan`-approved after a two-turn design conversation held entirely before
+any code was written: first a feasibility analysis (confirming `tx_shared_contrarian_run` already
+stored everything needed — full `params`+`results` JSONB per completed scan, up to a
+Config-Properties-driven admin-tier retention cap, currently 30 — and that the only read path,
+`GET /contrarian-finder/last-scan`, always returned just the single newest row with no way to
+browse older ones), then a full UI/UX design proposal (a right-side drawer + a non-destructive
+"archived run" viewing mode, explicitly *not* a silent state swap, modal, or separate route — see
+rationale below) which the user approved with one addition: **the feature itself must be a gated
+Admin-Console Function**, invisible until an Admin or Admin-Master explicitly grants it to a role.
+
+**Design rationale, as proposed and approved** (why a drawer, not the alternatives): a dropdown
+that silently swapped the live view for an old run was rejected as the same category of bug just
+fixed above (401-triggered logout) — the user would have no reliable way to tell "is this live or
+archived" without checking a timestamp. A full separate route was rejected as too heavy — it would
+lose the live page's own in-progress state (threshold, Advanced panel, active tab) for what's
+often a quick glance at an old run. A centered modal was rejected because it occludes the live
+controls entirely, and browsing history while still being able to see (or start) a live scan was
+the explicit point of "without disturbing the current default view."
+
+**Gated Function, zero default grants** — migration `036` inserts one `m_function_master` row for
+`contrarian_finder:view_history` and nothing else, precedented by migrations `027`/`032`
+(`config_properties:manage`/`users:impersonate`, both also zero-default-grant on creation). Unlike
+those two, this permission is **not** added to `roles.service.ts`'s `ADMIN_MASTER_ONLY_PERMISSIONS`
+set — the user's own explicit phrasing was "Admin **or** Admin-Master," i.e. the normal,
+unrestricted grant path (any role holding `permissions:manage` can grant it to any role), not an
+admin-master-exclusive one. Because `RolePermissionsPage.tsx` sources its Manage Permission
+checklist live from `GET /functions` (confirmed by reading the component, not assumed), the new
+Function appeared there automatically the moment the migration ran — zero admin-console frontend
+changes were needed for the grant mechanism itself.
+
+**Backend** — two new `contrarianFinder.service.ts` functions, both tier-agnostic (mirroring
+`getLastScan()`'s own established "viewing ignores `run_tier` — tier is a retention/storage
+concept only" philosophy, rather than inventing a second rule for history specifically):
+- `listRunHistory()` — `SELECT id, completed_at, universe_size, scanned, params ... ORDER BY
+  completed_at DESC`, **deliberately excluding `results`** (measured live at ~150KB/row average)
+  to keep the list call cheap regardless of retention-cap size; no pagination yet, an accepted MVP
+  simplification at today's row counts.
+- `getRunById(id)` — the same shape `getLastScan()` already returns, keyed by `id` instead of
+  "most recent," so both can render through identical frontend components.
+
+New `GET /contrarian-finder/run-history` / `GET /contrarian-finder/run-history/:id`, both gated by
+`requirePermission('contrarian_finder:view_history')` — the actual enforcement (a missing
+permission 403s at the route level regardless of what the frontend does or doesn't render), same
+backend-primary/frontend-UX split already established for `contrarian_finder:scan`.
+
+**Frontend** — new `ContrarianRunHistoryDrawer.tsx`, a right-side slide-over (same
+backdrop-click-to-close mechanics as every other overlay in this app, just positioned right-0/
+h-full instead of centered) listing every stored run newest-first with the same "vocabulary" as
+the page's existing "Last scan used" caption (threshold, scan window, quality preset, scanned
+count, timestamp via the existing `formatAsOf()` helper — no new relative-time formatter
+introduced, staying consistent with the app's one existing precedent rather than adding a second).
+`ContrarianFinderPage.tsx` gained a genuinely separate `archivedRunId` state, fed through a new
+`useRunHistoryDetail()` hook — selecting an archived run **never** writes into `scan.data`,
+`sessionStorage`, or the TanStack cache slot the live view owns, which is what makes "without
+disturbing the current default view" true at the state-management level, not just visually. An
+amber banner ("📁 Viewing an archived run from … [← Back to current run]") replaces the "Last scan
+used" caption while archive mode is active; the existing drop-threshold filter and Candidates/
+Strength List tabs keep working unmodified against the archived data, since both were already pure
+client-side derivations decoupled from where `results` came from. Starting a new scan, or clicking
+"Back to current run," both immediately clear `archivedRunId` back to `null` — a fresh scan always
+wins over a passive archive view, no confirmation needed.
+
+**Real bug found+fixed during the build**: the page's pre-existing cross-page Strength List cache
+sync (`STRENGTH_LIST_QUERY_KEY`, read by `MomentumPage.tsx` to reuse Contrarian Finder's own
+strength-screen results) was initially wired to read from the same archive-aware `strengthList`
+display variable — meaning viewing an archived run would have silently overwritten Momentum's
+shared cache with that old run's strength list, exactly the kind of cross-feature disturbance this
+whole build was meant to prevent. Fixed by keeping the cache-sync effect keyed strictly to
+`scan.data` (live-only) and computing an independent `liveStrengthList` for that one purpose,
+decoupled from the archive-aware display variable.
+
+689 backend tests (11 new — `contrarianFinder.service.test.ts`/`contrarianFinder.controller
+.test.ts` extended), 411 frontend tests (12 new — `ContrarianRunHistoryDrawer.test.tsx` new,
+`ContrarianFinderPage.test.tsx` extended with a dedicated "Run History" describe block), `tsc`/
+lint clean both sides. **Verified live against the real dev database and its 9 real stored runs**:
+confirmed `403` for a throwaway role before any grant → granted `contrarian_finder:view_history`
+directly (the DB-level equivalent of the Admin Console's own Manage Permission grant action,
+same precedent already used elsewhere in this doc for "admin approval" steps) → confirmed `200`
+with the real 9-run list, newest-first, no `results` blob in the payload → fetched one real run's
+full detail (348 genuine results, matching that run's own `scanned` count) → confirmed an unknown
+id `404`s → cleaned up the throwaway role/grant/account afterward. **Known gap**: the drawer/
+banner/archive-mode UI itself was verified via the 5 new frontend integration tests rather than a
+live interactive browser walkthrough — a deliberately lighter verification pass than this
+project's usual "verified live" standard, offered but not yet requested.
 
 ---
 

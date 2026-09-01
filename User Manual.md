@@ -10,7 +10,8 @@ live-verified (2026-08-02 for the API key sections; 2026-08-05 for Contrarian Fi
 guided stepper, footer/cash row markers, and template-governance admin tools; 2026-08-28 for
 Login-as, built and test-covered but still pending its own live two-account walkthrough — see
 that section below; 2026-08-30 for Registration, Password Policy & Security Questions, including
-the selectable-questions and post-login Manage Security Questions follow-ons).** Role names below
+the selectable-questions and post-login Manage Security Questions follow-ons; 2026-08-31 for
+Contrarian Finder Run History).** Role names below
 use the exact casing as created in the database: `user-contra-withKey` (capital K),
 `user-contra-wokey` (lowercase), `admin-master`.
 
@@ -67,6 +68,32 @@ screen enforces this: granting `scan_history` to a role that doesn't already hav
 rejected, and `scan` can't be revoked from a role while it still holds `scan_history`. In the
 Manage Permission checklist, `scan_history` renders indented directly under `scan` to make this
 relationship visible at a glance.
+
+## Contrarian Finder — Run History (view archived runs)
+
+**Status: implemented and live-verified 2026-08-31.** Unlike the single-latest-run view above,
+browsing *older* archived runs is a genuinely gated feature — invisible and unusable for a role
+until an `admin` or `admin-master` explicitly grants it `contrarian_finder:view_history` via the
+Admin Console's Manage Permission screen. Nothing is pre-granted; this is a deliberate departure
+from `contrarian_finder:scan`/`last-scan`'s "viewing isn't the gated action" precedent above,
+per an explicit request that Run History specifically stay opt-in per role.
+
+A role with the permission sees a small "🕘 View archived runs" link on the Contrarian Finder
+page (next to the "Last scan used" caption, or on its own if no live scan has been seen yet in
+that browser tab), opening a Run History panel listing every stored run — both admin-tier
+history and any user-tier "my last scan" rows, newest first, regardless of who ran them or
+which retention tier they belong to. Selecting one shows that run's own results in a clearly
+labeled "archived run" view (an amber banner names the run's date and doesn't let it be mistaken
+for the live default view) — filtering by the drop-threshold and switching between Candidates/
+Strength List both keep working against the archived data. "Back to current run," or simply
+starting a new scan, immediately restores the live default view; nothing about browsing an
+archived run ever alters what a viewer without this permission sees.
+
+Unlike `contrarian_finder:scan_history`, `view_history` has **no parent-permission dependency**
+— a role can be granted it independently of whether it also holds `contrarian_finder:scan`,
+since viewing history and running a scan are unrelated capabilities. It's also **not**
+admin-master-restricted the way `config_properties:manage`/`users:impersonate` are — any role
+holding `permissions:manage` (i.e. `admin` or `admin-master`) can grant it to any other role.
 
 ## "Functional Access" = `contrarian_finder:scan`
 
