@@ -492,3 +492,91 @@ describe('ContrarianFinderPage', () => {
     });
   });
 });
+
+// Run History (2026-08-31) - the drawer/archive-mode integration. Routed
+// per-URL since these tests need /run-history and /run-history/:id to
+// return different fixtures than /last-scan or /scan-batch.
+const ARCHIVED_LIST_ITEM = {
+  id: 'r1', completedAt: '2026-08-20T09:00:00Z', universeSize: 500, scanned: 500,
+  params: { threshold: 25, batchSize: 125, maxBatches: 5, qualityPreset: 'standard' as const, scanDays: 7 },
+};
+const ARCHIVED_RUN_RECORD = {
+  ...ARCHIVED_LIST_ITEM,
+  results: [scanResult({ symbol: 'ZZZ', changePct: -40, name: 'Zulu Co' })],
+};
+
+function mockRoutedFetch(overrides: Record<string, unknown> = {}) {
+  return vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+    if (path === '/contrarian-finder/last-scan') return Promise.resolve(overrides.lastScan ?? { lastScan: null });
+    if (path === '/contrarian-finder/run-history') return Promise.resolve(overrides.runHistory ?? { runs: [ARCHIVED_LIST_ITEM] });
+    if (path === '/contrarian-finder/run-history/r1') return Promise.resolve(overrides.runDetail ?? { run: ARCHIVED_RUN_RECORD });
+    if (path === '/contrarian-finder/scan-batch') return Promise.resolve(overrides.scanBatch ?? singleBatchResponse());
+    return Promise.resolve({});
+  });
+}
+
+const VIEW_HISTORY_SESSION = { roles: ['user', 'admin'], permissions: ['contrarian_finder:scan', 'contrarian_finder:view_history'] };
+
+describe('ContrarianFinderPage — Run History', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    sessionStorage.clear();
+  });
+
+  test('the entry point is hidden for a session without contrarian_finder:view_history', async () => {
+    mockRoutedFetch();
+    renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), ADMIN_SESSION);
+    await screen.findByRole('button', { name: 'Run scan' });
+    expect(screen.queryByTestId('view-archived-runs-link-empty')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-history-drawer')).not.toBeInTheDocument();
+  });
+
+  test('the entry point opens the drawer for a session with the permission, listing the real stored runs', async () => {
+    mockRoutedFetch();
+    renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), VIEW_HISTORY_SESSION);
+    await userEvent.click(await screen.findByTestId('view-archived-runs-link-empty'));
+    expect(await screen.findByTestId('run-history-row-r1')).toBeInTheDocument();
+  });
+
+  test('selecting an archived run shows the archive banner and renders that run\'s own results, not the live view', async () => {
+    mockRoutedFetch();
+    renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), VIEW_HISTORY_SESSION);
+
+    await userEvent.click(await screen.findByTestId('view-archived-runs-link-empty'));
+    await userEvent.click(await screen.findByTestId('run-history-row-r1'));
+
+    expect(await screen.findByTestId('archived-run-banner')).toHaveTextContent('Viewing an archived run');
+    expect(screen.getAllByText('ZZZ').length).toBeGreaterThan(0); // mobile-card + desktop-table dual rendering
+    expect(screen.getByText('Candidates (1)')).toBeInTheDocument();
+    // The live-scan-only empty states must not show underneath an archive view.
+    expect(screen.queryByText(/Scans up to 600 stocks/)).not.toBeInTheDocument();
+  });
+
+  test('"Back to current run" clears the archive view without ever having touched the live scan state', async () => {
+    mockRoutedFetch();
+    renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), VIEW_HISTORY_SESSION);
+
+    await userEvent.click(await screen.findByTestId('view-archived-runs-link-empty'));
+    await userEvent.click(await screen.findByTestId('run-history-row-r1'));
+    await screen.findByTestId('archived-run-banner');
+
+    await userEvent.click(screen.getByTestId('archived-run-back-to-current'));
+    expect(screen.queryByTestId('archived-run-banner')).not.toBeInTheDocument();
+    expect(screen.queryAllByText('ZZZ')).toHaveLength(0);
+  });
+
+  test('starting a new scan while viewing an archive immediately restores the live view', async () => {
+    mockRoutedFetch();
+    renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), VIEW_HISTORY_SESSION);
+
+    await userEvent.click(await screen.findByTestId('view-archived-runs-link-empty'));
+    await userEvent.click(await screen.findByTestId('run-history-row-r1'));
+    await screen.findByTestId('archived-run-banner');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Run scan' }));
+
+    await waitFor(() => expect(screen.queryByTestId('archived-run-banner')).not.toBeInTheDocument());
+    expect(await screen.findByText('Candidates (1)')).toBeInTheDocument();
+    expect(screen.queryAllByText('ZZZ')).toHaveLength(0); // live batch's own AAA, not the archived ZZZ
+  });
+});

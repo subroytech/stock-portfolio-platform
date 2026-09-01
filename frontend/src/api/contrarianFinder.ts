@@ -187,6 +187,48 @@ export function useLastScanFallback() {
   });
 }
 
+// Run History (2026-08-31) - gated by contrarian_finder:view_history at the
+// route level (a 403 here means the page should never have rendered the
+// entry point that triggers this in the first place). Metadata only, no
+// `results` blob - mirrors LastScanRecord minus results, plus an id to fetch
+// one specific run's full record via useRunHistoryDetail below.
+export interface RunHistoryListItem {
+  id: string;
+  completedAt: string;
+  universeSize: number;
+  scanned: number;
+  params: RunParams;
+}
+
+interface RunHistoryListResponse {
+  runs: RunHistoryListItem[];
+}
+
+// enabled: only fetched once the drawer is actually open - no need to pull
+// the list on every page load for an entry point most sessions won't have.
+export function useRunHistoryList(enabled: boolean) {
+  return useQuery<RunHistoryListResponse>({
+    queryKey: ['contrarianFinder', 'runHistory'],
+    queryFn: () => apiFetch<RunHistoryListResponse>('/contrarian-finder/run-history'),
+    enabled,
+  });
+}
+
+interface RunHistoryDetailResponse {
+  run: LastScanRecord;
+}
+
+// enabled: only fetched once a specific row has actually been clicked - the
+// ~150KB `results` blob per run is exactly what the list call above avoids
+// pulling in bulk.
+export function useRunHistoryDetail(id: string | null) {
+  return useQuery<RunHistoryDetailResponse>({
+    queryKey: ['contrarianFinder', 'runHistory', id],
+    queryFn: () => apiFetch<RunHistoryDetailResponse>(`/contrarian-finder/run-history/${id}`),
+    enabled: id != null,
+  });
+}
+
 // ISO 8601 timestamps compare correctly as plain strings. A missing
 // `candidate` is never an upgrade; a missing `current` means anything real
 // is (covers both "nothing shown yet" and pre-existing sessionStorage

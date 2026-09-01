@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { STRENGTH_LIST_QUERY_KEY, useContrarianBatchScan, useStockUniverse, type ScanResult } from '../api/contrarianFinder';
+import {
+  STRENGTH_LIST_QUERY_KEY, useContrarianBatchScan, useStockUniverse, useRunHistoryDetail,
+  type ScanResult, type RunHistoryListItem,
+} from '../api/contrarianFinder';
 import { ApiError } from '../api/client';
 import { useSession } from '../api/auth';
 import { useApiKeysModal } from '../lib/apiKeysModal';
@@ -10,6 +13,7 @@ import ContrarianFinderResultsTable from '../components/ContrarianFinderResultsT
 import StrengthListTable from '../components/StrengthListTable';
 import StockPreviewChart from '../components/StockPreviewChart';
 import StockUniverseTable from '../components/StockUniverseTable';
+import ContrarianRunHistoryDrawer from '../components/ContrarianRunHistoryDrawer';
 
 const WAIT_SECONDS = 62; // matches the wait between batches in api/contrarianFinder.ts
 
@@ -40,6 +44,11 @@ export default function ContrarianFinderPage() {
   // can't use.
   const { data: session } = useSession();
   const canScan = session?.permissions?.includes('contrarian_finder:scan') ?? false;
+  // Gated Function, zero default grants (the user's own explicit requirement) - hidden
+  // entirely, not disabled, same canScan-style pattern already on this page. The backend
+  // 403s the underlying GETs regardless; this only controls whether the entry point/drawer
+  // ever render at all.
+  const canViewHistory = session?.permissions?.includes('contrarian_finder:view_history') ?? false;
   const [threshold, setThreshold] = useState(25);
   const [batchSize, setBatchSize] = useState(125);
   const [maxBatches, setMaxBatches] = useState(5);
@@ -58,27 +67,44 @@ export default function ContrarianFinderPage() {
   // requires an explicit confirm step first, unlike the primary "Run scan" button.
   const [confirmingMktCapScan, setConfirmingMktCapScan] = useState(false);
 
+  // Run History "archive mode" (2026-08-31) - a separate piece of state from
+  // `scan.data`, never written into it, so viewing an old run can never
+  // clobber the live default view (the user's own explicit requirement).
+  // Starting a new scan or clicking "Back to current run" both just clear
+  // this back to null.
+  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
+  const [archivedRunId, setArchivedRunId] = useState<string | null>(null);
+  const archivedRun = useRunHistoryDetail(archivedRunId);
+  const isArchiveMode = archivedRunId != null;
+  // While a selected archive is still loading, effectiveData intentionally
+  // stays undefined rather than silently falling back to the live scan -
+  // briefly showing the wrong run's data would be worse than a brief loading gap.
+  const effectiveData = isArchiveMode ? archivedRun.data?.run : scan.data;
+
   const candidates = useMemo(
-    () => (scan.data ? filterCandidates(scan.data.results, threshold) : []),
-    [scan.data, threshold],
+    () => (effectiveData ? filterCandidates(effectiveData.results, threshold) : []),
+    [effectiveData, threshold],
   );
   const strengthList = useMemo(
-    () => (scan.data ? scan.data.results.filter((r) => r.strength).sort((a, b) => (b.strength?.kF ?? 0) - (a.strength?.kF ?? 0)) : []),
-    [scan.data],
+    () => (effectiveData ? effectiveData.results.filter((r) => r.strength).sort((a, b) => (b.strength?.kF ?? 0) - (a.strength?.kF ?? 0)) : []),
+    [effectiveData],
   );
   // Every stock shares the same US market calendar, so the first result
   // that has one tells us the whole scan's comparison anchor date.
   const referenceDate = useMemo(() => {
-    const found = scan.data?.results.find((r) => r.changeSinceDate)?.changeSinceDate;
+    const found = effectiveData?.results.find((r) => r.changeSinceDate)?.changeSinceDate;
     return found ? formatDdMmm(found) : null;
-  }, [scan.data]);
+  }, [effectiveData]);
 
+  // Deliberately keyed on scan.data, never effectiveData/archive mode - this
+  // cache is shared cross-page (MomentumPage's own Strength List reuse), so
+  // an archived run's results must never overwrite it. Same "don't disturb
+  // anything outside this one detour" requirement as archive mode itself.
   useEffect(() => {
     if (scan.data) {
-      queryClient.setQueryData(STRENGTH_LIST_QUERY_KEY, strengthList);
+      const liveStrengthList = scan.data.results.filter((r) => r.strength).sort((a, b) => (b.strength?.kF ?? 0) - (a.strength?.kF ?? 0));
+      queryClient.setQueryData(STRENGTH_LIST_QUERY_KEY, liveStrengthList);
     }
-    // Only re-run when the underlying scan data changes, not on every
-    // strengthList recompute (it's derived from scan.data anyway).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scan.data, queryClient]);
 
@@ -137,14 +163,67 @@ export default function ContrarianFinderPage() {
           </div>
         )}
 
+        {/* Archive-mode banner (2026-08-31) - takes over this slot from the
+            "Last scan used" caption below while viewing an archived run, so
+            the two states can never be mistaken for one another. Never
+            touches scan.data/sessionStorage - "Back to current run" is just
+            clearing archivedRunId back to null. */}
+        {isArchiveMode && archivedRun.data?.run && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-card bg-warning/10 p-3 text-xs text-warning" data-testid="archived-run-banner">
+            <p>
+              📁 Viewing an archived run from {formatAsOf(archivedRun.data.run.completedAt)} —{' '}
+              {archivedRun.data.run.params.threshold}% threshold · {archivedRun.data.run.params.scanDays}-day window ·{' '}
+              {archivedRun.data.run.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
+            </p>
+            <div className="flex items-center gap-3">
+              {canViewHistory && (
+                <button type="button" onClick={() => setHistoryDrawerOpen(true)} data-testid="archived-run-view-other" className="font-medium underline hover:no-underline">
+                  🕘 View archived runs
+                </button>
+              )}
+              <button type="button" onClick={() => setArchivedRunId(null)} data-testid="archived-run-back-to-current" className="font-medium underline hover:no-underline">
+                ← Back to current run
+              </button>
+            </div>
+          </div>
+        )}
+
+        {isArchiveMode && archivedRun.isLoading && (
+          <p className="text-xs text-text-secondary">Loading archived run…</p>
+        )}
+
+        {isArchiveMode && archivedRun.isError && (
+          <p className="text-xs text-danger">Could not load that archived run.</p>
+        )}
+
+        {/* Entry point for a session that hasn't seen a live/fallback scan yet
+            in this tab (scan.data is still null) - the "Last scan used" line
+            below never renders in that case, but Run History should still be
+            reachable regardless of whether anything live is currently shown. */}
+        {!isArchiveMode && !scan.data && canViewHistory && (
+          <p className="text-xs">
+            <button type="button" onClick={() => setHistoryDrawerOpen(true)} data-testid="view-archived-runs-link-empty" className="text-accent hover:underline">
+              🕘 View archived runs
+            </button>
+          </p>
+        )}
+
         {/* Last-run details - the read-only record of what actually produced
             the results currently on screen, independent of the (possibly
             since-edited) live form below. Guarded for sessionStorage data
             persisted by an older build of this page, which predates this field. */}
-        {!scan.isPending && scan.data?.params && (
+        {!isArchiveMode && !scan.isPending && scan.data?.params && (
           <p className="text-xs italic text-text-secondary">
             Last scan used: {scan.data.params.threshold}% threshold · {scan.data.params.scanDays}-day window · batch size {scan.data.params.batchSize} · max {scan.data.params.maxBatches} batches · {scan.data.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
             {scan.data.completedAt && <> · run {formatAsOf(scan.data.completedAt)}</>}
+            {canViewHistory && (
+              <>
+                {' '}·{' '}
+                <button type="button" onClick={() => setHistoryDrawerOpen(true)} data-testid="view-archived-runs-link" className="text-accent hover:underline">
+                  🕘 View archived runs
+                </button>
+              </>
+            )}
           </p>
         )}
 
@@ -184,7 +263,7 @@ export default function ContrarianFinderPage() {
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
-                    onClick={() => { setConfirmingMktCapScan(false); scan.run({ threshold, batchSize, maxBatches, qualityPreset, scanDays }); }}
+                    onClick={() => { setConfirmingMktCapScan(false); setArchivedRunId(null); scan.run({ threshold, batchSize, maxBatches, qualityPreset, scanDays }); }}
                     disabled={scan.isPending}
                     className="rounded-btn bg-accent px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
                   >
@@ -215,6 +294,7 @@ export default function ContrarianFinderPage() {
                         type="button"
                         onClick={() => {
                           setConfirmingMktCapScan(false);
+                          setArchivedRunId(null);
                           scan.run({ threshold, batchSize, maxBatches, qualityPreset, scanDays, updateAllTickerData: true });
                         }}
                         className="font-medium text-amber-700 hover:underline"
@@ -293,7 +373,7 @@ export default function ContrarianFinderPage() {
           )}
         </div>
 
-        {canScan && !scan.data && !scan.isPending && !scan.isError && (
+        {!isArchiveMode && canScan && !scan.data && !scan.isPending && !scan.isError && (
           <div className="rounded-card bg-bg-card p-4 shadow-card text-sm text-text-secondary">
             <p>
               Scans up to 600 stocks across the Dow 30, Nasdaq-100, S&amp;P 500 Top 400, and 11
@@ -304,13 +384,13 @@ export default function ContrarianFinderPage() {
           </div>
         )}
 
-        {!canScan && !scan.data && (
+        {!isArchiveMode && !canScan && !scan.data && (
           <div className="rounded-card bg-bg-card p-4 shadow-card text-sm text-text-secondary">
             <p>No scan results yet. Once someone with access runs a scan, results will appear here for you to filter and browse.</p>
           </div>
         )}
 
-        {scan.isError && (
+        {!isArchiveMode && scan.isError && (
           <div className="text-sm text-danger">
             <p>{scan.error instanceof ApiError ? scan.error.message : 'Scan failed.'}</p>
             {missingKeyError && (
@@ -321,10 +401,10 @@ export default function ContrarianFinderPage() {
           </div>
         )}
 
-        {scan.data && (
+        {effectiveData && (
           <>
             <p className="text-sm text-text-secondary">
-              Scanned {scan.data.scanned} of {scan.data.universeSize} tickers · {candidates.length} candidates at ≥{threshold}% drop
+              Scanned {effectiveData.scanned} of {effectiveData.universeSize} tickers · {candidates.length} candidates at ≥{threshold}% drop
               {referenceDate && <> · considering price since {referenceDate}</>}
             </p>
 
@@ -364,6 +444,13 @@ export default function ContrarianFinderPage() {
       </main>
 
       {previewSymbol && <StockPreviewChart symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />}
+      {canViewHistory && (
+        <ContrarianRunHistoryDrawer
+          isOpen={historyDrawerOpen}
+          onClose={() => setHistoryDrawerOpen(false)}
+          onSelectRun={(run: RunHistoryListItem) => { setArchivedRunId(run.id); setHistoryDrawerOpen(false); }}
+        />
+      )}
     </>
   );
 }
