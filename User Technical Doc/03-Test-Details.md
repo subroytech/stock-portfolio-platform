@@ -126,22 +126,37 @@ and neither substitutes for the other.
 
 ---
 
-## 3.6 Current state (as of 2026-08-30)
+## 3.6 Current state (as of 2026-08-31)
 
 - All four CI jobs (backend, frontend, analysis-service, e2e) have been green together
   multiple times (see `CLAUDE.md`'s "Contrarian Finder Stock Universe" entry onward).
 - The Flex upload feature's manual QA pass (`Manual-TestScript/
   portfolio-upload-flex-test-plan.md`) is complete — 3 real bugs were found and fixed during
   that pass, and all throwaway test accounts/data were cleaned up afterward.
-- Self-Registration, Password Policy & Security-Question Recovery (new since the last update
-  to this doc) is built, fully tested (678 backend / 398 frontend tests), and live-verified
-  across all three build rounds — core flow, the selectable-questions/dropdown redesign, and the
-  7→5 question-count reduction (Forgot Password's challenge dropped 4-of-7 → 3-of-5 in step) —
-  against the real dev database with throwaway accounts, cleaned up after each. See
-  `CLAUDE.md`'s section of the same name for full detail, including the two real bugs found
+- Self-Registration, Password Policy & Security-Question Recovery is built, fully tested, and
+  live-verified across all three build rounds — core flow, the selectable-questions/dropdown
+  redesign, and the 7→5 question-count reduction (Forgot Password's challenge dropped 4-of-7 →
+  3-of-5 in step) — against the real dev database with throwaway accounts, cleaned up after each.
+  See `CLAUDE.md`'s section of the same name for full detail, including the two real bugs found
   during its build — one of which (§3.2's callout above, `tsc -b` vs. plain `tsc`) is worth
   reading regardless of whether you touch this feature, since it affects how frontend
   typechecking should be run going forward in this repo.
+- **Real bug found+fixed 2026-08-31, reported live**: a wrong current password on Change
+  Password (or Manage Security Questions) was force-logging the user out with a "Your session
+  ended" message — that check reused the same `401` status the frontend's global session-expiry
+  handler treats as "the login itself is invalid." Fixed across all 5 affected responses
+  (Change Password, Manage Security Questions, and Forgot Password's 3 failure cases) to return
+  `400` instead. New regression test in `client.test.ts` exercises the real `apiFetch`, not a
+  mock of it — the existing per-page tests all mocked `apiFetch` directly, which is exactly why
+  this shipped uncaught.
+- Contrarian Finder Run History (new) is built and live-verified against the real dev database's
+  actual stored run history — a new `contrarian_finder:view_history` permission (zero default
+  grants) gates a non-destructive "browse an old run" side panel. Confirmed live: `403` before
+  granting the permission, `200` with the real run list and no `results` blob in the list
+  payload, a real run's full detail matching its own `scanned` count, and a `404` on an unknown
+  id.
+- **689 backend / 413 frontend tests passing** (up from 678/398 before this update), `tsc`/lint
+  clean both sides using the corrected `tsc -b` command.
 - Known gap, still open: **"Login-as" impersonation is built and fully test-covered, but its
   own live two-real-account walkthrough hasn't been run yet** — see `Architecture.md`
   Section 2 for the exact checklist (banner correctness, clean return-to-admin, blocked

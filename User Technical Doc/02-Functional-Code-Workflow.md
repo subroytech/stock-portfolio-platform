@@ -248,7 +248,7 @@ not a one-off fix — new tunable values can be added the same way going forward
 | Portfolio Dashboard (Legacy) | `DashboardPage.tsx` | `portfolio.routes.ts` | `portfolio.service.ts`, `parser.service.ts` |
 | Portfolio Dashboard (Flex) | `FlexPortfolioPage.tsx` | `portfolioTemplate.routes.ts`, `portfolio.routes.ts` | `flexParser.service.ts`, `portfolioTemplate.service.ts`, `portfolio.service.ts` |
 | API Keys | (modal, `apiKeysModal.ts`) | `userSubscription.routes.ts` | `userSubscription.service.ts`, `encryption.ts` |
-| Contrarian Finder | `ContrarianFinderPage.tsx` | `contrarianFinder.routes.ts` | `contrarianFinder.service.ts` (+ Python `contrarian_finder.py`) |
+| Contrarian Finder (+ Run History) | `ContrarianFinderPage.tsx`, `ContrarianRunHistoryDrawer.tsx` | `contrarianFinder.routes.ts` (`/run-history`, `/run-history/:id`, gated by `contrarian_finder:view_history`) | `contrarianFinder.service.ts` (`listRunHistory`/`getRunById`) (+ Python `contrarian_finder.py`) |
 | Momentum | `MomentumPage.tsx` | `momentum.routes.ts` | `momentum.service.ts` (+ Python `momentum.py`) |
 | Long-Term Analysis | `LongTermAnalysisPage.tsx` | `analysis.routes.ts` | `longTermAnalysisData.service.ts` (+ Python `long_term.py`) |
 | Contrarian Comeback | `ContrarianComebackPage.tsx` | `analysis.routes.ts` | `contrarianComebackData.service.ts` (+ Python) |
