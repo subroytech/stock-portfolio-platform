@@ -1,10 +1,22 @@
-jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn() } }));
+jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
+// Partial mock (keeps the real AnalysisServiceError class so `instanceof`
+// checks elsewhere survive) — only computeContrarianFinderScanBatch itself
+// is replaced, same pattern as every other analysisService-consuming test.
+jest.mock('../src/services/analysisService', () => ({
+  ...jest.requireActual('../src/services/analysisService'),
+  computeContrarianFinderScanBatch: jest.fn(),
+}));
 import { pool } from '../src/db/pool';
+import * as analysisService from '../src/services/analysisService';
 import {
   buildBatches, filterCandidates, resolveQuality, assembleUniverse, scanStock, scanBatch,
+  fetchStockData, assembleScanBatch, getUniverseTable, refreshTickerDataBatch,
+  saveLastScan, getLastScan, listRunHistory, getRunById, CF_MAX,
 } from '../src/services/contrarianFinder.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
+const mockConnect = pool.connect as unknown as jest.Mock;
+const mockComputeScanBatch = analysisService.computeContrarianFinderScanBatch as jest.Mock;
 
 // Small fixture standing in for the seeded index_constituent table - enough
 // symbols per index to exercise dedup across tiers (AAPL in both DJ30/XLK)
@@ -90,6 +102,327 @@ describe('assembleUniverse', () => {
     for (const call of mockQuery.mock.calls) {
       expect(call[0]).toMatch(/ORDER BY/i);
     }
+  });
+
+  test('stops adding once the running (deduped) total hits CF_MAX, even mid-tier', async () => {
+    // Enough unique symbols across tiers to exceed CF_MAX (600) well before
+    // the ETF loop finishes - proves the raised cap actually takes effect at
+    // runtime, not just that the constant compiles to a new value.
+    mockQuery.mockImplementation((_text: string, params: string[]) => {
+      const indexId = params[0];
+      const perIndexCount: Record<string, number> = {
+        DJ30: 30, NDX100: 100, SP500: 400, XLK: 100, XLV: 100,
+        XLF: 100, XLY: 100, XLI: 100, XLC: 100, XLP: 100, XLE: 100, XLB: 100, XLU: 100, XLRE: 100,
+      };
+      const count = perIndexCount[indexId] ?? 0;
+      const rows = Array.from({ length: count }, (_, i) => ({ symbol: `${indexId}_${i}` }));
+      return Promise.resolve({ rows });
+    });
+
+    const universe = await assembleUniverse();
+    expect(universe.length).toBe(CF_MAX);
+    const symbols = universe.map((u) => u.symbol);
+    expect(new Set(symbols).size).toBe(CF_MAX); // no duplicates even at the cap boundary
+  });
+});
+
+describe('getUniverseTable', () => {
+  test('returns indices in the fixed canonical order (not DB row order) and stocks sorted by index count desc', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [
+          { index_id: 'XLK', index_description: 'Technology Select Sector SPDR Fund' },
+          { index_id: 'DJ30', index_description: 'Dow Jones Industrial Average' },
+          { index_id: 'SP500', index_description: 'S&P 500 Index' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { symbol: 'AAPL', name: 'Apple Inc.', sector: 'Technology', market_cap: '3000000000000', index_ids: ['DJ30', 'SP500', 'XLK'] },
+          { symbol: 'ZOOM', name: null, sector: null, market_cap: null, index_ids: ['SP500'] },
+          { symbol: 'BETA', name: 'Beta Co', sector: 'Finance', market_cap: null, index_ids: ['DJ30', 'SP500'] },
+        ],
+      });
+
+    const result = await getUniverseTable();
+
+    // Canonical order (DJ30, NDX100, SP500, then CF_ETF_LIST) - the mocked DB rows above
+    // arrive in a different order (XLK, DJ30, SP500) to prove this isn't just passthrough.
+    expect(result.indices.map((i) => i.id)).toEqual(['DJ30', 'SP500', 'XLK']);
+
+    // AAPL (3 indices) first, then BETA (2), then ZOOM (1) - descending by membership count.
+    expect(result.stocks.map((s) => s.symbol)).toEqual(['AAPL', 'BETA', 'ZOOM']);
+    // market_cap comes back from pg as a string (NUMERIC) - confirms it's coerced to a number.
+    expect(result.stocks[0]).toEqual({ symbol: 'AAPL', name: 'Apple Inc.', sector: 'Technology', marketCap: 3000000000000, indices: ['DJ30', 'SP500', 'XLK'] });
+  });
+
+  test('ties in index count are broken by symbol ascending', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ index_id: 'DJ30', index_description: 'Dow Jones Industrial Average' }] })
+      .mockResolvedValueOnce({
+        rows: [
+          { symbol: 'ZZZ', name: null, sector: null, index_ids: ['DJ30'] },
+          { symbol: 'AAA', name: null, sector: null, index_ids: ['DJ30'] },
+        ],
+      });
+
+    const result = await getUniverseTable();
+    expect(result.stocks.map((s) => s.symbol)).toEqual(['AAA', 'ZZZ']);
+  });
+
+  test('a stock with no m_tickers row gets name/sector/marketCap null rather than crashing (LEFT JOIN, not INNER)', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ symbol: 'NEW', name: null, sector: null, market_cap: null, index_ids: ['DJ30'] }] });
+
+    const result = await getUniverseTable();
+    expect(result.stocks[0]).toEqual({ symbol: 'NEW', name: null, sector: null, marketCap: null, indices: ['DJ30'] });
+  });
+});
+
+describe('refreshTickerDataBatch', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+
+  function mockProfiles(bySymbol: Record<string, { companyName?: string; sector?: string; marketCap?: number }>) {
+    global.fetch = jest.fn((url: string) => {
+      const symbol = new URL(url).searchParams.get('symbol') ?? '';
+      const p = bySymbol[symbol];
+      return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(p ? [p] : []) });
+    }) as unknown as typeof fetch;
+  }
+
+  const stocks = [
+    { symbol: 'AAPL', tier: 1, source: 'DJ30' },
+    { symbol: 'ZZZ', tier: 3, source: 'S&P 500' },
+  ];
+
+  test('mode "all" refreshes every symbol in the batch regardless of current m_tickers state (no DB query to filter first)', async () => {
+    mockQuery.mockReset();
+    mockProfiles({
+      AAPL: { companyName: 'Apple Inc.', sector: 'Technology', marketCap: 3e12 },
+      ZZZ: { companyName: 'Zzz Co', sector: 'Finance', marketCap: 1e9 },
+    });
+
+    const result = await refreshTickerDataBatch(stocks, 'fake-key', 'all');
+
+    expect(result).toEqual({ updated: 2, skipped: 0 });
+    // Only the upsert query ran - no "which symbols are missing" lookup for mode 'all'.
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    const [sql, params] = mockQuery.mock.calls[0];
+    expect(sql).toContain('ON CONFLICT (symbol) DO UPDATE');
+    expect(params).toEqual(['AAPL', 'Apple Inc.', 'Technology', 3e12, 'ZZZ', 'Zzz Co', 'Finance', 1e9]);
+  });
+
+  test('mode "missing" only fetches/upserts symbols the DB reports as missing (has no row, or a null field)', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [{ symbol: 'ZZZ' }] }); // only ZZZ is missing - AAPL is already fully populated
+    mockProfiles({ ZZZ: { companyName: 'Zzz Co', sector: 'Finance', marketCap: 1e9 } });
+
+    const result = await refreshTickerDataBatch(stocks, 'fake-key', 'missing');
+
+    expect(result).toEqual({ updated: 1, skipped: 1 });
+    expect(mockQuery).toHaveBeenCalledTimes(2); // the missing-lookup, then the upsert
+    const upsertParams = mockQuery.mock.calls[1][1];
+    expect(upsertParams).toEqual(['ZZZ', 'Zzz Co', 'Finance', 1e9]); // AAPL never even queried from FMP
+  });
+
+  test('mode "missing" with nothing missing skips the FMP call and upsert entirely', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // nothing missing
+    const fetchSpy = jest.fn();
+    global.fetch = fetchSpy as unknown as typeof fetch;
+
+    const result = await refreshTickerDataBatch(stocks, 'fake-key', 'missing');
+
+    expect(result).toEqual({ updated: 0, skipped: 2 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledTimes(1); // only the missing-lookup, no upsert
+  });
+
+  test('a symbol FMP has no profile data for is counted as skipped, not upserted with blank values', async () => {
+    mockQuery.mockReset();
+    mockProfiles({ AAPL: { companyName: 'Apple Inc.', sector: 'Technology', marketCap: 3e12 } }); // ZZZ absent
+    const result = await refreshTickerDataBatch(stocks, 'fake-key', 'all');
+    expect(result).toEqual({ updated: 1, skipped: 1 });
+  });
+});
+
+describe('saveLastScan / getLastScan', () => {
+  const params = { threshold: 25, batchSize: 125, maxBatches: 3, qualityPreset: 'standard', scanDays: 7 };
+  const results = [{ symbol: 'AAPL', filterFail: false }];
+
+  test('admin tier: inserts a new history row, then prunes back to the DB-configured retention count', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: '60' }] }); // getConfigInt's config-value read
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
+
+    await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
+
+    expect(mockQuery).toHaveBeenCalledTimes(3);
+    const [insertSql, insertParams] = mockQuery.mock.calls[1];
+    expect(insertSql).toContain('INSERT INTO tx_shared_contrarian_run');
+    expect(insertSql).toContain("'admin'");
+    expect(insertParams).toEqual(['user-1', 348, 348, JSON.stringify(params), JSON.stringify(results)]);
+
+    const [pruneSql, pruneParams] = mockQuery.mock.calls[2];
+    expect(pruneSql).toContain('DELETE FROM tx_shared_contrarian_run');
+    expect(pruneSql).toContain("run_tier = 'admin'");
+    expect(pruneParams).toEqual([60]);
+    expect(mockConnect).not.toHaveBeenCalled(); // admin tier never opens a transaction
+  });
+
+  test('admin tier: prunes using a non-default DB-configured retention count', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: '15' }] });
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
+
+    await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
+
+    const [, pruneParams] = mockQuery.mock.calls[2];
+    expect(pruneParams).toEqual([15]);
+  });
+
+  test('admin tier: falls back to 60 when no retention value is configured', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no active config row
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
+
+    await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
+
+    const [, pruneParams] = mockQuery.mock.calls[2];
+    expect(pruneParams).toEqual([60]);
+  });
+
+  test('admin tier: falls back to 60 when the configured retention value is unparseable', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [{ value: 'not-a-number' }] });
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
+
+    await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
+
+    const [, pruneParams] = mockQuery.mock.calls[2];
+    expect(pruneParams).toEqual([60]);
+  });
+
+  test('user tier: upserts exactly one row per user via a transactional delete+insert, not a plain INSERT', async () => {
+    const client = { query: jest.fn().mockResolvedValue({ rows: [] }), release: jest.fn() };
+    mockConnect.mockReset();
+    mockConnect.mockResolvedValue(client);
+
+    await saveLastScan('user-2', 'user', { universeSize: 100, scanned: 100, params, results });
+
+    expect(mockConnect).toHaveBeenCalledTimes(1);
+    expect(client.query).toHaveBeenNthCalledWith(1, 'BEGIN');
+    const [deleteSql, deleteParams] = client.query.mock.calls[1];
+    expect(deleteSql).toContain('DELETE FROM tx_shared_contrarian_run');
+    expect(deleteSql).toContain("run_tier = 'user'");
+    expect(deleteParams).toEqual(['user-2']);
+    const [insertSql, insertParams] = client.query.mock.calls[2];
+    expect(insertSql).toContain('INSERT INTO tx_shared_contrarian_run');
+    expect(insertSql).toContain("'user'");
+    expect(insertParams).toEqual(['user-2', 100, 100, JSON.stringify(params), JSON.stringify(results)]);
+    expect(client.query).toHaveBeenNthCalledWith(4, 'COMMIT');
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  test('user tier: rolls back and releases the client if the transaction fails partway', async () => {
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce(undefined) // DELETE
+        .mockRejectedValueOnce(new Error('insert exploded')) // INSERT
+        .mockResolvedValueOnce(undefined), // ROLLBACK
+      release: jest.fn(),
+    };
+    mockConnect.mockReset();
+    mockConnect.mockResolvedValue(client);
+
+    await expect(saveLastScan('user-3', 'user', { universeSize: 1, scanned: 1, params, results }))
+      .rejects.toThrow('insert exploded');
+
+    expect(client.query).toHaveBeenNthCalledWith(4, 'ROLLBACK');
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  test('getLastScan returns null when no run has ever been saved', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const result = await getLastScan();
+    expect(result).toBeNull();
+  });
+
+  test('getLastScan returns the most recent row, camelCased', async () => {
+    mockQuery.mockReset();
+    const params = { threshold: 25 };
+    const results = [{ symbol: 'AAPL', filterFail: false }];
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ completed_at: '2026-08-04T10:00:00Z', universe_size: 348, scanned: 348, params, results }],
+    });
+
+    const result = await getLastScan();
+    expect(result).toEqual({ completedAt: '2026-08-04T10:00:00Z', universeSize: 348, scanned: 348, params, results });
+
+    // ORDER BY completed_at DESC LIMIT 1 - "the last scan" is always just the most recent row.
+    const [sql] = mockQuery.mock.calls[0];
+    expect(sql).toContain('ORDER BY completed_at DESC LIMIT 1');
+  });
+});
+
+describe('listRunHistory / getRunById', () => {
+  test('listRunHistory returns metadata only, newest first, no results blob', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        { id: '2', completed_at: '2026-08-31T10:00:00Z', universe_size: '458', scanned: '458', params: { threshold: 25 } },
+        { id: '1', completed_at: '2026-08-29T10:00:00Z', universe_size: '458', scanned: '450', params: { threshold: 30 } },
+      ],
+    });
+
+    const result = await listRunHistory();
+    expect(result).toEqual([
+      { id: '2', completedAt: '2026-08-31T10:00:00Z', universeSize: 458, scanned: 458, params: { threshold: 25 } },
+      { id: '1', completedAt: '2026-08-29T10:00:00Z', universeSize: 458, scanned: 450, params: { threshold: 30 } },
+    ]);
+
+    const [sql] = mockQuery.mock.calls[0];
+    expect(sql).toContain('ORDER BY completed_at DESC');
+    expect(sql).not.toContain('results');
+  });
+
+  test('listRunHistory returns an empty array when nothing has ever been saved', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    expect(await listRunHistory()).toEqual([]);
+  });
+
+  test('getRunById returns null for an unknown id', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    expect(await getRunById('999')).toBeNull();
+  });
+
+  test('getRunById returns the full record (including results) for a real id', async () => {
+    mockQuery.mockReset();
+    const params = { threshold: 25 };
+    const results = [{ symbol: 'AAPL', filterFail: false }];
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ completed_at: '2026-08-29T10:00:00Z', universe_size: '458', scanned: '450', params, results }],
+    });
+
+    const result = await getRunById('1');
+    expect(result).toEqual({ completedAt: '2026-08-29T10:00:00Z', universeSize: 458, scanned: 450, params, results });
+
+    const [sql, values] = mockQuery.mock.calls[0];
+    expect(sql).toContain('WHERE id = $1');
+    expect(values).toEqual(['1']);
   });
 });
 
@@ -232,5 +565,108 @@ describe('scanBatch — sector backfill', () => {
     await scanBatch(stocks, 'key', { minPrice: 10, minMarketCap: 5e9 });
 
     expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('fetchStockData', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+
+  function mockQuoteAndHistory(quote: unknown, historical: unknown) {
+    global.fetch = jest.fn((url: string) => {
+      if (url.includes('historical-price-eod')) {
+        return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(historical) });
+      }
+      return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(quote) });
+    }) as unknown as typeof fetch;
+  }
+
+  test('normalizes a raw FMP quote/history response into RawStockData, with no scoring', async () => {
+    mockQuoteAndHistory(
+      { price: 100, marketCap: 1e10, name: 'Test Co', sector: 'Technology', volume: 1000, avgVolume: 800 },
+      [{ date: '2026-06-20', close: '100.5', low: '99.5' }],
+    );
+    const data = await fetchStockData('TEST', 'key', 7);
+    expect(data.symbol).toBe('TEST');
+    expect(data.quote).toEqual({ price: 100, marketCap: 1e10, name: 'Test Co', sector: 'Technology', volume: 1000, avgVolume: 800 });
+    expect(data.historicalBars).toEqual([{ date: '2026-06-20', close: 100.5, low: 99.5 }]);
+  });
+
+  test('keeps the same bar count even when close/low fail to parse (null, not dropped)', async () => {
+    mockQuoteAndHistory({ price: 100, marketCap: 1e10 }, [{ date: '2026-06-20', close: 'not-a-number', low: null }]);
+    const data = await fetchStockData('BADDATA', 'key', 7);
+    expect(data.historicalBars).toHaveLength(1);
+    expect(data.historicalBars[0]).toEqual({ date: '2026-06-20', close: null, low: null });
+  });
+
+  test('quote is null when the quote fetch fails entirely', async () => {
+    global.fetch = jest.fn((url: string) => (url.includes('historical-price-eod')
+      ? Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve([]) })
+      : Promise.reject(new Error('network error')))) as unknown as typeof fetch;
+    const data = await fetchStockData('NOQUOTE', 'key', 7);
+    expect(data.quote).toBeNull();
+    expect(data.historicalBars).toEqual([]);
+  });
+});
+
+describe('assembleScanBatch', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+
+  beforeEach(() => {
+    mockComputeScanBatch.mockReset();
+    global.fetch = jest.fn().mockResolvedValue({
+      status: 200, ok: true, json: () => Promise.resolve({ price: 100, marketCap: 1e10 }),
+    }) as unknown as typeof fetch;
+  });
+
+  test('sends the whole batch to analysis-service in one call and overlays sector-map fallback + source', async () => {
+    mockQuery.mockResolvedValue({ rows: [{ symbol: 'AAPL', sector: 'Technology' }] });
+    mockComputeScanBatch.mockResolvedValue([
+      { symbol: 'AAPL', filterFail: false, noData: false, changePct: -10, sector: '' },
+      { symbol: 'ZZZZ', filterFail: false, noData: false, changePct: -12, sector: '' },
+    ]);
+
+    const stocks = [
+      { symbol: 'AAPL', tier: 1, source: 'DJ30' },
+      { symbol: 'ZZZZ', tier: 1, source: 'DJ30' },
+    ];
+    const results = await assembleScanBatch(stocks, 'key', { minPrice: 10, minMarketCap: 5e9 });
+
+    expect(mockComputeScanBatch).toHaveBeenCalledTimes(1);
+    expect(results.find((r) => r.symbol === 'AAPL')?.sector).toBe('Technology'); // DB overlay
+    expect(results.find((r) => r.symbol === 'ZZZZ')?.sector).toBeFalsy(); // outside curated set
+    expect(results.every((r) => r.source === 'DJ30')).toBe(true);
+  });
+
+  test('a stock whose FMP calls both fail still gets sent to analysis-service, with a null quote/empty history', async () => {
+    mockQuery.mockResolvedValue({ rows: [] });
+    global.fetch = jest.fn().mockRejectedValue(new Error('network error')) as unknown as typeof fetch;
+    mockComputeScanBatch.mockImplementation(({ stocks: sent }) => Promise.resolve(
+      sent.map((s: { symbol: string }) => ({ symbol: s.symbol, filterFail: true })),
+    ));
+
+    const stocks = [{ symbol: 'DOWN', tier: 1, source: 'TEST' }];
+    await assembleScanBatch(stocks, 'key', { minPrice: 10, minMarketCap: 5e9 });
+
+    expect(mockComputeScanBatch).toHaveBeenCalledTimes(1);
+    const sentStocks = mockComputeScanBatch.mock.calls[0][0].stocks;
+    expect(sentStocks).toEqual([{ symbol: 'DOWN', quote: null, historicalBars: [] }]);
+  });
+
+  test('skips the analysis-service call entirely for an empty batch', async () => {
+    const results = await assembleScanBatch([], 'key', { minPrice: 10, minMarketCap: 5e9 });
+    expect(mockComputeScanBatch).not.toHaveBeenCalled();
+    expect(results).toEqual([]);
+  });
+
+  test('a symbol missing from the analysis-service response falls back to an error result', async () => {
+    mockQuery.mockResolvedValue({ rows: [] });
+    mockComputeScanBatch.mockResolvedValue([]); // Python returned nothing for the one stock sent
+
+    const stocks = [{ symbol: 'DROPPED', tier: 1, source: 'TEST' }];
+    const results = await assembleScanBatch(stocks, 'key', { minPrice: 10, minMarketCap: 5e9 });
+
+    expect(results).toEqual([{ symbol: 'DROPPED', filterFail: true, error: true }]);
   });
 });

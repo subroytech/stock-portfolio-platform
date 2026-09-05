@@ -14,6 +14,7 @@
 
 import { fmpGet } from './marketData.service';
 import env from '../config/env';
+import { InvalidTickerError } from '../utils/errors';
 
 // Sector -> SPDR ETF map, ported from CreateStockPortfolioViewWOSkill/js/
 // utils.js's SECTOR_ETF. Keyed by FMP profile.sector (which - unlike
@@ -210,7 +211,7 @@ export async function fetchContrarianComebackData(
   const quote = first<any>(quoteRaw);
 
   if (!profile || !quote) {
-    throw new Error(`No data returned for ${symbol}. Check the ticker symbol or your API key.`);
+    throw new InvalidTickerError(`No data returned for ${symbol}. Check the ticker symbol or your API key.`);
   }
 
   const incomeStatements: IncomeStatementPeriod[] = (Array.isArray(incomeRaw) ? incomeRaw : [])

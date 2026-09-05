@@ -1,7 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import * as portfolioService from '../services/portfolio.service';
 import { parseFile, isRobinhoodTxt } from '../services/parser.service';
+import * as flexParser from '../services/flexParser.service';
+import * as portfolioTemplateService from '../services/portfolioTemplate.service';
 import * as userSubscription from '../services/userSubscription.service';
+import * as usageTracking from '../services/usageTracking.service';
 
 // Every route this controller serves sits behind requireAuth (see app.ts), so
 // req.user is always populated by the time a handler runs.
@@ -145,10 +148,243 @@ export async function importHoldings(req: Request, res: Response, next: NextFunc
   }
 }
 
+// POST /portfolios/flex - Portfolio Upload - Flex creation (CLAUDE.md's "Portfolio Upload -
+// Flex" section). Either uploadTemplateId (an existing template) or columnMapping (a brand
+// new one) must be given.
+const PARSE_ERROR_PATTERN = /CSV appears to be empty|No valid rows found|row .* is out of range|column .* is out of range/;
+
+export async function createFlex(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const {
+    name, broker, uploadTemplateId, columnMapping, headerRowIndex, dataStartColumnIndex,
+    footerMarkerColumnIndex, footerMarkerText, cashConfig,
+    filename, content, dryRun,
+  } = req.body || {};
+  if (typeof content !== 'string' || !content.trim()) {
+    res.status(400).json({ error: 'File content is required.' });
+    return;
+  }
+  const hasTemplateId = typeof uploadTemplateId === 'string' && uploadTemplateId.trim();
+  const hasMapping = columnMapping && typeof columnMapping === 'object' && !Array.isArray(columnMapping);
+  if (!hasTemplateId && !hasMapping) {
+    res.status(400).json({ error: 'Either uploadTemplateId or columnMapping is required.' });
+    return;
+  }
+
+  // Preview only — the "Inspect Data" step of the mapping wizard. Mirrors importHoldings()'s
+  // own dryRun branch: parseFlexCsv() is pure (no DB writes), so this returns before ever
+  // reaching portfolioService.createPortfolioFlex, which is where the real tx_portfolios/
+  // tx_holdings rows get written. Lets a mapping be proven-parseable before any portfolio
+  // (and thus any name) needs to exist yet.
+  if (dryRun === true) {
+    try {
+      let mapping: flexParser.ColumnMapping;
+      let effectiveHeaderRowIndex: number;
+      let effectiveDataStartColumnIndex: number;
+      let effectiveFooterMarkerColumnIndex: number | undefined;
+      let effectiveFooterMarkerText: string | undefined;
+      let effectiveCashConfig: flexParser.CashConfig | undefined;
+      if (hasTemplateId) {
+        const config = await portfolioTemplateService.getTemplateParseConfig(uploadTemplateId.trim());
+        mapping = config.columnMapping;
+        effectiveHeaderRowIndex = config.headerRowIndex;
+        effectiveDataStartColumnIndex = config.dataStartColumnIndex;
+        effectiveFooterMarkerColumnIndex = config.footerMarkerColumnIndex ?? undefined;
+        effectiveFooterMarkerText = config.footerMarkerText ?? undefined;
+        effectiveCashConfig = config.cashConfig ?? undefined;
+      } else {
+        flexParser.assertWithinTemplateSampleLimit(content);
+        mapping = columnMapping;
+        effectiveHeaderRowIndex = typeof headerRowIndex === 'number' ? headerRowIndex : 1;
+        effectiveDataStartColumnIndex = typeof dataStartColumnIndex === 'number' ? dataStartColumnIndex : 1;
+        effectiveFooterMarkerColumnIndex = typeof footerMarkerColumnIndex === 'number' ? footerMarkerColumnIndex : undefined;
+        effectiveFooterMarkerText = typeof footerMarkerText === 'string' ? footerMarkerText : undefined;
+        effectiveCashConfig = flexParser.coerceCashConfig(cashConfig);
+      }
+      const parsed = flexParser.parseFlexCsv(content, mapping, {
+        headerRowIndex: effectiveHeaderRowIndex,
+        dataStartColumnIndex: effectiveDataStartColumnIndex,
+        footerMarkerColumnIndex: effectiveFooterMarkerColumnIndex,
+        footerMarkerText: effectiveFooterMarkerText,
+        cashConfig: effectiveCashConfig,
+      });
+      res.json({ preview: true, holdings: parsed.data, cashAmount: parsed.cashAmount, errors: parsed.errors });
+    } catch (err) {
+      if (err instanceof portfolioTemplateService.TemplateNotFoundError) {
+        res.status(404).json({ error: err.message });
+        return;
+      }
+      if (err instanceof flexParser.FlexMappingMismatchError || err instanceof flexParser.TemplateSampleTooLargeError) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      if (err instanceof Error && PARSE_ERROR_PATTERN.test(err.message)) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      next(err);
+    }
+    return;
+  }
+
+  if (typeof name !== 'string' || !name.trim()) {
+    res.status(400).json({ error: 'A portfolio name is required.' });
+    return;
+  }
+
+  try {
+    const result = await portfolioService.createPortfolioFlex(getUserId(req), {
+      name: name.trim(),
+      broker: broker ?? null,
+      uploadTemplateId: hasTemplateId ? uploadTemplateId.trim() : undefined,
+      columnMapping: hasMapping ? columnMapping : undefined,
+      headerRowIndex: typeof headerRowIndex === 'number' ? headerRowIndex : undefined,
+      dataStartColumnIndex: typeof dataStartColumnIndex === 'number' ? dataStartColumnIndex : undefined,
+      footerMarkerColumnIndex: typeof footerMarkerColumnIndex === 'number' ? footerMarkerColumnIndex : undefined,
+      footerMarkerText: typeof footerMarkerText === 'string' ? footerMarkerText : undefined,
+      cashConfig: flexParser.coerceCashConfig(cashConfig),
+      filename: typeof filename === 'string' ? filename : '',
+      content,
+    });
+    res.status(201).json(result);
+  } catch (err) {
+    if (err instanceof portfolioService.PortfolioNameConflictError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof portfolioTemplateService.TemplateNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof flexParser.FlexMappingMismatchError || err instanceof flexParser.TemplateSampleTooLargeError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    if (err instanceof Error && PARSE_ERROR_PATTERN.test(err.message)) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    next(err);
+  }
+}
+
+// POST /portfolios/:id/flex-template - the forced Save Template action, only valid while the
+// portfolio is genuinely unresolved ('Flex-Err').
+export async function saveFlexTemplate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const {
+    templateName, columnMapping, samplePreview, headerRowIndex, dataStartColumnIndex,
+    footerMarkerColumnIndex, footerMarkerText, cashConfig,
+    howToUseDescription,
+  } = req.body || {};
+  if (typeof templateName !== 'string' || !templateName.trim()) {
+    res.status(400).json({ error: 'A templateName is required.' });
+    return;
+  }
+  if (!columnMapping || typeof columnMapping !== 'object' || Array.isArray(columnMapping)) {
+    res.status(400).json({ error: 'A columnMapping object is required.' });
+    return;
+  }
+
+  try {
+    const result = await portfolioService.saveFlexTemplate(getUserId(req), getIdParam(req), {
+      templateName,
+      columnMapping,
+      samplePreview,
+      headerRowIndex: typeof headerRowIndex === 'number' ? headerRowIndex : 1,
+      dataStartColumnIndex: typeof dataStartColumnIndex === 'number' ? dataStartColumnIndex : 1,
+      footerMarkerColumnIndex: typeof footerMarkerColumnIndex === 'number' ? footerMarkerColumnIndex : null,
+      footerMarkerText: typeof footerMarkerText === 'string' ? footerMarkerText : null,
+      cashConfig: flexParser.coerceCashConfig(cashConfig) ?? null,
+      howToUseDescription: typeof howToUseDescription === 'string' ? howToUseDescription : undefined,
+    });
+    res.json(result);
+  } catch (err) {
+    if (err instanceof portfolioService.PortfolioNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof portfolioService.FlexTemplateStateError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof portfolioTemplateService.InvalidTemplateNameError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    if (err instanceof portfolioTemplateService.DuplicateTemplateNameError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    next(err);
+  }
+}
+
+// PUT /portfolios/:id/flex-template - change an already-resolved portfolio's bound template.
+// Always re-imports against the new mapping/template first.
+export async function changeFlexTemplate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const {
+    uploadTemplateId, columnMapping, headerRowIndex, dataStartColumnIndex,
+    footerMarkerColumnIndex, footerMarkerText, cashConfig,
+    filename, content,
+  } = req.body || {};
+  if (typeof content !== 'string' || !content.trim()) {
+    res.status(400).json({ error: 'File content is required.' });
+    return;
+  }
+  const hasTemplateId = typeof uploadTemplateId === 'string' && uploadTemplateId.trim();
+  const hasMapping = columnMapping && typeof columnMapping === 'object' && !Array.isArray(columnMapping);
+  if (!hasTemplateId && !hasMapping) {
+    res.status(400).json({ error: 'Either uploadTemplateId or columnMapping is required.' });
+    return;
+  }
+
+  try {
+    const result = await portfolioService.changeFlexTemplate(getUserId(req), getIdParam(req), {
+      uploadTemplateId: hasTemplateId ? uploadTemplateId.trim() : undefined,
+      columnMapping: hasMapping ? columnMapping : undefined,
+      headerRowIndex: typeof headerRowIndex === 'number' ? headerRowIndex : undefined,
+      dataStartColumnIndex: typeof dataStartColumnIndex === 'number' ? dataStartColumnIndex : undefined,
+      footerMarkerColumnIndex: typeof footerMarkerColumnIndex === 'number' ? footerMarkerColumnIndex : undefined,
+      footerMarkerText: typeof footerMarkerText === 'string' ? footerMarkerText : undefined,
+      cashConfig: flexParser.coerceCashConfig(cashConfig),
+      filename: typeof filename === 'string' ? filename : '',
+      content,
+    });
+    res.json(result);
+  } catch (err) {
+    if (err instanceof portfolioService.PortfolioNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof portfolioService.FlexTemplateStateError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof flexParser.TemplateSampleTooLargeError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    if (err instanceof portfolioTemplateService.TemplateNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof flexParser.FlexMappingMismatchError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    if (err instanceof Error && PARSE_ERROR_PATTERN.test(err.message)) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    next(err);
+  }
+}
+
 export async function refreshPrices(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const holdings = await portfolioService.refreshPrices(getUserId(req), getIdParam(req));
-    res.json({ holdings });
+    const userId = getUserId(req);
+    const result = await portfolioService.refreshPrices(userId, getIdParam(req));
+    usageTracking.logUsage(userId, 'portfolio_refresh').catch((e) => console.error('usage log failed', e));
+    res.json(result);
   } catch (err) {
     if (err instanceof portfolioService.PortfolioNotFoundError) {
       res.status(404).json({ error: err.message });

@@ -13,6 +13,7 @@
 
 import { fmpGet } from './marketData.service';
 import env from '../config/env';
+import { InvalidTickerError } from '../utils/errors';
 
 export interface IncomeStatementPeriod {
   fiscalYear: string | null;
@@ -237,7 +238,7 @@ export async function fetchLongTermAnalysisData(
   ]);
 
   if (!profile || !quote) {
-    throw new Error(`No data returned for ${symbol}. Check the ticker symbol or your API key.`);
+    throw new InvalidTickerError(`No data returned for ${symbol}. Check the ticker symbol or your API key.`);
   }
 
   return {

@@ -17,12 +17,15 @@ jest.mock('../src/services/userSubscription.service', () => ({
   ...jest.requireActual('../src/services/userSubscription.service'),
   getDecryptedKey: jest.fn(),
 }));
+jest.mock('../src/services/usageTracking.service');
 
 import request from 'supertest';
 import * as analysisService from '../src/services/analysisService';
 import * as longTermAnalysisData from '../src/services/longTermAnalysisData.service';
 import * as contrarianComebackData from '../src/services/contrarianComebackData.service';
 import * as userSubscription from '../src/services/userSubscription.service';
+import * as usageTracking from '../src/services/usageTracking.service';
+import { InvalidTickerError } from '../src/utils/errors';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
 
@@ -33,6 +36,7 @@ const mockComputeContrarianComebackGate = analysisService.computeContrarianComeb
 const mockComputeContrarianComebackSubmit = analysisService.computeContrarianComebackSubmit as jest.Mock;
 const mockFetchContrarianComebackData = contrarianComebackData.fetchContrarianComebackData as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
+const mockLogUsage = usageTracking.logUsage as jest.Mock;
 
 const authCookie = `auth_token=${signToken('user-1')}`;
 
@@ -47,6 +51,8 @@ beforeEach(() => {
   mockGetDecryptedKey.mockImplementation((_userId: string, provider: string) =>
     provider === 'fmp' ? Promise.resolve('fake-fmp-key') : Promise.reject(new userSubscription.MissingUserApiKeyError('No finnhub API key on file.')),
   );
+  mockLogUsage.mockReset();
+  mockLogUsage.mockResolvedValue(undefined);
 });
 
 describe('GET /analysis/health', () => {
@@ -123,6 +129,29 @@ describe('GET /analysis/long-term/:symbol', () => {
     expect(res.status).toBe(200);
     expect(mockFetchLongTermAnalysisData).toHaveBeenCalledWith('AAPL', 'fake-fmp-key', undefined);
   });
+
+  test('404 when the ticker does not exist', async () => {
+    mockFetchLongTermAnalysisData.mockRejectedValue(new InvalidTickerError('No data returned for ZZZZ. Check the ticker symbol or your API key.'));
+    const res = await request(app).get('/analysis/long-term/ZZZZ').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'No data returned for ZZZZ. Check the ticker symbol or your API key.' });
+  });
+
+  test('logs usage on a successful analysis', async () => {
+    mockFetchLongTermAnalysisData.mockResolvedValue({ symbol: 'AAPL' });
+    mockComputeLongTermAnalysis.mockResolvedValue({ symbol: 'AAPL' });
+    const res = await request(app).get('/analysis/long-term/AAPL').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'long_term_analysis');
+  });
+
+  test('a failed usage log does not turn a successful response into a 500 (fire-and-forget)', async () => {
+    mockFetchLongTermAnalysisData.mockResolvedValue({ symbol: 'AAPL' });
+    mockComputeLongTermAnalysis.mockResolvedValue({ symbol: 'AAPL' });
+    mockLogUsage.mockRejectedValue(new Error('usage log db exploded'));
+    const res = await request(app).get('/analysis/long-term/AAPL').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+  });
 });
 
 describe('GET /analysis/contrarian-comeback/:symbol/gate', () => {
@@ -150,6 +179,9 @@ describe('GET /analysis/contrarian-comeback/:symbol/gate', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ symbol: 'AAPL', check1Pass: true, failedCheck: null });
     expect(mockFetchContrarianComebackData).toHaveBeenCalledWith('AAPL', 'fake-fmp-key', undefined);
+    // Gate is a lightweight preview step, not a full run - only the POST
+    // .../submit below counts as "usage" for tracking purposes.
+    expect(mockLogUsage).not.toHaveBeenCalled();
   });
 
   test('503 when the Python service errors', async () => {
@@ -158,6 +190,13 @@ describe('GET /analysis/contrarian-comeback/:symbol/gate', () => {
     const res = await request(app).get('/analysis/contrarian-comeback/AAPL/gate').set('Cookie', authCookie);
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: 'Analysis service unavailable.' });
+  });
+
+  test('404 when the ticker does not exist', async () => {
+    mockFetchContrarianComebackData.mockRejectedValue(new InvalidTickerError('No data returned for ZZZZ. Check the ticker symbol or your API key.'));
+    const res = await request(app).get('/analysis/contrarian-comeback/ZZZZ/gate').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'No data returned for ZZZZ. Check the ticker symbol or your API key.' });
   });
 });
 
@@ -219,5 +258,28 @@ describe('POST /analysis/contrarian-comeback/:symbol', () => {
     const res = await request(app).post('/analysis/contrarian-comeback/AAPL').set('Cookie', authCookie).send(validBody);
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: 'Analysis service unavailable.' });
+  });
+
+  test('404 when the ticker does not exist', async () => {
+    mockFetchContrarianComebackData.mockRejectedValue(new InvalidTickerError('No data returned for ZZZZ. Check the ticker symbol or your API key.'));
+    const res = await request(app).post('/analysis/contrarian-comeback/ZZZZ').set('Cookie', authCookie).send(validBody);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'No data returned for ZZZZ. Check the ticker symbol or your API key.' });
+  });
+
+  test('logs usage on a successful submit', async () => {
+    mockFetchContrarianComebackData.mockResolvedValue({ symbol: 'AAPL' });
+    mockComputeContrarianComebackSubmit.mockResolvedValue({ symbol: 'AAPL', format: 'A' });
+    const res = await request(app).post('/analysis/contrarian-comeback/AAPL').set('Cookie', authCookie).send(validBody);
+    expect(res.status).toBe(200);
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'contrarian_comeback');
+  });
+
+  test('a failed usage log does not turn a successful response into a 500 (fire-and-forget)', async () => {
+    mockFetchContrarianComebackData.mockResolvedValue({ symbol: 'AAPL' });
+    mockComputeContrarianComebackSubmit.mockResolvedValue({ symbol: 'AAPL', format: 'A' });
+    mockLogUsage.mockRejectedValue(new Error('usage log db exploded'));
+    const res = await request(app).post('/analysis/contrarian-comeback/AAPL').set('Cookie', authCookie).send(validBody);
+    expect(res.status).toBe(200);
   });
 });

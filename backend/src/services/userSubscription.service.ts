@@ -9,8 +9,22 @@
 
 import { pool } from '../db/pool';
 import { encrypt, decrypt } from '../utils/encryption';
+import * as rolesService from './roles.service';
+import { getConfigStringList } from './configProperty.service';
 
 export class MissingUserApiKeyError extends Error {}
+
+// Admin-Master Fallback API Key - roles that fall back to the single admin-master account's
+// key when they have none of their own on file. Config-driven (Config Properties framework,
+// 2026-08-27) since 'api_key_fallback_eligible_roles' - was originally a hardcoded array here,
+// converted after a new custom role had no way to gain fallback eligibility without a code
+// deploy. user-contra-withkey is deliberately never in this list - bring-your-own is the whole
+// point of that role, so a missing key stays a hard 503 for them regardless of config. See
+// User Manual.md for the full role model.
+const FALLBACK_ELIGIBLE_ROLES_KEY = 'api_key_fallback_eligible_roles';
+// Matches the seeded DB value (migration 029) - belt-and-suspenders default if the config row
+// is ever missing/unparseable, not the feature's pre-config-property historical default.
+const FALLBACK_ELIGIBLE_ROLES_FALLBACK = ['user', 'admin', 'user-contra-wokey', 'user-premium'];
 
 export interface SubscriptionInput {
   apiKey: string;
@@ -96,16 +110,48 @@ export async function deleteSubscription(userId: string, provider: string): Prom
   return rows.length > 0;
 }
 
-// Resolves the calling user's own key for a provider — throws
-// MissingUserApiKeyError (not a silent fallback to any shared/global key) if
-// they haven't added one yet.
+// Direct query rather than a recursive getDecryptedKey(adminMasterId, provider) call - keeps
+// the fallback source explicit. (Recursion would terminate correctly too, since
+// admin-master's own role isn't in FALLBACK_ELIGIBLE_ROLES, but this reads more clearly.)
+async function getAdminMasterKey(provider: string): Promise<string | null> {
+  const { rows } = await pool.query<{ api_key_encrypted: string }>(
+    `SELECT s.api_key_encrypted
+     FROM users_subscriptions s
+     JOIN users_roles ur ON ur.user_id = s.user_id
+     JOIN m_roles r ON r.id = ur.role_id
+     WHERE r.name = 'admin-master' AND s.provider = $1
+     LIMIT 1`,
+    [provider],
+  );
+  return rows[0] ? decrypt(rows[0].api_key_encrypted) : null;
+}
+
+// Resolves the calling user's own key for a provider. Admin-Master Fallback API Key: if the
+// caller has none of their own AND their role is fallback-eligible, transparently uses the
+// single admin-master account's key instead of failing - see User Manual.md. A role that
+// isn't fallback-eligible (or is, but admin-master itself has no key yet) still gets a real
+// MissingUserApiKeyError, not a silent global-key fallback.
 export async function getDecryptedKey(userId: string, provider: string): Promise<string> {
   const { rows } = await pool.query<{ api_key_encrypted: string }>(
     'SELECT api_key_encrypted FROM users_subscriptions WHERE user_id = $1 AND provider = $2',
     [userId, provider],
   );
-  if (!rows[0]) {
-    throw new MissingUserApiKeyError(`No ${provider} API key on file. Add one via PUT /subscriptions/${provider}.`);
+  if (rows[0]) return decrypt(rows[0].api_key_encrypted);
+
+  // Independent reads, run concurrently - keeps this at the same number of sequential
+  // round-trips as before the config value was added, rather than a new one.
+  const [roles, fallbackEligibleRoles] = await Promise.all([
+    rolesService.getUserRoles(userId),
+    getConfigStringList(FALLBACK_ELIGIBLE_ROLES_KEY, FALLBACK_ELIGIBLE_ROLES_FALLBACK),
+  ]);
+  if (roles.some((r) => fallbackEligibleRoles.includes(r))) {
+    const fallback = await getAdminMasterKey(provider);
+    if (fallback) return fallback;
+    // Fallback-eligible but admin-master itself has no key yet - "add one via PUT
+    // /subscriptions" is actively wrong advice for a role that may not even have
+    // api_keys:manage_own to do that.
+    throw new MissingUserApiKeyError(`No shared ${provider} API key is configured yet. Contact an admin.`);
   }
-  return decrypt(rows[0].api_key_encrypted);
+
+  throw new MissingUserApiKeyError(`No ${provider} API key on file. Add one via PUT /subscriptions/${provider}.`);
 }

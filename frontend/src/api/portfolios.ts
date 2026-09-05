@@ -1,5 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from './client';
+import type { PerformanceBar } from '../lib/performanceMath';
+import type { ColumnMapping, CashConfig } from './portfolioTemplates';
+
+// Portfolio Upload - Flex (CLAUDE.md's "Portfolio Upload - Flex" section) - null for every
+// portfolio created through today's Legacy import, unchanged.
+export type FlexTemplateStatus = 'Flex' | 'Flex-Err' | null;
 
 export interface PortfolioSummary {
   id: string;
@@ -7,6 +13,8 @@ export interface PortfolioSummary {
   broker: string | null;
   createdAt: string;
   updatedAt: string;
+  uploadTemplateId: string | null;
+  flexTemplateStatus: FlexTemplateStatus;
 }
 
 export interface PortfolioHolding {
@@ -24,6 +32,13 @@ export interface PortfolioHolding {
   returnPct: number;
   allocationPct: number | null;
   priceUpdatedAt: string | null;
+  // Position-level (quantity * per-share) dollar/percent change for the day,
+  // persisted in tx_holdings alongside priceUpdatedAt (backend migration
+  // 014) - null until the holding's first refresh. Unlike the mutation-only
+  // RefreshedHolding fields below, this is DB-backed: available on every
+  // GET /portfolios/:id, surviving a portfolio switch or a page reload.
+  todayChangeDollar: number | null;
+  todayChangePercent: number | null;
 }
 
 export interface PortfolioDetail extends PortfolioSummary {
@@ -33,6 +48,28 @@ export interface PortfolioDetail extends PortfolioSummary {
   totalCostBasis: number;
   totalGainLoss: number;
   totalPortfolioValue: number;
+}
+
+// Mirrors backend/src/services/portfolio.service.ts's RefreshedHolding/
+// RefreshPricesResult field-for-field. todayChangeDollar/todayChangePercent
+// and performanceHistory only ever reflect the most recent refresh - there's
+// no auto-refresh hook, matching the source app's "Today ($)" precondition.
+export interface RefreshedHolding {
+  id: string;
+  symbol: string;
+  currentPrice: number;
+  currentValue: number;
+  gainLoss: number;
+  returnPct: number;
+  allocationPct: number | null;
+  priceUpdatedAt: string | null;
+  todayChangeDollar: number | null;
+  todayChangePercent: number | null;
+}
+
+export interface RefreshPricesResult {
+  holdings: RefreshedHolding[];
+  performanceHistory: Record<string, PerformanceBar[]>;
 }
 
 export interface ImportResult {
@@ -112,7 +149,17 @@ export function useDeletePortfolio() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => apiFetch<{ success: true }>(`/portfolios/${id}`, { method: 'DELETE' }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['portfolios'] }),
+    onSuccess: (_data, id) => {
+      // Removes (not invalidates) the deleted portfolio's own detail query - invalidating it
+      // would refetch a resource that no longer exists, producing a real 404. This mutation's
+      // own onSuccess runs before mutateAsync resolves, so a caller like
+      // FlexResolutionBanner's handleDelete (await mutateAsync(id); onDeleted()) hasn't yet
+      // switched the selected portfolio away - usePortfolio(id) is often still mounted and
+      // would otherwise refetch immediately. The list query is fine to invalidate normally -
+      // it just comes back with one fewer row, no 404 risk.
+      queryClient.removeQueries({ queryKey: ['portfolios', id] });
+      queryClient.invalidateQueries({ queryKey: ['portfolios'], exact: true });
+    },
   });
 }
 
@@ -148,7 +195,121 @@ export function usePreviewImport(portfolioId: string) {
 export function useRefreshPrices(portfolioId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => apiFetch<{ holdings: unknown[] }>(`/portfolios/${portfolioId}/refresh-prices`, { method: 'POST' }),
+    mutationFn: () => apiFetch<RefreshPricesResult>(`/portfolios/${portfolioId}/refresh-prices`, { method: 'POST' }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['portfolios', portfolioId] }),
+  });
+}
+
+// Portfolio Upload - Flex (CLAUDE.md's "Portfolio Upload - Flex" section) below.
+
+// Either uploadTemplateId (an existing Approved/own-Pending template) or columnMapping (a
+// brand new one, from the mapping wizard) must be given — mirrors backend/src/controllers/
+// portfolio.controller.ts's createFlex validation.
+export interface CreateFlexInput {
+  name: string;
+  broker?: string | null;
+  uploadTemplateId?: string;
+  columnMapping?: ColumnMapping;
+  headerRowIndex?: number;
+  dataStartColumnIndex?: number;
+  footerMarkerColumnIndex?: number;
+  footerMarkerText?: string;
+  cashConfig?: CashConfig;
+  filename: string;
+  content: string;
+}
+
+export interface FlexCreateResult {
+  portfolio: PortfolioSummary;
+  importResult: ImportResult;
+}
+
+// "Inspect Data" — the mapping wizard's preview step. Pure/no DB write (same guarantee as
+// Legacy's usePreviewImport), so it never actually creates a portfolio; a `name` is not
+// required at this stage. dryRun: true.
+export function useFlexPreview() {
+  return useMutation({
+    mutationFn: (input: Omit<CreateFlexInput, 'name' | 'broker'>) => apiFetch<ImportPreviewResult>('/portfolios/flex', {
+      method: 'POST',
+      body: JSON.stringify({ ...input, dryRun: true }),
+    }),
+  });
+}
+
+// The real Create Portfolio action — persists for real (tx_portfolios + tx_holdings) and
+// returns a genuine Dashboard-ready portfolio immediately. flexTemplateStatus comes back
+// 'Flex-Err' for a brand-new mapping (Save Template is still pending) or 'Flex' immediately
+// when uploadTemplateId pointed at an already-proven template.
+export function useCreatePortfolioFlex() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateFlexInput) => apiFetch<FlexCreateResult>('/portfolios/flex', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['portfolios'] }),
+  });
+}
+
+export interface SaveFlexTemplateInput {
+  templateName: string;
+  columnMapping: ColumnMapping;
+  samplePreview: unknown;
+  headerRowIndex: number;
+  dataStartColumnIndex: number;
+  footerMarkerColumnIndex?: number | null;
+  footerMarkerText?: string | null;
+  cashConfig?: CashConfig | null;
+  howToUseDescription?: string;
+}
+
+export interface SaveFlexTemplateResult {
+  portfolio: PortfolioSummary;
+  template: { id: string; templateName: string; status: string; createdBy: string | null; createdAt: string };
+}
+
+// POST /portfolios/:id/flex-template — the forced Save Template action. Only valid while the
+// portfolio is genuinely unresolved ('Flex-Err'); the backend 409s otherwise.
+export function useSaveFlexTemplate(portfolioId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: SaveFlexTemplateInput) => apiFetch<SaveFlexTemplateResult>(`/portfolios/${portfolioId}/flex-template`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['portfolios', portfolioId] });
+      queryClient.invalidateQueries({ queryKey: ['portfolios'] });
+      queryClient.invalidateQueries({ queryKey: ['portfolioTemplates'] });
+    },
+  });
+}
+
+export interface ChangeFlexTemplateInput {
+  uploadTemplateId?: string;
+  columnMapping?: ColumnMapping;
+  headerRowIndex?: number;
+  dataStartColumnIndex?: number;
+  footerMarkerColumnIndex?: number;
+  footerMarkerText?: string;
+  cashConfig?: CashConfig;
+  filename: string;
+  content: string;
+}
+
+// PUT /portfolios/:id/flex-template — re-imports against the new mapping/template first (the
+// "Inspect Data before swap" rule), then rebinds on success. Also the mechanism for a routine
+// re-upload against an already-bound template: pass its own current uploadTemplateId back.
+export function useChangeFlexTemplate(portfolioId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ChangeFlexTemplateInput) => apiFetch<FlexCreateResult>(`/portfolios/${portfolioId}/flex-template`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['portfolios', portfolioId] });
+      queryClient.invalidateQueries({ queryKey: ['portfolios'] });
+    },
   });
 }

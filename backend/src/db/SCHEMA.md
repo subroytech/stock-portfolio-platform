@@ -14,15 +14,44 @@ counts and can show 0 even when tables exist (see `SHOW TABLES`/SQL Shell instea
 ## Naming convention
 
 Tables are prefixed by category (settled 2026-07-10):
-- **`m_`** — master/reference data (`m_tickers`, `m_index_master`, `m_index_constituent`).
+- **`m_`** — master/reference data (`m_tickers`, `m_index_master`, `m_index_constituent`,
+  `m_roles`, `m_role_permissions`, `m_function_master`,
+  `m_portfolio_template_mapping_master`/`_dtls`, `m_config_group`, `m_config_property`,
+  `m_config_property_value`, `m_security_question`).
 - **`tx_`** — transactional, portfolio-scoped data (`tx_portfolios`, `tx_holdings`,
-  `tx_cash_positions`, `tx_uploads`).
+  `tx_cash_positions`, `tx_uploads`). **Exception: `tx_shared_contrarian_run`** (added
+  2026-08-04) is `tx_`-prefixed despite being neither portfolio-scoped nor per-user — the
+  user's own call: running a Contrarian Finder scan is itself a **transaction performed by a
+  role**, not an admin-exclusive system job — both `admin` and the `user-contra-*` roles can
+  trigger one — so `tx_` still fits the "record of an action a user took" sense the other
+  `tx_` tables carry, even though this particular action's *result* (one row per completed
+  scan) is shared/global rather than scoped to that one user's own portfolio. This also sets
+  the precedent for the still-open "what prefix for non-user-scoped shared/cache data"
+  question `user_evt_`'s own note below flags (e.g. the on-hold shared quote cache) — future
+  shared/global tables can follow this same `tx_` precedent instead of inventing a new bucket.
 - **`sys_`** — internal bookkeeping, not app data (`sys_schema_migrations`).
-- **unprefixed** — `users`, `users_subscriptions`. Deliberately left out of the `tx_`
-  bucket (they're account-level, not portfolio-scoped transactional data) and don't fit
-  `m_`/`sys_` either. `users_subscriptions` (added 2026-07-12) is grouped with `users`
-  rather than given its own prefix, at the user's explicit request, since it's a child of
-  the account itself.
+- **unprefixed** — `users`, `users_subscriptions`, `users_roles`, `users_security_answers`
+  (added 2026-08-29, Self-Registration & Password Policy). Deliberately left out of the
+  `tx_` bucket (they're account-level, not portfolio-scoped transactional data) and don't fit
+  `m_`/`sys_` either. `users_subscriptions` (added 2026-07-12), `users_roles` (added
+  2026-07-31), and `users_security_answers` are all grouped with `users` rather than given
+  their own prefix, since each is a child of the account itself — per-user assignment data,
+  not reference/static data (that's what keeps `users_roles` out of `m_`, even though it's
+  *about* roles, and `users_security_answers` out of `m_` despite being *about*
+  `m_security_question`).
+- **`user_evt_`** — per-user event/log data (added 2026-07-31: `user_evt_usage`,
+  `user_evt_usage_summary_monthly`; `user_evt_impersonation_log` added 2026-08-28;
+  `user_evt_password_history` added 2026-08-29). A new bucket, added when usage tracking
+  didn't fit any of the other three: `tx_` is explicitly portfolio-scoped (usage events are
+  user-scoped, not portfolio-scoped), `sys_` is explicitly internal-bookkeeping-not-app-data
+  (usage events are real business data), and `m_`/unprefixed are both for relatively static,
+  non-growing data (the opposite of an append-only event log). Does **not** apply to
+  non-user-scoped event/cache data (e.g. a future shared quote cache, keyed by symbol not by
+  user) — that would need its own bucket if/when it's built. **`user_evt_password_history` is
+  the one table in this bucket with no TTL** — every other `user_evt_` table expires old rows
+  automatically; this one needs "last 5" to survive indefinitely per account, so it's pruned
+  by application code (`passwordHistory.service.ts`) instead. Still belongs in this bucket
+  (per-user append log, real business data) despite the TTL exception.
 
 Tables were originally created unprefixed (migrations 001–008) and renamed in two follow-up
 migrations: `009_rename_master_tables.sql` (the 3 `m_` tables) and
@@ -41,11 +70,24 @@ users (1) ──< tx_portfolios (many)
      │            ├──< tx_holdings (many)
      │            ├──< tx_cash_positions (1, unique per portfolio)
      │            ├──< tx_uploads (many)
-     │            └──< tx_portfolio_action_hist (many)
+     │            ├──< tx_portfolio_action_hist (many)
+     │            └──> m_portfolio_template_mapping_master (1, via upload_template_id, nullable)
      │
-     └──< users_subscriptions (many, one per provider e.g. fmp/finnhub)
+     ├──< users_subscriptions (many, one per provider e.g. fmp/finnhub)
+     ├──< users_roles (many) >── m_roles (1) ──< m_role_permissions (many) >── m_function_master (1, via FK on permission_key)
+     ├──< users_security_answers (many, one per answered question) >── m_security_question (1)
+     ├──< user_evt_usage (many)
+     ├──< user_evt_usage_summary_monthly (many)
+     ├──< user_evt_impersonation_log (many, via admin_user_id AND target_user_id — 2 FKs to users)
+     ├──< user_evt_password_history (many)
+     └──< m_portfolio_template_mapping_master (many, via created_by/reviewed_by, both nullable)
 
 m_index_master (1) ──< m_index_constituent (many)
+
+m_portfolio_template_mapping_master (1) ──< m_portfolio_template_mapping_dtls (many)
+
+m_config_group (1) ──< m_config_property (many) ──< m_config_property_value (many)
+     m_config_property_value.changed_by ──> users (many, nullable, ON DELETE SET NULL)
 
 m_tickers  — standalone reference table, not FK'd from anywhere
 ```
@@ -64,6 +106,7 @@ appearing in a portfolio or an index shouldn't be blocked by missing metadata co
 | `id` | `INT8` | PK, default `unique_rowid()` |
 | `email` | `VARCHAR(255)` | `NOT NULL`, unique |
 | `password_hash` | `VARCHAR(255)` | nullable; bcrypt hash, set/read by `auth.service.ts` since 2026-07-12 |
+| `first_name` / `last_name` | `VARCHAR(50)` | nullable; added by migration `033`, 2026-08-29 (Self-Registration & Password Policy). Required by self-registration (`POST /auth/signup`), needed for the password policy's own name-substring rule — nullable so existing rows and admin-created accounts (`users.service.ts`'s `createUserAccount`, which still doesn't collect a name) are unaffected; that rule just silently doesn't apply when these are `NULL` |
 | `created_at` | `TIMESTAMPTZ` | default `now()` |
 | `updated_at` | `TIMESTAMPTZ` | default `now()` |
 
@@ -86,12 +129,19 @@ the plaintext key in their result. Requires `API_KEY_ENCRYPTION_KEY` (32-byte he
 from `JWT_SECRET`) in the environment — validated eagerly at module load, same as
 `pool.ts`'s fail-fast pattern for `DATABASE_URL`.
 
-**Wired into every FMP call site as of 2026-07-12** — `quotes.controller.ts`,
-`contrarianFinder.controller.ts`, and `portfolio.service.ts`'s `refreshPrices` all resolve
-+ decrypt the calling user's own key from this table via `userSubscription.service
-.getDecryptedKey()`, instead of the global `env.fmpApiKey`. A user with no row here for a
-given provider gets a `MissingUserApiKeyError` → `503` from all three surfaces (no silent
-fallback). See Architecture.md Section 1.
+**Wired into every FMP/Finnhub call site as of 2026-07-12** — `quotes.controller.ts`,
+`contrarianFinder.controller.ts`, `momentum.controller.ts`, `analysis.controller.ts`,
+`stockPreview.controller.ts`, and `portfolio.service.ts`'s `refreshPrices` all resolve +
+decrypt the calling user's own key from this table via `userSubscription.service
+.getDecryptedKey()`, instead of the global `env.fmpApiKey`. See Architecture.md Section 1.
+
+**Admin-Master Fallback API Key (User Manual.md, added 2026-08-02)**: a user with no row here
+for a given provider no longer always gets a hard `503` — `getDecryptedKey()` now falls back
+to the single `admin-master`-role account's own key first, for callers whose role is `user`,
+`admin`, or `user-contra-wokey` (not `user-contra-withkey`, whose entire purpose is bring-
+your-own). Only if that fallback source ALSO has no key does the caller finally get a
+`MissingUserApiKeyError` → `503`, with a message pointed at "contact an admin" rather than
+"add your own key," since a fallback-eligible role may not even have `api_keys:manage_own`.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -108,6 +158,152 @@ Indexes: `users_subscriptions_pkey` (PK), `users_subscriptions_user_id_provider_
 (unique on `user_id, provider` — this is what makes `upsertSubscription()`'s
 `ON CONFLICT (user_id, provider) DO UPDATE` update-in-place instead of erroring/duplicating).
 
+### `m_roles`
+Added by migration `015`, 2026-07-31 (Architecture.md Section 3 item 6 — Functional
+Authorization). Role catalog — master/reference data, same bucket as `m_index_master`.
+Seeded with exactly two rows, `'user'` (every existing account was backfilled into this role
+by the same migration) and `'admin'`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `name` | `VARCHAR(50)` | `NOT NULL`, unique |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_roles_pkey` (PK), `m_roles_name_key` (unique).
+
+### `users_roles`
+Added by migration `015`. Which role(s) each user has — per-account assignment data, so
+unprefixed like `users_subscriptions` rather than `m_`-prefixed (it's not itself reference
+data, even though it's *about* a reference table). Schema supports many-to-many (a user could
+have multiple roles), but `roles.service.ts`'s `setUserRole()` enforces a single-role-per-user
+business rule for now — it replaces, not appends.
+
+| Column | Type | Notes |
+|---|---|---|
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE`, part of composite PK |
+| `role_id` | `INT8` | FK → `m_roles(id)`, `ON DELETE CASCADE`, part of composite PK |
+
+Indexes: `users_roles_pkey` (composite PK on `user_id, role_id`).
+
+### `m_role_permissions`
+Added by migration `015`. Which permissions each role grants — static configuration, child of
+`m_roles`, mirroring how `m_index_constituent` is the child of `m_index_master`.
+`permission_key` is free-text (app-enforced vocabulary, e.g. `'contrarian_finder:scan'`,
+`'roles:manage'`) rather than a DB enum, so gating a new feature never needs a schema change —
+just a new `INSERT`. Checked by `requirePermission(key)` middleware.
+
+| Column | Type | Notes |
+|---|---|---|
+| `role_id` | `INT8` | FK → `m_roles(id)`, `ON DELETE CASCADE`, part of composite PK |
+| `permission_key` | `VARCHAR(100)` | `NOT NULL`, part of composite PK |
+
+Indexes: `m_role_permissions_pkey` (composite PK on `role_id, permission_key`).
+`permission_key` also carries a **FK** to `m_function_master(permission_key)` as of migration
+`016` — a role can never be granted a permission key that isn't a real registered function.
+
+**One key, `config_properties:manage`, is additionally app-level restricted to only ever be
+granted to the `admin-master` role** (added 2026-08-24, alongside `m_config_property` below) —
+a small hardcoded `ADMIN_MASTER_ONLY_PERMISSIONS` set in `roles.service.ts`'s
+`grantPermission()`, not a DB constraint. This is a deliberate, narrow exception to "every gate
+in this app is DB-driven, never a hardcoded role-name check" — the permission mechanism itself
+stays fully DB-driven (still a real, revocable row here, still checked by `requirePermission`
+like everything else); only *which role this one specific key can be granted to* is hardcoded.
+
+### `m_function_master`
+Added by migration `016`, 2026-08-01 (Admin Console, Architecture.md Section 3 item 6
+follow-up). Catalogs only the app "functions" that are genuine **exceptions** to the default
+"any signed-in user can use it" rule — deliberately **not** a row for every application
+function (Momentum, Long-Term Analysis, Contrarian Comeback, and Portfolio Refresh Prices have
+no row here and no `requirePermission` gate, since none of them are exceptions). Feeds the
+"View/Edit Permission" screen's fixed-dropdown picker (filtered to `active`+`QA-Test` —
+`Dev-WIP`/`inactive` hidden since granting those wouldn't do anything yet) and the "View/Manage
+Functions" admin screen. `status` lifecycle is app-enforced (`functionMaster.service.ts`'s
+`isValidStatus()`), not a DB check constraint.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `permission_key` | `VARCHAR(100)` | `NOT NULL`, unique — referenced by `m_role_permissions.permission_key`'s FK |
+| `name` | `VARCHAR(100)` | `NOT NULL` |
+| `description` | `TEXT`/`STRING` | nullable |
+| `status` | `VARCHAR(20)` | `NOT NULL`, default `'active'` — `'active'`\|`'inactive'`\|`'Dev-WIP'`\|`'QA-Test'` |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_function_master_pkey` (PK), `m_function_master_permission_key_key` (unique).
+
+Seeded with exactly 5 rows: `contrarian_finder:scan` (pre-existing, migration 015) plus the 4
+new admin-capability keys this migration introduces — `roles:manage` (**re-keyed** here: used
+to gate `PUT /users/:id/role`, now gates `POST /roles` instead — the existing `admin` grant row
+from migration 015 didn't move, its *meaning* just shifted), `permissions:manage`,
+`users:manage_roles` (takes over gating `PUT /users/:id/role`), `functions:manage`.
+
+### `user_evt_usage`
+Added by migration `015`. Raw per-user usage event log — one row per tracked action
+(Momentum run, Contrarian Finder scan, Long-Term Analysis, Contrarian Comeback, portfolio
+Refresh Prices), written by `usageTracking.service.ts`'s `logUsage()`. Retained via
+CockroachDB's native row-level TTL (`WITH (ttl_expire_after = '35 days')`) — rows are deleted
+automatically by CockroachDB's background TTL job, no cron/application cleanup code needed.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` |
+| `feature` | `VARCHAR(50)` | `NOT NULL` — free text (app-enforced vocabulary, not a DB enum) |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `user_evt_usage_pkey` (PK).
+
+### `user_evt_usage_summary_monthly`
+Added by migration `015`. One row per `(user_id, feature, month)`, incremented via
+`INSERT ... ON CONFLICT ... DO UPDATE SET event_count = event_count + 1` on every single
+`logUsage()` call — a real-time running total, not a periodic batch rollup. Retained via TTL
+(`WITH (ttl_expire_after = '366 days')`) for the ~12-month cap. **Note on how the TTL actually
+behaves**: CockroachDB's TTL clock resets on every row `UPDATE` (confirmed live via
+`SHOW CREATE TABLE`: `ON UPDATE current_timestamp() + '366 days'`), not just at row creation —
+in practice this is still correct for this table's purpose, since a given month's row only
+gets updated while events for *that* month are still arriving; once the month ends, that row
+stops being touched and its TTL naturally starts counting down from its last update, which is
+effectively "~12 months after that month's activity finished," not "~12 months after the row
+was first created."
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` |
+| `feature` | `VARCHAR(50)` | `NOT NULL` — free text, same vocabulary as `user_evt_usage.feature` |
+| `month` | `DATE` | `NOT NULL` — first of the month, e.g. `2026-08-01` |
+| `event_count` | `INT8` | `NOT NULL`, default `0` |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `user_evt_usage_summary_monthly_pkey` (PK),
+`user_evt_usage_summary_monthly_user_id_feature_month_key` (unique on `user_id, feature,
+month` — this is what makes the `ON CONFLICT` upsert work).
+
+### `user_evt_impersonation_log`
+Added by migration `032`, 2026-08-28 ("Login-as" Impersonation). Audit trail for
+`admin-master`-only "Login-as" sessions — one row per impersonation session started via
+`POST /auth/impersonate`, closed via `POST /auth/stop-impersonating`. Retained via TTL
+(`WITH (ttl_expire_after = '180 days')`) — deliberately longer than `user_evt_usage`'s 35 days
+or `user_evt_usage_summary_monthly`'s 366 days' per-row reset behavior would suggest at a
+glance; this is a security audit trail, not ordinary usage telemetry, so it's kept longer on
+its own fixed schedule rather than reusing either existing retention window.
+
+`ended_at` stays `NULL` if the impersonation session simply expires (the shorter
+`impersonationExpiresIn`, default `1h`) or is abandoned rather than explicitly ended via
+"Return to my account" — accepted as the normal shape for an ungraceful end, not treated as a
+gap needing a background sweeper.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `admin_user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` — the impersonating admin-master account |
+| `target_user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` — the account being viewed as |
+| `started_at` | `TIMESTAMPTZ` | default `now()` |
+| `ended_at` | `TIMESTAMPTZ` | nullable — set by `endImpersonation()` on an explicit "Return to my account"; stays `NULL` on expiry/abandonment, see above |
+
+Indexes: `user_evt_impersonation_log_pkey` (PK).
+
 ### `tx_portfolios`
 | Column | Type | Notes |
 |---|---|---|
@@ -116,6 +312,8 @@ Indexes: `users_subscriptions_pkey` (PK), `users_subscriptions_user_id_provider_
 | `name` | `VARCHAR(100)` | `NOT NULL` |
 | `broker` | `VARCHAR(50)` | nullable |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+| `upload_template_id` | `INT8` | nullable; added by migration `023`, Portfolio Upload — Flex. FK → `m_portfolio_template_mapping_master(id)`, `ON DELETE SET NULL`. `NULL` for every Classic/Legacy portfolio; set once a Flex portfolio's mapping is either an already-Approved template or its own new mapping has been saved via Save Template |
+| `flex_template_status` | `VARCHAR(20)` | nullable; added by migration `023` — `'Flex'` \| `'Flex-Err'` \| `NULL`, app-enforced, no DB check constraint. `'Flex-Err'` is the "needs attention" state (portfolio created, mapping not yet proven/saved); `'Flex'` means resolved. App-enforced invariant (not DB-enforced): `flex_template_status = 'Flex'` iff `upload_template_id IS NOT NULL` |
 
 Indexes: `portfolios_pkey` (PK), `portfolios_user_id_name_key` (unique on `user_id, name` —
 one portfolio name per user, e.g. can't have two "Fidelity" portfolios for the same user).
@@ -139,6 +337,7 @@ one portfolio name per user, e.g. can't have two "Fidelity" portfolios for the s
 | `allocation_pct` | `DECIMAL(7,4)` | nullable |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
 | `price_updated_at` | `TIMESTAMPTZ` | nullable; added by migration `011`, 2026-07-12. Stamped by `POST /portfolios/:id/refresh-prices` **per holding**, only for holdings that actually got a fresh quote — see `tx_portfolio_action_hist` section below for why this is per-holding, not per-portfolio |
+| `today_change_dollar` / `today_change_percent` | `DECIMAL` (unconstrained) | nullable; added by migration `014`, 2026-07-31. Position-level (quantity × per-share) dollar change and percent change for the day, set alongside `price_updated_at` on every refresh — persisted so `GET /portfolios/:id` can drive the Dashboard's "Today's $" views directly from DB state, not just the ephemeral refresh-prices response |
 
 Indexes: `holdings_pkey` (PK), `idx_holdings_portfolio_id`, `idx_holdings_symbol`.
 
@@ -188,19 +387,96 @@ Indexes: `tx_portfolio_action_hist_pkey` (PK — this table was created post-ren
 unlike the other `tx_`/`m_` tables its constraint name actually matches the live table
 name), `idx_portfolio_action_hist_portfolio_id`.
 
+### `tx_shared_contrarian_run`
+Added by migration `020`, 2026-08-04. Persists the last completed Contrarian Finder scan
+server-side, shared across every user — closes a real gap confirmed live the same day: since
+only Admin/Admin-Master/`user-contra-*` roles can run a scan and regular users can only
+*view* the outcome, a regular user (or the same admin on a different device/session) saw
+nothing at all before this table existed, because results lived only in the running
+browser's `sessionStorage`, never anywhere shared. See `tx_` naming-convention exception note
+above for why this non-portfolio-scoped table still uses the `tx_` prefix.
+
+**Write-once-per-scan, not per-batch**: the client-orchestrated batch-scan flow
+(`useContrarianBatchScan()` in `frontend/src/api/contrarianFinder.ts`) is unchanged — one row
+is written only once, when a scan reaches `phase: 'done'` successfully, with the
+already-fully-assembled results (fire-and-forget `POST /contrarian-finder/last-scan`, gated
+by `requirePermission('contrarian_finder:scan')` — only someone who could run a scan should
+be able to claim to have completed one). An abandoned/failed scan writes no row. No
+`status`/`error_message` columns for the same reason — every row is, by construction, a
+completed run. "The last scan" (`GET /contrarian-finder/last-scan`, ungated — viewing isn't
+the action the permission protects, same as `GET /contrarian-finder/universe`) is just
+`ORDER BY completed_at DESC LIMIT 1` across every row, **regardless of tier** — the tiered
+retention below is a storage/retention concern only, not a viewer-facing one (confirmed with
+the user).
+
+**Tiered retention, added by migration `021`, 2026-08-05** — `saveLastScan()`
+(`contrarianFinder.service.ts`) branches on the caller's tier, resolved by the controller via
+`contrarian_finder:scan_history` (a dedicated permission, not a hardcoded role-name check —
+granted to `admin`/`admin-master` in this DB; any future role could be granted it too):
+- **`run_tier = 'admin'`** — plain `INSERT`, appending to a shared history log, then pruned
+  back to the 60 most recent admin-tier rows (`ADMIN_HISTORY_LIMIT`) after every insert.
+- **`run_tier = 'user'`** — every other `contrarian_finder:scan`-permitted role
+  (`user-contra-withKey`/`user-contra-wokey`). Upserts **one row per user**, not per-tier —
+  a transactional `DELETE ... WHERE started_by = $1 AND run_tier = 'user'` followed by a
+  fresh `INSERT`, rather than a partial-unique-index `ON CONFLICT` (simpler to reason about,
+  and avoids relying on CockroachDB's partial-index `ON CONFLICT` inference). Live-verified
+  2026-08-05: two runs from the same `user-contra-withKey` account leave exactly one row
+  (the second run's), while two admin-tier runs leave two.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `started_by` | `INT8` | FK → `users(id)`, `ON DELETE SET NULL` (not `CASCADE`) — this is shared data meant to outlive any individual account; deleting the admin who ran it shouldn't delete the result everyone's been viewing. Stored but **not yet exposed** via the API — a deliberate "store now, decide how to surface later" call |
+| `completed_at` | `TIMESTAMPTZ` | `NOT NULL`, default `now()` |
+| `universe_size` | `INT8` | `NOT NULL` |
+| `scanned` | `INT8` | `NOT NULL` |
+| `params` | `JSONB` | `NOT NULL` — the run's actual parameters (threshold, batch size, quality preset, etc.), same shape as the frontend's `RunParams` |
+| `results` | `JSONB` | `NOT NULL` — the full `ScanResult[]` array. No JSONB-specific size cap in CockroachDB (bounded by overall row size, soft limit ~64 MiB); a real 348-symbol payload is ≈125KB (measured live via `pg_column_size`), nowhere close |
+| `run_tier` | `VARCHAR(20)` | `NOT NULL`, default `'admin'` (migration `021`'s backfill value for the 2 pre-existing rows, both genuinely admin-run) — `'admin'` \| `'user'`, app-enforced vocabulary, not a DB check constraint, same convention as other free-text status columns in this schema |
+
+Indexes: `tx_shared_contrarian_run_pkey` (PK), `idx_shared_contrarian_run_started_by_run_tier`
+(migration `026`, 2026-08-23 — composite on `(started_by, run_tier)`, covering the user-tier
+upsert's `DELETE ... WHERE started_by = $1 AND run_tier = 'user'` and partially covering the
+admin-tier prune's `ORDER BY completed_at DESC LIMIT 60` scan). Previously both did a full
+table scan — accepted while the table was small; closed once asked about explicitly.
+
+**Run History reads, added 2026-08-31** (no schema change — same table, two additional read
+paths, both gated by the new `contrarian_finder:view_history` permission, migration `036`, zero
+default grants — unlike `GET /contrarian-finder/last-scan` above, browsing *older* runs is
+deliberately opt-in per role): `GET /contrarian-finder/run-history` (`listRunHistory()` —
+`SELECT id, completed_at, universe_size, scanned, params ... ORDER BY completed_at DESC`,
+**excluding `results`** to keep the list call cheap against a ~150KB-per-row average) and
+`GET /contrarian-finder/run-history/:id` (`getRunById()` — the same shape `getLastScan()`
+returns, keyed by `id` instead of "most recent"). Both are tier-agnostic, same "viewing ignores
+`run_tier`" philosophy as `getLastScan()` — tier is a retention/storage concept only.
+
 ### `m_tickers`
-Stock/ETF metadata reference table. Seeded 2026-07-10 from
-`backend/src/db/seed/ticker_sectors.js` (218 rows) via `npm run seed:tickers`
-(`backend/src/db/seedTickerData.js`). Not yet queried by any service — `parser.service.js`
-still reads `ticker_sectors.js` directly for CSV-import sector fallback; only
-`contrarianFinder.service.js`'s index-composition path was switched over (see
-`m_index_constituent` below).
+Stock/ETF metadata reference table — **the single source of truth for ticker
+name/sector** (confirmed 2026-08-02), fed continuously from two independent paths, not just
+the one-time seed:
+1. **`portfolio.service.ts`'s `importHoldings()`** — every real CSV/TXT import inserts a bare
+   `(symbol, sector)` row (sector from whatever `parser.service.ts` already resolved) for any
+   symbol `m_tickers` doesn't know yet, `ON CONFLICT (symbol) DO NOTHING` — never overwrites a
+   symbol already enriched by path 2 below.
+2. **`backend/src/db/backfillTickerData.ts`** (`npm run backfill:ticker-data -- <fmp-key>`) —
+   re-runnable, fetches name+sector from FMP's `/profile` endpoint
+   (`marketData.service.ts`'s `getProfiles()`) for every symbol currently in
+   `m_index_constituent` (the Contrarian Finder scan universe) and upserts both fields,
+   `COALESCE`d so a `null` FMP response never blanks out an already-good value.
+
+Originally seeded 2026-07-10 from `backend/src/db/seed/ticker_sectors.js` (218 rows, still
+read directly by `parser.service.js` for CSV-import sector fallback — a separate, unrelated
+list from the scan universe's own `cf_static_universe.js`). Confirmed 2026-08-02 these two
+seed files are two independently hand-typed datasets with no enforced relationship: of the
+scan universe's 348 symbols, 208 had zero `m_tickers` row at all, and 78 `m_tickers` rows
+were for symbols not even in the current universe — paths 1/2 above are what closes that gap
+going forward, rather than a one-time fix.
 
 | Column | Type | Notes |
 |---|---|---|
 | `symbol` | `VARCHAR(15)` | PK |
-| `name` | `VARCHAR(200)` | nullable, currently unpopulated by the seed script |
-| `sector` | `VARCHAR(50)` | nullable |
+| `name` | `VARCHAR(200)` | nullable — see the two population paths above |
+| `sector` | `VARCHAR(50)` | nullable — see the two population paths above |
 | `is_etf` | `BOOLEAN` | default `false`, currently unpopulated (no rows flagged `true` yet) |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
 
@@ -233,6 +509,178 @@ pre-rename table name — see the naming-convention note above.)
 
 **Re-seeding:** `npm run seed:tickers` is idempotent (`ON CONFLICT` upserts) — safe to
 re-run after `cf_static_universe.js`/`ticker_sectors.js` change, to push updates into the DB.
+
+### `m_portfolio_template_mapping_master`
+Added by migration `022`, Portfolio Upload — Flex. One row per user-defined column-mapping
+template — `m_`-prefixed despite being user-authored (not seeded) because it's master-data-
+shaped (a fixed catalog every user picks from) and grown by live activity rather than a
+one-time seed, the same characteristic that already justifies `m_tickers`' `m_` prefix.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `template_name` | `VARCHAR(100)` | `NOT NULL`, unique — backs the searchable Approved-template list |
+| `status` | `VARCHAR(20)` | `NOT NULL`, default `'Pending Approval'` — `'Pending Approval'` \| `'Approved'` \| `'Rejected'`, app-enforced, no DB check constraint |
+| `created_by` / `reviewed_by` | `INT8` | both FK → `users(id)`, `ON DELETE SET NULL`, both nullable — `created_by` drives the "Admin/Admin-Master/yourself" visibility filter on the Approved list; `reviewed_by` records who approved/rejected it |
+| `reviewed_at` | `TIMESTAMPTZ` | nullable |
+| `sample_preview` | `JSONB` | nullable — the top-5-mapped-records snapshot captured at "Inspect Data" time, so an admin reviewing a Pending template later doesn't need the original file re-uploaded |
+| `footer_marker_row` | `INT8` | nullable; added by migration `028`, 2026-08-25 (Footer & Cash Row Markers). The row index (within the uploaded file, above which real holdings data ends) the user clicked to mark as "everything at/below this row is a trailing footer/summary block" — `flexParser.service.ts` truncates before parsing. `NULL` means no footer marker was set for this template (most files don't need one) |
+| `cash_config` | `JSONB` | nullable; added by migration `031`, 2026-08-27, **replacing 3 flat columns added and dropped the same week by migration `030`** (never shipped to a real release — no backfill concern). Discriminated union: `{ rowMarker: string; value: { kind: 'column'; column: string } \| { kind: 'embedded'; pattern: string } } \| null` — `rowMarker` identifies which row holds the cash/money-market position; `value.kind: 'column'` covers a broker exporting cash's dollar value in its own adjacent column, `value.kind: 'embedded'` covers a broker embedding it as text inside a labelled cell (e.g. a "Description" column literally containing `"CASH & CASH EQUIVALENTS $12,345.67"`), parsed via `flexParser.service.ts`'s `extractEmbeddedCashAmt()`/`coerceCashConfig()`. `NULL` means no cash row identified for this template |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_portfolio_template_mapping_master_pkey` (PK),
+`m_portfolio_template_mapping_master_name_key` (unique on `template_name`).
+
+### `m_portfolio_template_mapping_dtls`
+Added by migration `022`. One row per mapped field within a template.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `template_id` | `INT8` | FK → `m_portfolio_template_mapping_master(id)`, `ON DELETE CASCADE` |
+| `target_field` | `VARCHAR(50)` | `NOT NULL` — one of the app's fixed portfolio fields (`symbol`/`quantity`/`currentPrice`/`purchasePrice`/`name`/`sector`/`purchaseDate`), app-enforced vocabulary, not a DB enum |
+| `source_header` | `VARCHAR(200)` | `NOT NULL` — the uploaded file's actual header text mapped to that field, normalized the same way `parser.service.ts`'s `mapHeaders()` already normalizes — resilient to column reordering on a later upload against the same template |
+
+Indexes: `m_portfolio_template_mapping_dtls_pkey` (PK),
+`m_portfolio_template_mapping_dtls_template_id_target_field_key` (unique on
+`template_id, target_field`).
+
+### `m_config_group`
+Added by migration `027`, 2026-08-24 (Config Properties framework — CLAUDE.md's "Config
+Properties framework" section). A free-standing category label for admin-configurable
+settings — not tied to a specific file/service (that's now what `m_config_property.description`
+documents instead), since one property's group could plausibly apply to a value used by
+multiple services.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `name` | `VARCHAR(100)` | `NOT NULL`, unique |
+| `description` | `TEXT`/`STRING` | nullable |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_config_group_pkey` (PK), `m_config_group_name_key` (unique).
+
+### `m_config_property`
+Added by migration `027`. The property *definition* — metadata only, never itself versioned
+(that's `m_config_property_value` below). `property_key` is globally unique and immutable
+after creation, same reasoning as `m_function_master.permission_key`: real code (e.g.
+`contrarianFinder.service.ts`'s `getConfigInt()` call) looks it up directly by string. A
+property can never exist with zero value rows — `configProperty.service.ts`'s
+`createProperty()` inserts the definition and its initial value transactionally.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `group_id` | `INT8` | FK → `m_config_group(id)` |
+| `property_key` | `VARCHAR(150)` | `NOT NULL`, unique |
+| `name` | `VARCHAR(150)` | `NOT NULL` |
+| `description` | `TEXT`/`STRING` | nullable — the one place documenting which file/service reads this property |
+| `value_type` | `VARCHAR(20)` | `NOT NULL` — `'integer'` \| `'string'` today (`'date'` deliberately deferred — the `TEXT`-typed `value`/`min_value`/`max_value` columns need zero schema change to add it later), app-enforced vocabulary, not a DB check constraint |
+| `min_value` / `max_value` | `TEXT`/`STRING` | nullable — only enforced when `value_type` is numeric; ignored for `'string'` |
+| `status` | `VARCHAR(20)` | `NOT NULL`, default `'active'` — `'active'`\|`'inactive'`, never delete, only status-change, mirroring `m_function_master` |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_config_property_pkey` (PK), `m_config_property_property_key_key` (unique).
+
+### `m_config_property_value`
+Added by migration `027`. **Append-only value history** — every change inserts a new row and
+flips the previous active row's `is_active` to `false`, transactionally
+(`configProperty.service.ts`'s `setPropertyValue()`), the same "transactional flip" shape as
+`roles.service.ts`'s `setUserRole()` and `contrarianFinder.service.ts`'s `saveLastScan()`
+user-tier branch. Real consumers read via `getConfigValue()`/`getConfigInt()` — always a live
+`SELECT ... WHERE is_active = true`, no caching layer.
+
+`effective_timestamp` always equals `created_at` today — no real future-dated scheduling logic
+is built yet, but the column exists as its own field (separate from `created_at`) specifically
+so that can be added later with zero migration. `version` increments per `property_id` from 1.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `property_id` | `INT8` | FK → `m_config_property(id)`, `ON DELETE CASCADE` |
+| `value` | `TEXT`/`STRING` | `NOT NULL` — always stored as text regardless of `value_type`, parsed/validated at the app layer |
+| `version` | `INT8` | `NOT NULL` — increments per `property_id`, starting at 1 |
+| `effective_timestamp` | `TIMESTAMPTZ` | `NOT NULL`, default `now()` — see note above |
+| `is_active` | `BOOL` | `NOT NULL`, default `true` — exactly one `true` row per `property_id` at a time, app-enforced (transactional flip), not a DB partial-unique-index |
+| `changed_by` | `INT8` | nullable FK → `users(id)`, `ON DELETE SET NULL` — audit trail, same pattern as `tx_shared_contrarian_run.started_by` |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_config_property_value_pkey` (PK), `idx_config_property_value_property_id`
+(covers both the live-read `WHERE property_id = $1 AND is_active = true` lookup and the
+value-history list's `WHERE property_id = $1 ORDER BY version DESC`).
+
+### `m_security_question`
+Added by migration `034`, 2026-08-29 (Self-Registration & Password Policy — security-question-
+based Forgot Password, since this repo has no email-sending capability). `m_`-prefixed: a
+static, admin-seeded catalog nobody user-authors a new row into, same bucket as
+`m_function_master`. Seeded with all 15 questions (drafted by the assistant in the style of 4
+examples the user provided, then 3 edited by the user before finalizing) — `status` lets a
+question be retired later without breaking already-saved `users_security_answers` rows that
+reference it.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `question_text` | `VARCHAR(100)` | `NOT NULL`, unique |
+| `status` | `VARCHAR(20)` | `NOT NULL`, default `'active'` — `'active'`\|`'inactive'`, app-enforced, no DB check constraint |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_security_question_pkey` (PK), `m_security_question_question_text_key` (unique).
+
+The 15 seeded questions: *Your father's middle name*; *Your mother's maiden name*; *Your
+paternal grandfather's birth city*; *Your favourite childhood cartoon character*; *Your maternal
+grandmother's first name*; *Your first pet's name*; *Your first school's name*; *Your childhood
+best friend's first name*; *Your favourite childhood teacher's first name*; *The city where your
+mother was born*; *Your first car's make and model*; *Your favourite childhood sport*; *The
+street you grew up on*; *Your first employer's name*; *Your favourite subject in middle school*.
+
+### `users_security_answers`
+Added by migration `034`. Unprefixed: per-user assignment data, a child of the account itself —
+same bucket as `users_roles`/`users_subscriptions` (not `m_`, since it's not itself reference
+data, even though it's *about* `m_security_question`). `answer_hash` is always bcrypt ciphertext,
+never plaintext — these are personal-identity answers, the same treatment as
+`users.password_hash`, not throwaway trivia. `securityQuestion.service.ts`'s
+`replaceUserAnswers()` does a full `DELETE` + re-`INSERT` on every update (Manage Security
+Questions), never a partial edit — there's no way to "keep" an existing answer silently anyway,
+since a hash can't be read back and re-shown.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` |
+| `question_id` | `INT8` | FK → `m_security_question(id)` |
+| `answer_hash` | `VARCHAR(255)` | `NOT NULL` — always bcrypt ciphertext |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `users_security_answers_pkey` (PK), `users_security_answers_user_id_question_id_key`
+(unique on `user_id, question_id` — mirrors `users_subscriptions`' own `(user_id, provider)`
+shape). Exactly 5 rows per account that has completed registration or Manage Security Questions
+(reduced from 7, 2026-08-30 — "Setting up 7 Questions is a little exhausting"; Forgot Password's
+own challenge count dropped in step, from 4-of-7 to 3-of-5, both driven by explicit count
+parameters passed into `securityQuestion.service.ts`'s functions, not a schema change); 0 rows for
+an admin-created account that hasn't set any up yet (Forgot Password 404s for such an account
+until it does).
+
+### `user_evt_password_history`
+Added by migration `035`. Backs password policy rule 7 ("not a repeat of the last 5 passwords") —
+see the **exception note** in the naming-convention section above: unlike every other
+`user_evt_` table, this one has **no TTL**, since "last 5" must survive indefinitely per account
+rather than expire on a fixed window. `passwordHistory.service.ts`'s `recordPassword()` inserts
+the new hash then prunes back to the 5 most-recent rows for that user on every call — same
+insert-then-prune shape as `contrarianFinder.service.ts`'s admin-tier scan history pruning.
+Written on every successful registration, password change, and password reset.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` |
+| `password_hash` | `VARCHAR(255)` | `NOT NULL` — bcrypt ciphertext, same as `users.password_hash` |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `user_evt_password_history_pkey` (PK), `idx_password_history_user_id` (composite on
+`(user_id, created_at)` — covers both `recordPassword()`'s prune query and
+`isPasswordReused()`'s "last 5 for this user" read, both ordered by `created_at DESC`).
 
 ### `sys_schema_migrations`
 Internal bookkeeping table created/maintained by `migrate.js` (not part of the app schema)
