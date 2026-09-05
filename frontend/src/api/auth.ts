@@ -17,6 +17,11 @@ export interface User {
   status: string;
   firstName: string | null;
   lastName: string | null;
+  // Helpdesk / Support Tickets - a live count of status: 'new' tickets, only ever present for a
+  // session holding support:manage (undefined for everyone else, not just 0 - lets
+  // UserPersonaBadge.tsx tell "no unread tickets" apart from "can't see this at all"). Rides
+  // the same GET /auth/me every session already fetches - no separate endpoint for the badge.
+  newSupportTicketCount?: number;
 }
 
 export interface SecurityQuestion {

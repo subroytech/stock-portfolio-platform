@@ -23,6 +23,10 @@ function initialsFor(email: string): string {
 export default function UserPersonaBadge({ user }: UserPersonaBadgeProps) {
   const [open, setOpen] = useState(false);
   const roleLabel = user.roles.length > 0 ? user.roles.join(', ') : 'none';
+  // Helpdesk / Support Tickets - only ever present (not just non-zero) for a session holding
+  // support:manage; rides GET /auth/me so it's live the instant an admin logs in, and ticks
+  // down as tickets are read (see api/supportTickets.ts's useAdminTicketDetail).
+  const newTicketCount = user.newSupportTicketCount ?? 0;
 
   return (
     <div className="relative">
@@ -37,6 +41,15 @@ export default function UserPersonaBadge({ user }: UserPersonaBadgeProps) {
       >
         {initialsFor(user.email)}
       </button>
+      {newTicketCount > 0 && (
+        <span
+          data-testid="user-persona-new-ticket-count"
+          title={`${newTicketCount} unread support ticket${newTicketCount === 1 ? '' : 's'}`}
+          className="absolute -right-1.5 -top-1.5 flex h-[1.125rem] min-w-[1.125rem] items-center justify-center rounded-full bg-danger px-1 text-[.65rem] font-bold leading-none text-white"
+        >
+          {newTicketCount}
+        </span>
+      )}
 
       {open && (
         <>

@@ -30,4 +30,13 @@ describe('PendingReviewPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Log out' }));
     expect(apiFetch).toHaveBeenCalledWith('/auth/logout', expect.objectContaining({ method: 'POST' }));
   });
+
+  // Helpdesk / Support Tickets - this is the one screen a status: 'pending' account can
+  // actually reach, and the one population with no other way to contact an admin at all.
+  test('the Help & Support widget is reachable from the pending-review screen', async () => {
+    vi.spyOn(client, 'apiFetch').mockResolvedValue({ tickets: [] });
+    renderPage();
+    await userEvent.click(screen.getByTestId('support-widget-trigger'));
+    expect(await screen.findByTestId('support-widget-modal')).toBeInTheDocument();
+  });
 });

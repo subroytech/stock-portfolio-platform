@@ -9,6 +9,7 @@ import RolePermissionsPage from './RolePermissionsPage';
 import RolesPage from './RolesPage';
 import PortfolioTemplateApprovalPage from './PortfolioTemplateApprovalPage';
 import ConfigPropertiesPage from './ConfigPropertiesPage';
+import AdminSupportTicketsPage from './AdminSupportTicketsPage';
 import UserPersonaBadge from '../components/UserPersonaBadge';
 import ImpersonationBanner from '../components/ImpersonationBanner';
 import LoginAsModal from '../components/LoginAsModal';
@@ -22,6 +23,7 @@ const TABS = [
   { id: 'roles', label: 'Manage Role' },
   { id: 'portfolioTemplates', label: 'Portfolio Templates' },
   { id: 'configProperties', label: 'Config Properties' },
+  { id: 'support', label: 'Support Tickets' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -51,6 +53,9 @@ export default function AdminPage() {
   // ADMIN_MASTER_ONLY_PERMISSIONS), so this tab is invisible to every other admin session,
   // same hidden-not-disabled pattern as apis/masterData/portfolioTemplates above.
   const canManageConfigProperties = session?.permissions?.includes('config_properties:manage') ?? false;
+  // Helpdesk / Support Tickets (2026-09-05) - zero default grants, same hidden-not-disabled
+  // pattern as every other permission-gated tab on this page.
+  const canManageSupport = session?.permissions?.includes('support:manage') ?? false;
   // "Login-as" (CLAUDE.md's "Login-as" section) - grantable only to admin-master
   // (roles.service.ts's ADMIN_MASTER_ONLY_PERMISSIONS), same hidden-not-disabled pattern as
   // every other permission-gated header control on this page.
@@ -67,6 +72,7 @@ export default function AdminPage() {
     if (tab.id === 'masterData') return canManageMasterData;
     if (tab.id === 'portfolioTemplates') return canManagePortfolioTemplates;
     if (tab.id === 'configProperties') return canManageConfigProperties;
+    if (tab.id === 'support') return canManageSupport;
     return true;
   });
 
@@ -121,6 +127,7 @@ export default function AdminPage() {
         {activeTab === 'roles' && <RolesPage />}
         {activeTab === 'portfolioTemplates' && canManagePortfolioTemplates && <PortfolioTemplateApprovalPage />}
         {activeTab === 'configProperties' && canManageConfigProperties && <ConfigPropertiesPage />}
+        {activeTab === 'support' && canManageSupport && <AdminSupportTicketsPage />}
       </main>
     </div>
   );

@@ -5,6 +5,7 @@ import { ApiKeysModalContext } from '../lib/apiKeysModal';
 import { TickerHandoffContext, type HandoffTarget, type TickerHandoff } from '../lib/tickerHandoff';
 import UserPersonaBadge from './UserPersonaBadge';
 import ImpersonationBanner from './ImpersonationBanner';
+import SupportWidget from './SupportWidget';
 import DashboardPage from '../pages/DashboardPage';
 import FlexPortfolioPage from '../pages/FlexPortfolioPage';
 import MomentumPage from '../pages/MomentumPage';
@@ -88,7 +89,7 @@ export default function TabShell() {
               right edge, immediately before Log out, even when this div renders empty. */}
           <div className="ml-auto flex items-center gap-3">
             {isAdmin && (
-              <Link to="/admin" className="text-sm text-text-secondary hover:text-accent">
+              <Link to="/admin" className="text-sm text-accent hover:underline">
                 Admin
               </Link>
             )}
@@ -102,6 +103,8 @@ export default function TabShell() {
               </button>
             )}
           </div>
+
+          <SupportWidget />
 
           {session && <UserPersonaBadge user={session} />}
 

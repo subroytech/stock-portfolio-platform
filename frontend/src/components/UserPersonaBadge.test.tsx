@@ -76,4 +76,19 @@ describe('UserPersonaBadge', () => {
     await userEvent.click(screen.getByTestId('user-menu-change-password'));
     expect(screen.queryByTestId('user-persona-menu')).not.toBeInTheDocument();
   });
+
+  test('no red count badge when newSupportTicketCount is absent (a session without support:manage)', () => {
+    renderBadge();
+    expect(screen.queryByTestId('user-persona-new-ticket-count')).not.toBeInTheDocument();
+  });
+
+  test('no red count badge when newSupportTicketCount is 0', () => {
+    renderBadge({ newSupportTicketCount: 0 });
+    expect(screen.queryByTestId('user-persona-new-ticket-count')).not.toBeInTheDocument();
+  });
+
+  test('shows the red count badge when there are unread tickets', () => {
+    renderBadge({ newSupportTicketCount: 3 });
+    expect(screen.getByTestId('user-persona-new-ticket-count')).toHaveTextContent('3');
+  });
 });
