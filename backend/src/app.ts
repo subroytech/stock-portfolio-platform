@@ -16,6 +16,7 @@ import rolesRoutes from './routes/roles.routes';
 import functionMasterRoutes from './routes/functionMaster.routes';
 import portfolioTemplateRoutes from './routes/portfolioTemplate.routes';
 import configPropertyRoutes from './routes/configProperty.routes';
+import supportTicketRoutes from './routes/supportTicket.routes';
 import errorHandler from './middleware/errorHandler';
 import rateLimiters from './middleware/rateLimit';
 import requireAuth from './middleware/requireAuth';
@@ -73,6 +74,13 @@ app.use('/portfolio-templates', requireAuth, rateLimiters, portfolioTemplateRout
 // requirePermission('config_properties:manage') on every route restricts this entirely to
 // admin-master (see roles.service.ts's ADMIN_MASTER_ONLY_PERMISSIONS guard).
 app.use('/config-properties', requireAuth, rateLimiters, configPropertyRoutes);
+
+// Helpdesk / Support Tickets (2026-09-05) - requireAuth only at this mount level (not gated
+// further here) since the create/list-mine/reply-mine routes must be reachable by a
+// status: 'pending' session, the one population with no other way to reach an admin at all;
+// the admin-only routes are individually gated by requirePermission('support:manage') inside
+// supportTicket.routes.ts itself.
+app.use('/support', requireAuth, rateLimiters, supportTicketRoutes);
 
 app.use(errorHandler);
 

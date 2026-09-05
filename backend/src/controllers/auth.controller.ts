@@ -5,6 +5,7 @@ import * as impersonationService from '../services/impersonation.service';
 import * as securityQuestionService from '../services/securityQuestion.service';
 import * as passwordHistoryService from '../services/passwordHistory.service';
 import * as usersService from '../services/users.service';
+import * as supportTicketService from '../services/supportTicket.service';
 import { validatePasswordPolicy } from '../utils/passwordPolicy';
 import env from '../config/env';
 
@@ -30,7 +31,13 @@ async function resolveSession(userId: string, impersonating: boolean) {
   const user = (await authService.findUserById(userId))!;
   const roles = await rolesService.getUserRoles(userId);
   const permissions = await rolesService.getUserPermissions(userId);
-  return { ...user, roles, permissions, impersonating };
+  // Helpdesk / Support Tickets - the red "unread" badge on UserPersonaBadge.tsx. Only computed
+  // for a session that actually holds support:manage, so this adds zero extra query cost to
+  // every other session's login/me/signup response.
+  const newSupportTicketCount = permissions.includes('support:manage')
+    ? await supportTicketService.getNewTicketCount()
+    : undefined;
+  return { ...user, roles, permissions, impersonating, newSupportTicketCount };
 }
 
 function emailLocalPart(email: string): string {
@@ -144,7 +151,13 @@ export async function me(req: Request, res: Response, next: NextFunction): Promi
     }
     const roles = await rolesService.getUserRoles(user.id);
     const permissions = await rolesService.getUserPermissions(user.id);
-    res.json({ ...user, roles, permissions, impersonating: !!req.user!.impersonatedBy });
+    // Helpdesk / Support Tickets - same conditional badge-count logic as resolveSession()
+    // above; this handler doesn't call resolveSession() itself (predates it, duplicates its
+    // shape instead), so it needs its own copy of this one line.
+    const newSupportTicketCount = permissions.includes('support:manage')
+      ? await supportTicketService.getNewTicketCount()
+      : undefined;
+    res.json({ ...user, roles, permissions, impersonating: !!req.user!.impersonatedBy, newSupportTicketCount });
   } catch (err) {
     next(err);
   }
