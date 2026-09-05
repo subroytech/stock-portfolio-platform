@@ -1,10 +1,25 @@
 # Database Schema
 
-Live schema on CockroachDB Cloud, database `stockPortfolioAnalysis`. Source of truth is
-`backend/src/db/migrations/*.sql`, applied via `npm run migrate` (see `migrate.js`); this
-doc mirrors what CockroachDB actually built (via `SHOW CREATE TABLE`), which differs
-slightly from the raw SQL — notably `SERIAL` compiles to `INT8 DEFAULT unique_rowid()`,
-not a true incrementing sequence.
+**The database is CockroachDB Cloud, not PostgreSQL** — worth stating plainly since the two are
+easy to conflate. CockroachDB is PostgreSQL **wire-compatible**: the backend connects to it with
+the standard `pg` npm package (`backend/package.json`), the same driver you'd use for real
+Postgres, and most SQL here reads like ordinary Postgres. But it is a different database engine
+under the hood (distributed, not Postgres's own storage/replication), and that leaks through in a
+few concrete ways already hit in this codebase:
+- `SERIAL` in a migration's raw SQL compiles to `INT8 DEFAULT unique_rowid()` once actually
+  built — a random 64-bit id, not a true incrementing sequence. This doc mirrors what
+  CockroachDB actually built (via `SHOW CREATE TABLE`), not the raw migration SQL, precisely
+  because of divergences like this one.
+- `node-pg` returns CockroachDB's `INT8` columns as JS **strings**, not numbers — several
+  services (`marketData.service.ts`, `roles.service.ts`, `contrarianFinder.service.ts`, others)
+  have an explicit `Number(...)` coercion specifically because of this.
+- Some Postgres features/extensions don't exist or behave differently (e.g. no partial-unique-
+  index `ON CONFLICT` inference relied on anywhere in this schema by design — see
+  `tx_shared_contrarian_run`'s user-tier upsert, which does an explicit `DELETE` + `INSERT`
+  instead, precisely to avoid depending on that).
+
+Database `stockPortfolioAnalysis` on CockroachDB Cloud. Source of truth is
+`backend/src/db/migrations/*.sql`, applied via `npm run migrate` (see `migrate.js`).
 
 **How to regenerate this doc / check live state yourself:** run `SHOW CREATE TABLE <name>;`
 in the CockroachDB console's SQL Shell, or `SHOW TABLES FROM "stockPortfolioAnalysis".public;`
