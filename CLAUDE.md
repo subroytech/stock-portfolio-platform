@@ -46,7 +46,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 08-31)
+# Current Build State (as of 09-06)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -1031,6 +1031,110 @@ drawer/banner/archive-mode UI interactions themselves were verified via the 5 ne
 integration tests rather than a live interactive browser walkthrough — flagged as a lighter-weight
 verification pass than usual, available on request.
 
+## Usage Audit + Flex Portfolio Quota Limits ✅ Done
+
+Built 2026-09-05/06 across 7 `/plan`-approved phases (one phase per turn, each built/tested/
+live-verified/reported before the next was scoped), closing two requests from the same
+conversation: (1) making the write-only Usage Tracking data (`user_evt_usage`/
+`user_evt_usage_summary_monthly`, RBAC item's leftover) actually accurate and eventually
+reportable, and (2) per-user caps on Portfolio Upload — Flex template/portfolio creation.
+
+**Phase 1-2 — Usage Audit schema + real API-call detail**: migration `038` adds nullable
+`api_call_details JSONB` to both usage tables plus a new single-row
+`sys_usage_aggregation_watermark` table (`sys_` bucket, mirrors `sys_schema_migrations`).
+`usageTracking.service.ts`'s `logUsage()` gained an optional per-call breakdown parameter —
+`portfolio_refresh`/`contrarian_finder_scan` (the 2 heaviest features) now log real FMP call
+counts instead of the old implicit `1` (one Refresh Prices click is
+`fmpQuoteSymbols.length + historySymbols.length` real calls, previously invisible).
+`event_count`'s existing real-time semantics are untouched — only the new JSONB detail is
+deferred to a watermark-gated daily job (`maybeRunDailyUsageAggregation()`, triggered
+fire-and-forget from `login()`) that merges it into the monthly summary and prunes the raw rows.
+`GET /quotes` tracking and extending call-level detail to Momentum/Long-Term Analysis/Contrarian
+Comeback were both deliberately scoped out (introducing a brand-new tracked feature vs. a small
+first pass) — noted as open, not forgotten.
+
+**Phase 3-4 — Flex Portfolio quota schema + enforcement**: migration `039` adds a "Flex
+Portfolio Limits" Config Properties group (`portfolio_flex_max_pending_templates`=2,
+`_approved_templates`=5, `portfolio_flex_max_portfolios`=6) plus 3 nullable
+`flex_max_*_override` columns on `users` (`NULL` = use the global default). New
+`flexQuota.service.ts` resolves the effective limit per user. Enforced in
+`portfolioTemplate.service.ts`'s `createTemplate()` — checked **at creation time**, including
+the caller's current Approved count (not just Pending), since the confirmed rule is "once a
+user has the max Approved templates, they can't create any more until an admin raises their
+quota," even though a new template always starts Pending — and in `portfolio.service.ts`'s
+`createPortfolioFlex()` (counts `Flex` + `Flex-Err` portfolios together). New
+`TemplateQuotaExceededError`/`PortfolioQuotaExceededError`, both mapped to `409` at every
+relevant controller call site including the Save-Template path.
+
+**Phase 5 — Created-By on the admin template list**: `listAllTemplates()` gained a `LEFT JOIN
+users` and a new `AdminTemplateSummary` type (`createdByEmail`) — deliberately kept off the
+shared `TemplateSummary` type used by the approved/pending lists, which have no need for it.
+
+**Phase 6 — Admin override editing**: the existing `PUT /users/:id` endpoint (not a new route)
+accepts the 3 override fields with `undefined`/`null`/number = don't-touch/clear/set semantics.
+`roles.service.ts`'s `listUsersWithRoles()` (backing `GET /users`) now returns the 3 current
+override values so the UI never shows blank fields for a user who already has one set. Per an
+explicit design discussion, the 3 fields live in a new **pop-up** (`FlexQuotaOverridesModal.tsx`,
+triggered by a "Flex Quotas" button on Manage Users) rather than crammed into the already-tight
+per-row edit line — this is a rare exception action, not routine editing.
+
+**Phase 7 — Created-By/Created-Date display + filters**: `PortfolioTemplateApprovalPage.tsx`
+now shows each template's real creator email + creation date, plus Name/Status/Created-By
+filter controls (client-side, same pattern as `UserRolesPage.tsx`'s own filter bar).
+
+**A live-caught, same-session regression, fixed in Phase 6 itself**: adding the Flex Quotas
+button and narrowing the Password input broke Manage Users' filter-header alignment (the header
+row was never updated to match) — fixed before this ever shipped, not a released bug.
+
+764+ backend tests, 450+ frontend tests by the end of Phase 7, `tsc`/lint clean both sides
+throughout. Every phase live-verified against the real dev DB with throwaway accounts, cleaned
+up after each (quota boundaries hit exactly at 2/5/6, per-user overrides raising/lowering the
+effective limit and reading the *live* Config Property value — not a hardcoded fallback,
+confirmed by bumping the global default mid-test and watching a never-overridden user's
+effective limit track it).
+
+**Known gaps, not built this pass (see Next Up)**: the quota-exceeded `409` messages render via
+existing generic error-display scaffolding (real backend message, plain red text) — no special
+styling/CTA, no pre-submission guard, no client-side visibility into a user's current limit.
+
+## Admin Console UI Cleanup — Grouped Tabs + Filter Alignment ✅ Done
+
+Built 2026-09-06, two observations raised before starting the Usage Dashboard. `AdminPage.tsx`'s
+9 flat top-level tabs collapsed to 6: Manage Users/Functions/Permission/Role now live under one
+"Manage User Attribute" parent tab, revealing the 4 as sub-tabs on click — same sub-tab bar
+pattern `TabShell.tsx` already used for Portfolio's Legacy/Flex split. Pure navigation
+regrouping, no permission-gating change (none of the 4 were ever hidden by permission). Also
+fixed the filter-header misalignment noted above: the "Password" header label is now
+"New Password" at a matching fixed width, and a header placeholder was added for the "Flex
+Quotas" column that never had one.
+
+## User Usage Dashboard ✅ Done
+
+Built 2026-09-06, `/plan`-approved — the first read/reporting surface over the Usage Audit data
+above, which had been write-only since it existed. New Admin Console "User Usage" tab, two
+sub-tabs: **Last 3 Days** (default) and **Monthly** (with a month picker, since
+`user_evt_usage_summary_monthly` already retains ~12 months). Landing view: users ranked by a
+usage score — real API-call counts summed where known, falling back to 1-per-event
+(Last 3 Days) or the row's own `event_count` (Monthly) for the 3 features without call-level
+detail yet — a zero-usage user still appears, at the bottom, rather than being omitted.
+
+**A real design conflict surfaced and fixed while scoping this**: the existing daily
+aggregation job deleted a feature's raw detail rows as soon as they were folded into the
+monthly summary (within ~24h) — too soon for a "Last 3 Days" view to ever see the full window.
+Fixed by changing the job's merge/delete query to only touch rows **older than 3 days**,
+guaranteeing Last 3 Days always has complete raw detail; the monthly summary's own detail is
+delayed by up to those same 3 extra days for the newest activity (already-accepted lag).
+
+New `getUsageRankingLast3Days()`/`getUsageRankingForMonth()`/`getAvailableUsageMonths()` in
+`usageTracking.service.ts`, `GET /usage-audit/{last-3-days,monthly,available-months}` gated by a
+new zero-default-grant `usage_audit:view` permission (migration `040`, same "Admin or
+Admin-Master can grant to any role" precedent as `contrarian_finder:view_history`). 778 backend
+tests (25 new), 458 frontend tests (7 new). **Live-verified against the real dev DB**: real-call-
+sum + event-fallback scoring confirmed correct; the 3-day retention boundary confirmed exactly
+right (a 2-day-old detail row survived a sweep untouched, a 4-day-old one was merged+deleted);
+directly observed Monthly temporarily under-reporting very recent activity via the event-count
+fallback until the sweep catches up — confirmed as the designed tradeoff, not a bug.
+
 ## Next Up
 
 - **Login-as live verification** — impersonate a plain user with two real accounts and confirm the
@@ -1038,8 +1142,14 @@ verification pass than usual, available on request.
   cleanly, impersonating another admin/admin-master is blocked, and the audit row in
   `user_evt_impersonation_log` gets a non-null `ended_at` after returning.
 
-- **Usage Tracking** (the unfinished part of the RBAC item above) — extend per-feature usage
-  logging beyond Contrarian Finder scans, toward future subscription tiering.
+- **Quota-exceeded error UX polish** (Flex Portfolio Quota Limits' known gap) — today's `409`
+  messages render via existing generic error-display scaffolding (real backend message, plain
+  red text, no special styling/CTA). Needs: a clearer call-to-action, a pre-submission guard
+  (warn/disable before the user hits the cap, not just after), and client-side visibility into
+  a user's current effective limit.
+- **Usage Audit follow-ons**: `GET /quotes` still has zero usage tracking at all; Momentum/
+  Long-Term Analysis/Contrarian Comeback still only log a plain event count, not call-level
+  detail (both deliberately deferred, not forgotten — see the Usage Audit section above).
 - Two small known-leftover cleanups (harmless, not yet decided): an orphaned
   `apiKeys:bringMyOwn` permission naming inconsistency (`User Manual.md`); `momentum
   .service.ts`'s dead-but-undeleted functions, kept as the Python extraction's rollback path.
