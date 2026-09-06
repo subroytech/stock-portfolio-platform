@@ -139,6 +139,23 @@ describe('UserRolesPage', () => {
     }));
   });
 
+  test('the "Flex Quotas" trigger opens the overrides modal pre-filled for that row\'s user', async () => {
+    mockFetch({
+      users: [{
+        id: '2', email: 'a@b.com', roles: ['user'], apiKeyProviders: [], status: 'active',
+        flexMaxPendingTemplatesOverride: 4, flexMaxApprovedTemplatesOverride: null, flexMaxPortfoliosOverride: null,
+      }],
+    });
+    renderPage();
+    await screen.findByLabelText('Email for a@b.com');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Flex Quotas' }));
+
+    expect(screen.getByText('Flex Quota Overrides')).toBeInTheDocument();
+    expect(screen.getByLabelText('Max Pending-Approval Templates')).toHaveValue('4');
+    expect(screen.getByLabelText('Max Approved Templates')).toHaveValue('');
+  });
+
   test('creating a user POSTs the form fields and clears them', async () => {
     mockFetch({ users: [] });
     renderPage();

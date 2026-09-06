@@ -159,6 +159,13 @@ describe('POST /portfolio-templates', () => {
     const res = await request(app).post('/portfolio-templates').set('Cookie', authCookie).send(validBody);
     expect(res.status).toBe(409);
   });
+
+  test('409 when the caller is at their effective Flex Portfolio Quota Limit', async () => {
+    mockCreate.mockRejectedValue(new portfolioTemplateService.TemplateQuotaExceededError('limit reached'));
+    const res = await request(app).post('/portfolio-templates').set('Cookie', authCookie).send(validBody);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('limit reached');
+  });
 });
 
 describe('PUT /portfolio-templates/:id/status', () => {

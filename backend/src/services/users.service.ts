@@ -53,12 +53,46 @@ export async function updateUserPassword(userId: string, passwordHash: string): 
   await pool.query('UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1', [userId, passwordHash]);
 }
 
+// Flex Portfolio Quota Limits (Phase 4) - admin-set per-user overrides on the 3 global Config
+// Properties defaults (migration 039). null clears the override back to "use the global
+// default"; a number sets it. Same one-column-per-function shape as updateUserEmail/
+// updateUserStatus above.
+export async function updateUserFlexPendingOverride(userId: string, value: number | null): Promise<void> {
+  await pool.query('UPDATE users SET flex_max_pending_templates_override = $2, updated_at = now() WHERE id = $1', [userId, value]);
+}
+
+export async function updateUserFlexApprovedOverride(userId: string, value: number | null): Promise<void> {
+  await pool.query('UPDATE users SET flex_max_approved_templates_override = $2, updated_at = now() WHERE id = $1', [userId, value]);
+}
+
+export async function updateUserFlexPortfoliosOverride(userId: string, value: number | null): Promise<void> {
+  await pool.query('UPDATE users SET flex_max_portfolios_override = $2, updated_at = now() WHERE id = $1', [userId, value]);
+}
+
 // Re-read after a partial update (users.controller.ts's updateUser) so the response always
 // reflects the row's actual current state, regardless of which fields were changed.
-export async function getUserDetail(userId: string): Promise<{ id: string; email: string; status: string } | null> {
-  const { rows } = await pool.query<{ id: string; email: string; status: string }>(
-    'SELECT id, email, status FROM users WHERE id = $1',
+export async function getUserDetail(userId: string): Promise<{
+  id: string; email: string; status: string;
+  flexMaxPendingTemplatesOverride: number | null;
+  flexMaxApprovedTemplatesOverride: number | null;
+  flexMaxPortfoliosOverride: number | null;
+} | null> {
+  const { rows } = await pool.query<{
+    id: string; email: string; status: string;
+    flex_max_pending_templates_override: number | null;
+    flex_max_approved_templates_override: number | null;
+    flex_max_portfolios_override: number | null;
+  }>(
+    `SELECT id, email, status, flex_max_pending_templates_override, flex_max_approved_templates_override, flex_max_portfolios_override
+     FROM users WHERE id = $1`,
     [userId],
   );
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    id: row.id, email: row.email, status: row.status,
+    flexMaxPendingTemplatesOverride: row.flex_max_pending_templates_override == null ? null : Number(row.flex_max_pending_templates_override),
+    flexMaxApprovedTemplatesOverride: row.flex_max_approved_templates_override == null ? null : Number(row.flex_max_approved_templates_override),
+    flexMaxPortfoliosOverride: row.flex_max_portfolios_override == null ? null : Number(row.flex_max_portfolios_override),
+  };
 }

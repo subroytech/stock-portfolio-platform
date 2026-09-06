@@ -240,6 +240,13 @@ describe('POST /portfolios/flex', () => {
     expect(res.status).toBe(409);
   });
 
+  test('409 when the caller is at their effective Flex Portfolio Quota Limit', async () => {
+    mockCreatePortfolioFlex.mockRejectedValue(new portfolioService.PortfolioQuotaExceededError('limit reached'));
+    const res = await request(app).post('/portfolios/flex').set('Cookie', authCookie).send(validBody);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('limit reached');
+  });
+
   test('404 when uploadTemplateId does not resolve to a real template', async () => {
     mockCreatePortfolioFlex.mockRejectedValue(new portfolioTemplateService.TemplateNotFoundError('gone'));
     const res = await request(app).post('/portfolios/flex').set('Cookie', authCookie).send({ ...validBody, uploadTemplateId: '999', columnMapping: undefined });
@@ -397,7 +404,7 @@ describe('POST /portfolios/:id/refresh-prices', () => {
       todayChangeDollar: 500, todayChangePercent: 50, // quantity (10) * per-share change (50)
     });
     expect(res.body.performanceHistory.AAPL).toEqual([{ date: '2026-07-01', close: 145, low: 140 }]);
-    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'portfolio_refresh');
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'portfolio_refresh', { fmp_quote: 1, fmp_historical: 1 });
   });
 
   test('a failed usage log does not turn a successful response into a 500 (fire-and-forget)', async () => {

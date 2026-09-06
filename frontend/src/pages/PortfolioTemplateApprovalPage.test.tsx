@@ -24,8 +24,8 @@ describe('PortfolioTemplateApprovalPage', () => {
       if (url === '/portfolio-templates/admin/all') {
         return Promise.resolve({
           templates: [
-            { id: '1', templateName: 'Pending One', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1' },
-            { id: '2', templateName: 'Already Approved', status: 'Approved', createdBy: 'u2', createdAt: 't1' },
+            { id: '1', templateName: 'Pending One', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' },
+            { id: '2', templateName: 'Already Approved', status: 'Approved', createdBy: 'u2', createdAt: '2026-08-05T00:00:00Z', createdByEmail: 'u2@b.com' },
           ],
         });
       }
@@ -43,15 +43,143 @@ describe('PortfolioTemplateApprovalPage', () => {
     expect(within(approvedRow).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
   });
 
+  test('each row shows its real creator email and creation date', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/portfolio-templates/admin/all') {
+        return Promise.resolve({
+          templates: [{ id: '1', templateName: 'Pending One', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'creator@b.com' }],
+        });
+      }
+      return Promise.resolve({});
+    });
+    renderPage();
+
+    await screen.findByText('Pending One');
+    expect(screen.getByText(/Created by creator@b\.com/)).toBeInTheDocument();
+  });
+
+  test('falls back to "unknown" when a template has no matched creator', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/portfolio-templates/admin/all') {
+        return Promise.resolve({
+          templates: [{ id: '1', templateName: 'Orphaned Creator', status: 'Pending Approval', createdBy: null, createdAt: '2026-08-06T00:00:00Z', createdByEmail: null }],
+        });
+      }
+      return Promise.resolve({});
+    });
+    renderPage();
+
+    await screen.findByText('Orphaned Creator');
+    expect(screen.getByText(/Created by unknown/)).toBeInTheDocument();
+  });
+
+  describe('filters', () => {
+    function threeTemplates() {
+      return {
+        templates: [
+          { id: '1', templateName: 'Fidelity CSV', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'alice@b.com' },
+          { id: '2', templateName: 'Schwab Export', status: 'Approved', createdBy: 'u2', createdAt: '2026-08-05T00:00:00Z', createdByEmail: 'bob@b.com' },
+          { id: '3', templateName: 'Empower XLS', status: 'Rejected', createdBy: 'u1', createdAt: '2026-08-04T00:00:00Z', createdByEmail: 'alice@b.com' },
+        ],
+      };
+    }
+
+    function mockThreeTemplates() {
+      return vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/portfolio-templates/admin/all') return Promise.resolve(threeTemplates());
+        return Promise.resolve({});
+      });
+    }
+
+    test('typing a template-name substring narrows the list with no new network call', async () => {
+      const apiFetch = mockThreeTemplates();
+      renderPage();
+      await screen.findByText('Fidelity CSV');
+      const callsBefore = apiFetch.mock.calls.length;
+
+      await userEvent.type(screen.getByLabelText('Filter by template name'), 'fidel');
+
+      expect(screen.getByText('Fidelity CSV')).toBeInTheDocument();
+      expect(screen.queryByText('Schwab Export')).not.toBeInTheDocument();
+      expect(screen.queryByText('Empower XLS')).not.toBeInTheDocument();
+      expect(apiFetch).toHaveBeenCalledTimes(callsBefore);
+    });
+
+    test('picking a status narrows the list with no new network call', async () => {
+      const apiFetch = mockThreeTemplates();
+      renderPage();
+      await screen.findByText('Fidelity CSV');
+      const callsBefore = apiFetch.mock.calls.length;
+
+      await userEvent.selectOptions(screen.getByLabelText('Filter by status'), 'Approved');
+
+      expect(screen.getByText('Schwab Export')).toBeInTheDocument();
+      expect(screen.queryByText('Fidelity CSV')).not.toBeInTheDocument();
+      expect(screen.queryByText('Empower XLS')).not.toBeInTheDocument();
+      expect(apiFetch).toHaveBeenCalledTimes(callsBefore);
+    });
+
+    test('typing a created-by substring narrows the list with no new network call', async () => {
+      const apiFetch = mockThreeTemplates();
+      renderPage();
+      await screen.findByText('Fidelity CSV');
+      const callsBefore = apiFetch.mock.calls.length;
+
+      await userEvent.type(screen.getByLabelText('Filter by created by'), 'alice');
+
+      expect(screen.getByText('Fidelity CSV')).toBeInTheDocument();
+      expect(screen.getByText('Empower XLS')).toBeInTheDocument();
+      expect(screen.queryByText('Schwab Export')).not.toBeInTheDocument();
+      expect(apiFetch).toHaveBeenCalledTimes(callsBefore);
+    });
+
+    test('combining name and created-by filters applies both', async () => {
+      mockThreeTemplates();
+      renderPage();
+      await screen.findByText('Fidelity CSV');
+
+      await userEvent.type(screen.getByLabelText('Filter by template name'), 'empower');
+      await userEvent.type(screen.getByLabelText('Filter by created by'), 'alice');
+
+      expect(screen.getByText('Empower XLS')).toBeInTheDocument();
+      expect(screen.queryByText('Fidelity CSV')).not.toBeInTheDocument();
+      expect(screen.queryByText('Schwab Export')).not.toBeInTheDocument();
+    });
+
+    test('resetting the status filter back to "All" restores the full list', async () => {
+      mockThreeTemplates();
+      renderPage();
+      await screen.findByText('Fidelity CSV');
+
+      await userEvent.selectOptions(screen.getByLabelText('Filter by status'), 'Approved');
+      expect(screen.queryByText('Fidelity CSV')).not.toBeInTheDocument();
+
+      await userEvent.selectOptions(screen.getByLabelText('Filter by status'), 'all');
+      expect(screen.getByText('Fidelity CSV')).toBeInTheDocument();
+      expect(screen.getByText('Schwab Export')).toBeInTheDocument();
+      expect(screen.getByText('Empower XLS')).toBeInTheDocument();
+    });
+
+    test('shows a "no matches" message when filters exclude every template', async () => {
+      mockThreeTemplates();
+      renderPage();
+      await screen.findByText('Fidelity CSV');
+
+      await userEvent.type(screen.getByLabelText('Filter by template name'), 'nonexistent');
+
+      expect(await screen.findByText('No templates match the current filters.')).toBeInTheDocument();
+    });
+  });
+
   test('expanding a row fetches and shows its mapping + sample preview', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
       if (url === '/portfolio-templates/admin/all') {
-        return Promise.resolve({ templates: [{ id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1' }] });
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
       }
       if (url === '/portfolio-templates/1') {
         return Promise.resolve({
           template: {
-            id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1',
+            id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com',
             reviewedBy: null, reviewedAt: null, columnMapping: { symbol: 'Ticker', quantity: 'Shares' },
             samplePreview: [{ symbol: 'AAPL' }], headerRowIndex: 3, dataStartColumnIndex: 2,
             howToUseDescription: 'Schwab export — headers on row 3',
@@ -76,12 +204,12 @@ describe('PortfolioTemplateApprovalPage', () => {
   test('shows the footer marker line when a template has one configured', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
       if (url === '/portfolio-templates/admin/all') {
-        return Promise.resolve({ templates: [{ id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1' }] });
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
       }
       if (url === '/portfolio-templates/1') {
         return Promise.resolve({
           template: {
-            id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1',
+            id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com',
             reviewedBy: null, reviewedAt: null, columnMapping: { symbol: 'Ticker', quantity: 'Shares' },
             samplePreview: [{ symbol: 'AAPL' }], headerRowIndex: 3, dataStartColumnIndex: 2,
             howToUseDescription: null, footerMarkerColumnIndex: 1, footerMarkerText: 'Total',
@@ -99,12 +227,12 @@ describe('PortfolioTemplateApprovalPage', () => {
   test('shows the cash marker line (separate-column value source) when a template has one configured', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
       if (url === '/portfolio-templates/admin/all') {
-        return Promise.resolve({ templates: [{ id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1' }] });
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
       }
       if (url === '/portfolio-templates/1') {
         return Promise.resolve({
           template: {
-            id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1',
+            id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com',
             reviewedBy: null, reviewedAt: null, columnMapping: { symbol: 'Ticker', quantity: 'Shares' },
             samplePreview: [{ symbol: 'AAPL' }], headerRowIndex: 3, dataStartColumnIndex: 2,
             howToUseDescription: null, footerMarkerColumnIndex: null, footerMarkerText: null,
@@ -123,12 +251,12 @@ describe('PortfolioTemplateApprovalPage', () => {
   test('shows the cash marker line (embedded value source) when a template has one configured', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
       if (url === '/portfolio-templates/admin/all') {
-        return Promise.resolve({ templates: [{ id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1' }] });
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
       }
       if (url === '/portfolio-templates/1') {
         return Promise.resolve({
           template: {
-            id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1',
+            id: '1', templateName: 'Schwab Export', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com',
             reviewedBy: null, reviewedAt: null, columnMapping: { symbol: 'Ticker', quantity: 'Shares' },
             samplePreview: [{ symbol: 'AAPL' }], headerRowIndex: 3, dataStartColumnIndex: 2,
             howToUseDescription: null, footerMarkerColumnIndex: null, footerMarkerText: null,
@@ -147,7 +275,7 @@ describe('PortfolioTemplateApprovalPage', () => {
   test('Approve calls PUT /portfolio-templates/:id/status with Approved', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
       if (url === '/portfolio-templates/admin/all') {
-        return Promise.resolve({ templates: [{ id: '1', templateName: 'Pending One', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1' }] });
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Pending One', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
       }
       if (url === '/portfolio-templates/1/status' && options?.method === 'PUT') {
         expect(JSON.parse(options.body as string)).toEqual({ status: 'Approved' });
@@ -164,7 +292,7 @@ describe('PortfolioTemplateApprovalPage', () => {
   test('Reject calls PUT /portfolio-templates/:id/status with Rejected', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
       if (url === '/portfolio-templates/admin/all') {
-        return Promise.resolve({ templates: [{ id: '1', templateName: 'Pending One', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1' }] });
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Pending One', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
       }
       if (url === '/portfolio-templates/1/status' && options?.method === 'PUT') {
         expect(JSON.parse(options.body as string)).toEqual({ status: 'Rejected' });
@@ -181,7 +309,7 @@ describe('PortfolioTemplateApprovalPage', () => {
   test('Delete is hidden for an Approved template', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
       if (url === '/portfolio-templates/admin/all') {
-        return Promise.resolve({ templates: [{ id: '1', templateName: 'Approved One', status: 'Approved', createdBy: 'u1', createdAt: 't1' }] });
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Approved One', status: 'Approved', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
       }
       return Promise.resolve({});
     });
@@ -194,7 +322,7 @@ describe('PortfolioTemplateApprovalPage', () => {
   test('Delete requires confirmation, then calls DELETE /portfolio-templates/:id, for a Pending/Rejected template', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
       if (url === '/portfolio-templates/admin/all') {
-        return Promise.resolve({ templates: [{ id: '1', templateName: 'Orphaned One', status: 'Rejected', createdBy: 'u1', createdAt: 't1' }] });
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Orphaned One', status: 'Rejected', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
       }
       if (url === '/portfolio-templates/1' && options?.method === 'DELETE') {
         return Promise.resolve({ success: true });
@@ -213,7 +341,7 @@ describe('PortfolioTemplateApprovalPage', () => {
   test('a 409 in-use error from Delete opens the Bound Portfolios pop-up', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
       if (url === '/portfolio-templates/admin/all') {
-        return Promise.resolve({ templates: [{ id: '1', templateName: 'Bound One', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1' }] });
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Bound One', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
       }
       if (url === '/portfolio-templates/1' && options?.method === 'DELETE') {
         return Promise.reject(new client.ApiError(409, 'Cannot delete a template that is still bound to an existing portfolio.', null));
@@ -239,7 +367,7 @@ describe('PortfolioTemplateApprovalPage', () => {
     let templateDeleteAttempts = 0;
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
       if (url === '/portfolio-templates/admin/all') {
-        return Promise.resolve({ templates: [{ id: '1', templateName: 'Bound One', status: 'Pending Approval', createdBy: 'u1', createdAt: 't1' }] });
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Bound One', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
       }
       if (url === '/portfolio-templates/1' && options?.method === 'DELETE') {
         templateDeleteAttempts += 1;

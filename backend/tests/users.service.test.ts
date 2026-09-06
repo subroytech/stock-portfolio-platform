@@ -4,6 +4,7 @@ import { pool } from '../src/db/pool';
 import {
   createUserAccount, updateUserStatus, isValidUserStatus, InvalidStatusError,
   updateUserEmail, updateUserPassword, getUserDetail,
+  updateUserFlexPendingOverride, updateUserFlexApprovedOverride, updateUserFlexPortfoliosOverride,
 } from '../src/services/users.service';
 import { EmailAlreadyExistsError } from '../src/services/auth.service';
 import { InvalidRoleError } from '../src/services/roles.service';
@@ -96,10 +97,52 @@ describe('updateUserPassword', () => {
   });
 });
 
+describe('Flex Portfolio Quota Limits - per-user override updates', () => {
+  test('updateUserFlexPendingOverride sets the pending-templates override column', async () => {
+    mockQuery.mockResolvedValueOnce({});
+    await updateUserFlexPendingOverride('2', 4);
+    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('UPDATE users SET flex_max_pending_templates_override'), ['2', 4]);
+  });
+
+  test('updateUserFlexApprovedOverride sets the approved-templates override column', async () => {
+    mockQuery.mockResolvedValueOnce({});
+    await updateUserFlexApprovedOverride('2', 8);
+    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('UPDATE users SET flex_max_approved_templates_override'), ['2', 8]);
+  });
+
+  test('updateUserFlexPortfoliosOverride sets the portfolios override column', async () => {
+    mockQuery.mockResolvedValueOnce({});
+    await updateUserFlexPortfoliosOverride('2', 12);
+    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('UPDATE users SET flex_max_portfolios_override'), ['2', 12]);
+  });
+
+  test('a null value clears the override back to "use the global default"', async () => {
+    mockQuery.mockResolvedValueOnce({});
+    await updateUserFlexPortfoliosOverride('2', null);
+    expect(mockQuery).toHaveBeenCalledWith(expect.any(String), ['2', null]);
+  });
+});
+
 describe('getUserDetail', () => {
   test('returns the current row', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ id: '2', email: 'a@b.com', status: 'active' }] });
-    expect(await getUserDetail('2')).toEqual({ id: '2', email: 'a@b.com', status: 'active' });
+    expect(await getUserDetail('2')).toEqual({
+      id: '2', email: 'a@b.com', status: 'active',
+      flexMaxPendingTemplatesOverride: null, flexMaxApprovedTemplatesOverride: null, flexMaxPortfoliosOverride: null,
+    });
+  });
+
+  test('returns non-null Flex quota overrides when set', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: '2', email: 'a@b.com', status: 'active',
+        flex_max_pending_templates_override: 4, flex_max_approved_templates_override: 8, flex_max_portfolios_override: 12,
+      }],
+    });
+    expect(await getUserDetail('2')).toEqual({
+      id: '2', email: 'a@b.com', status: 'active',
+      flexMaxPendingTemplatesOverride: 4, flexMaxApprovedTemplatesOverride: 8, flexMaxPortfoliosOverride: 12,
+    });
   });
 
   test('returns null when no row matches', async () => {

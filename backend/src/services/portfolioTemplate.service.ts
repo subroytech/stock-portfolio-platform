@@ -4,12 +4,14 @@
 import { PoolClient } from 'pg';
 import { pool } from '../db/pool';
 import { ColumnMapping, ALL_TARGET_FIELDS, CashConfig } from './flexParser.service';
+import * as flexQuota from './flexQuota.service';
 
 export class DuplicateTemplateNameError extends Error {}
 export class InvalidTemplateNameError extends Error {}
 export class TemplateNotFoundError extends Error {}
 export class TemplateStatusError extends Error {}
 export class TemplateInUseError extends Error {}
+export class TemplateQuotaExceededError extends Error {}
 
 const UNIQUE_VIOLATION = '23505';
 
@@ -22,6 +24,15 @@ export interface TemplateSummary {
   createdBy: string | null;
   createdAt: string;
   howToUseDescription: string | null;
+}
+
+// Admin "all templates" list only (listAllTemplates below) - requirement #4 of the Flex
+// Portfolio Quota Limits ask ("get the Created by... to filter by all 3 fields"). Kept
+// separate from TemplateSummary rather than added there, since listApprovedTemplates()/
+// listMyPending()/getTemplateDetail() have no need for a creator identity and shouldn't pay
+// for the extra JOIN or carry an always-null field.
+export interface AdminTemplateSummary extends TemplateSummary {
+  createdByEmail: string | null;
 }
 
 export interface TemplateDetail extends TemplateSummary {
@@ -53,6 +64,10 @@ function toSummary(row: { id: string; template_name: string; status: TemplateSta
   };
 }
 
+function toAdminSummary(row: { id: string; template_name: string; status: TemplateStatus; created_by: string | null; created_at: string; how_to_use_description: string | null; created_by_email: string | null }): AdminTemplateSummary {
+  return { ...toSummary(row), createdByEmail: row.created_by_email };
+}
+
 // Approved-list a user sees (Admin Console "Existing Template" list) - filtered, not a flat
 // shared pool: templates created by admin/admin-master, or by the caller themselves.
 export async function listApprovedTemplates(userId: string, search?: string): Promise<TemplateSummary[]> {
@@ -76,13 +91,14 @@ export async function listApprovedTemplates(userId: string, search?: string): Pr
 // Admin Console approval screen only (portfolio_template:manage_status) - every template
 // regardless of status/creator, newest-pending-first so what actually needs a decision sorts
 // to the top.
-export async function listAllTemplates(): Promise<TemplateSummary[]> {
-  const { rows } = await pool.query<{ id: string; template_name: string; status: TemplateStatus; created_by: string | null; created_at: string; how_to_use_description: string | null }>(
-    `SELECT id, template_name, status, created_by, created_at, how_to_use_description
-     FROM m_portfolio_template_mapping_master
-     ORDER BY (status = 'Pending Approval') DESC, created_at DESC`,
+export async function listAllTemplates(): Promise<AdminTemplateSummary[]> {
+  const { rows } = await pool.query<{ id: string; template_name: string; status: TemplateStatus; created_by: string | null; created_at: string; how_to_use_description: string | null; created_by_email: string | null }>(
+    `SELECT m.id, m.template_name, m.status, m.created_by, m.created_at, m.how_to_use_description, u.email AS created_by_email
+     FROM m_portfolio_template_mapping_master m
+     LEFT JOIN users u ON u.id = m.created_by
+     ORDER BY (m.status = 'Pending Approval') DESC, m.created_at DESC`,
   );
-  return rows.map(toSummary);
+  return rows.map(toAdminSummary);
 }
 
 // The personal Pending-Approval dropdown - only ever the caller's own templates.
@@ -207,6 +223,33 @@ export async function createTemplate(input: CreateTemplateInput, client?: PoolCl
   const conn = client ?? await pool.connect();
   try {
     if (ownsConnection) await conn.query('BEGIN');
+
+    // Flex Portfolio Quota Limits (Phase 4) - checked at creation time, not approval time.
+    // Even though a new template always starts Pending Approval, the caller's current Approved
+    // count also gates whether they may create another: "once a user has the max Approved
+    // templates, they can't create any more until an admin raises their quota" (confirmed
+    // requirement) - setTemplateStatus() itself has no matching check.
+    const [pendingLimit, approvedLimit] = await Promise.all([
+      flexQuota.getEffectivePendingTemplateLimit(input.createdBy),
+      flexQuota.getEffectiveApprovedTemplateLimit(input.createdBy),
+    ]);
+    const { rows: countRows } = await conn.query<{ status: TemplateStatus; count: number }>(
+      `SELECT status, count(*)::int AS count FROM m_portfolio_template_mapping_master
+       WHERE created_by = $1 AND status IN ('Pending Approval', 'Approved') GROUP BY status`,
+      [input.createdBy],
+    );
+    const pendingCount = countRows.find((r) => r.status === 'Pending Approval')?.count ?? 0;
+    const approvedCount = countRows.find((r) => r.status === 'Approved')?.count ?? 0;
+    if (pendingCount >= pendingLimit) {
+      throw new TemplateQuotaExceededError(
+        `You already have ${pendingCount} template(s) in Pending Approval status (limit ${pendingLimit}). Ask an admin to review one before creating another.`,
+      );
+    }
+    if (approvedCount >= approvedLimit) {
+      throw new TemplateQuotaExceededError(
+        `You already have ${approvedCount} Approved template(s) (limit ${approvedLimit}). Ask an admin to raise your limit or remove an existing one.`,
+      );
+    }
 
     let masterRow: { id: string; created_at: string };
     try {

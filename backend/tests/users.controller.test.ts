@@ -1,4 +1,12 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
+// Flex Portfolio Quota Limits (Phase 4) added enough real requests against the real /users
+// router (mounted with rateLimiters in app.ts) to trip the actual per-IP/per-user limiter
+// mid-run. Same no-op mock already used by auth.controller.test.ts/portfolio.controller.test.ts
+// for the same reason.
+jest.mock('../src/middleware/rateLimit', () => ({
+  __esModule: true,
+  default: [(_req: unknown, _res: unknown, next: () => void) => next(), (_req: unknown, _res: unknown, next: () => void) => next()],
+}));
 
 import request from 'supertest';
 import { pool } from '../src/db/pool';
@@ -55,8 +63,14 @@ describe('GET /users', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       users: [
-        { id: '1', email: 'a@b.com', roles: ['user'], apiKeyProviders: ['fmp'], status: 'active' },
-        { id: '2', email: 'admin@b.com', roles: ['admin'], apiKeyProviders: [], status: 'deactivated' },
+        {
+          id: '1', email: 'a@b.com', roles: ['user'], apiKeyProviders: ['fmp'], status: 'active',
+          flexMaxPendingTemplatesOverride: null, flexMaxApprovedTemplatesOverride: null, flexMaxPortfoliosOverride: null,
+        },
+        {
+          id: '2', email: 'admin@b.com', roles: ['admin'], apiKeyProviders: [], status: 'deactivated',
+          flexMaxPendingTemplatesOverride: null, flexMaxApprovedTemplatesOverride: null, flexMaxPortfoliosOverride: null,
+        },
       ],
     });
   });
@@ -193,7 +207,10 @@ describe('PUT /users/:id', () => {
 
     const res = await request(app).put('/users/2').set('Cookie', authCookie).send({ email: 'new@b.com' });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ id: '2', email: 'new@b.com', status: 'active', roles: ['user'] });
+    expect(res.body).toEqual({
+      id: '2', email: 'new@b.com', status: 'active', roles: ['user'],
+      flexMaxPendingTemplatesOverride: null, flexMaxApprovedTemplatesOverride: null, flexMaxPortfoliosOverride: null,
+    });
     expect(mockConnect).not.toHaveBeenCalled(); // no role field given, setUserRole never invoked
   });
 
@@ -212,7 +229,10 @@ describe('PUT /users/:id', () => {
 
     const res = await request(app).put('/users/2').set('Cookie', authCookie).send({ password: 'brandnewpassword' });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ id: '2', email: 'a@b.com', status: 'active', roles: ['user'] });
+    expect(res.body).toEqual({
+      id: '2', email: 'a@b.com', status: 'active', roles: ['user'],
+      flexMaxPendingTemplatesOverride: null, flexMaxApprovedTemplatesOverride: null, flexMaxPortfoliosOverride: null,
+    });
   });
 
   test('200 updating email, password, status, and role together', async () => {
@@ -228,7 +248,10 @@ describe('PUT /users/:id', () => {
     const res = await request(app).put('/users/2').set('Cookie', authCookie)
       .send({ email: 'new@b.com', password: 'brandnewpassword', status: 'deactivated', role: 'admin' });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ id: '2', email: 'new@b.com', status: 'deactivated', roles: ['admin'] });
+    expect(res.body).toEqual({
+      id: '2', email: 'new@b.com', status: 'deactivated', roles: ['admin'],
+      flexMaxPendingTemplatesOverride: null, flexMaxApprovedTemplatesOverride: null, flexMaxPortfoliosOverride: null,
+    });
   });
 
   test('400 for an unknown role name', async () => {
@@ -236,6 +259,54 @@ describe('PUT /users/:id', () => {
     mockConnect.mockResolvedValue(makeMockClient({ roleFound: false }));
     const res = await request(app).put('/users/2').set('Cookie', authCookie).send({ role: 'superadmin' });
     expect(res.status).toBe(400);
+  });
+
+  describe('Flex Portfolio Quota Limits - per-user overrides', () => {
+    test('200 setting a Flex quota override, reflected in the response', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+      mockQuery.mockResolvedValueOnce({}); // updateUserFlexPortfoliosOverride
+      mockQuery.mockResolvedValueOnce({
+        rows: [{ id: '2', email: 'a@b.com', status: 'active', flex_max_portfolios_override: 10 }],
+      }); // getUserDetail
+      mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user' }] }); // getUserRoles
+
+      const res = await request(app).put('/users/2').set('Cookie', authCookie).send({ flexMaxPortfoliosOverride: 10 });
+      expect(res.status).toBe(200);
+      expect(res.body.flexMaxPortfoliosOverride).toBe(10);
+      expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('flex_max_portfolios_override'), ['2', 10]);
+    });
+
+    test('a null value clears the override, distinct from the field being absent', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+      mockQuery.mockResolvedValueOnce({}); // updateUserFlexPortfoliosOverride(null)
+      mockQuery.mockResolvedValueOnce({ rows: [{ id: '2', email: 'a@b.com', status: 'active' }] }); // getUserDetail
+      mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user' }] }); // getUserRoles
+
+      const res = await request(app).put('/users/2').set('Cookie', authCookie).send({ flexMaxPortfoliosOverride: null });
+      expect(res.status).toBe(200);
+      expect(res.body.flexMaxPortfoliosOverride).toBeNull();
+      expect(mockQuery).toHaveBeenCalledWith(expect.any(String), ['2', null]);
+    });
+
+    test('an absent override field is never touched', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+      mockQuery.mockResolvedValueOnce({}); // updateUserEmail
+      mockQuery.mockResolvedValueOnce({ rows: [{ id: '2', email: 'new@b.com', status: 'active' }] }); // getUserDetail
+      mockQuery.mockResolvedValueOnce({ rows: [{ name: 'user' }] }); // getUserRoles
+
+      await request(app).put('/users/2').set('Cookie', authCookie).send({ email: 'new@b.com' });
+      expect(mockQuery).not.toHaveBeenCalledWith(expect.stringContaining('UPDATE users SET flex_max'), expect.anything());
+    });
+
+    test('400 for a non-integer override value', async () => {
+      const res = await request(app).put('/users/2').set('Cookie', authCookie).send({ flexMaxPendingTemplatesOverride: 2.5 });
+      expect(res.status).toBe(400);
+    });
+
+    test('400 for a negative override value', async () => {
+      const res = await request(app).put('/users/2').set('Cookie', authCookie).send({ flexMaxApprovedTemplatesOverride: -1 });
+      expect(res.status).toBe(400);
+    });
   });
 });
 

@@ -11,6 +11,13 @@ function getIdParam(req: Request): string {
   return (Array.isArray(raw) ? raw[0] : raw || '').trim();
 }
 
+// Flex Portfolio Quota Limits (Phase 4) - a per-user override field is valid when absent
+// (undefined - "don't touch"), explicitly null ("clear the override, use the global default"),
+// or a non-negative integer.
+function isValidOverrideValue(v: unknown): v is number | null {
+  return v === undefined || v === null || (typeof v === 'number' && Number.isInteger(v) && v >= 0);
+}
+
 // GET /users - View/Edit User Role (Admin Console Phase 2), gated by
 // requirePermission('users:manage_roles') (see users.routes.ts).
 export async function list(_req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -86,7 +93,10 @@ export async function updateStatus(req: Request, res: Response, next: NextFuncti
 // duplicating their logic.
 export async function updateUser(req: Request, res: Response, next: NextFunction): Promise<void> {
   const id = getIdParam(req);
-  const { email, password, status, role } = req.body || {};
+  const {
+    email, password, status, role,
+    flexMaxPendingTemplatesOverride, flexMaxApprovedTemplatesOverride, flexMaxPortfoliosOverride,
+  } = req.body || {};
 
   if (email !== undefined && (typeof email !== 'string' || !EMAIL_RE.test(email))) {
     res.status(400).json({ error: 'A valid email is required.' });
@@ -104,6 +114,10 @@ export async function updateUser(req: Request, res: Response, next: NextFunction
     res.status(400).json({ error: 'A role name is required.' });
     return;
   }
+  if (!isValidOverrideValue(flexMaxPendingTemplatesOverride) || !isValidOverrideValue(flexMaxApprovedTemplatesOverride) || !isValidOverrideValue(flexMaxPortfoliosOverride)) {
+    res.status(400).json({ error: 'Flex quota overrides must be null or a non-negative integer.' });
+    return;
+  }
 
   try {
     if (typeof email === 'string') await usersService.updateUserEmail(id, email);
@@ -113,10 +127,18 @@ export async function updateUser(req: Request, res: Response, next: NextFunction
     }
     if (typeof status === 'string') await usersService.updateUserStatus(id, status);
     if (typeof role === 'string') await rolesService.setUserRole(id, role);
+    if (flexMaxPendingTemplatesOverride !== undefined) await usersService.updateUserFlexPendingOverride(id, flexMaxPendingTemplatesOverride);
+    if (flexMaxApprovedTemplatesOverride !== undefined) await usersService.updateUserFlexApprovedOverride(id, flexMaxApprovedTemplatesOverride);
+    if (flexMaxPortfoliosOverride !== undefined) await usersService.updateUserFlexPortfoliosOverride(id, flexMaxPortfoliosOverride);
 
     const detail = await usersService.getUserDetail(id);
     const roles = await rolesService.getUserRoles(id);
-    res.json({ id, email: detail?.email, status: detail?.status, roles });
+    res.json({
+      id, email: detail?.email, status: detail?.status, roles,
+      flexMaxPendingTemplatesOverride: detail?.flexMaxPendingTemplatesOverride ?? null,
+      flexMaxApprovedTemplatesOverride: detail?.flexMaxApprovedTemplatesOverride ?? null,
+      flexMaxPortfoliosOverride: detail?.flexMaxPortfoliosOverride ?? null,
+    });
   } catch (err) {
     if (err instanceof authService.EmailAlreadyExistsError) {
       res.status(409).json({ error: err.message });

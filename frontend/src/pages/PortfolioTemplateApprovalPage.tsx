@@ -3,15 +3,18 @@ import {
   useAllTemplates, useTemplateDetail, useSetTemplateStatus, useDeleteTemplate,
   useBoundPortfolios, useDeleteBoundPortfolio,
   useUnattachedFlexPortfolios, useDeleteUnattachedFlexPortfolio, TARGET_FIELD_LABELS,
+  type TemplateStatus,
 } from '../api/portfolioTemplates';
 import { ApiError } from '../api/client';
-import { formatCurrency } from '../lib/format';
+import { formatCurrency, formatAsOf } from '../lib/format';
 
 const STATUS_STYLES: Record<string, string> = {
   'Pending Approval': 'bg-warning/10 text-warning',
   Approved: 'bg-success/10 text-success',
   Rejected: 'bg-danger/10 text-danger',
 };
+
+const ALL_STATUSES: TemplateStatus[] = ['Pending Approval', 'Approved', 'Rejected'];
 
 interface BoundPortfoliosModalProps {
   templateId: string;
@@ -228,6 +231,19 @@ export default function PortfolioTemplateApprovalPage() {
   // an actionable next step, not a dead end.
   const [boundPortfoliosModalFor, setBoundPortfoliosModalFor] = useState<string | null>(null);
 
+  // Filter by Name/Status/Created By (requirement: "make it user friendly to filter by all 3
+  // fields") - client-side, same pattern as UserRolesPage.tsx's emailFilter/statusFilter/
+  // roleFilter, since the full list is already fetched.
+  const [nameFilter, setNameFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState<TemplateStatus | 'all'>('all');
+  const [createdByFilter, setCreatedByFilter] = useState('');
+  const visibleTemplates = templates?.filter((t) => {
+    if (nameFilter.trim() && !t.templateName.toLowerCase().includes(nameFilter.trim().toLowerCase())) return false;
+    if (statusFilter !== 'all' && t.status !== statusFilter) return false;
+    if (createdByFilter.trim() && !(t.createdByEmail ?? '').toLowerCase().includes(createdByFilter.trim().toLowerCase())) return false;
+    return true;
+  });
+
   async function handleSetStatus(id: string, status: 'Approved' | 'Rejected') {
     setActionErrorFor(null);
     try {
@@ -257,10 +273,41 @@ export default function PortfolioTemplateApprovalPage() {
   return (
     <>
     <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2 rounded-card bg-bg-secondary px-3 py-2">
+        <input
+          type="text"
+          value={nameFilter}
+          onChange={(e) => setNameFilter(e.target.value)}
+          placeholder="Search template name…"
+          aria-label="Filter by template name"
+          className="min-w-0 flex-1 rounded-btn border border-border bg-bg-primary px-2 py-1 text-sm text-text-primary"
+        />
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value as TemplateStatus | 'all')}
+          aria-label="Filter by status"
+          className="rounded-btn border border-border bg-bg-primary px-2 py-1 text-sm text-text-primary"
+        >
+          <option value="all">Status: All</option>
+          {ALL_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <input
+          type="text"
+          value={createdByFilter}
+          onChange={(e) => setCreatedByFilter(e.target.value)}
+          placeholder="Search created by…"
+          aria-label="Filter by created by"
+          className="min-w-0 flex-1 rounded-btn border border-border bg-bg-primary px-2 py-1 text-sm text-text-primary"
+        />
+      </div>
+
       {isLoading && <p className="text-sm text-text-secondary">Loading…</p>}
       {!isLoading && templates?.length === 0 && <p className="text-sm text-text-secondary">No portfolio templates have been created yet.</p>}
+      {!isLoading && (templates?.length ?? 0) > 0 && visibleTemplates?.length === 0 && (
+        <p className="text-sm text-text-secondary">No templates match the current filters.</p>
+      )}
 
-      {templates?.map((t) => {
+      {visibleTemplates?.map((t) => {
         const expanded = expandedId === t.id;
         return (
           <div key={t.id} className="rounded-card bg-bg-card p-3 shadow-card">
@@ -275,6 +322,9 @@ export default function PortfolioTemplateApprovalPage() {
                   {t.templateName}
                 </button>
                 <span className={`ml-2 rounded-btn px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[t.status] ?? ''}`}>{t.status}</span>
+                <p className="mt-0.5 text-xs text-text-secondary">
+                  Created by {t.createdByEmail ?? 'unknown'} · {formatAsOf(t.createdAt)}
+                </p>
               </div>
               <div className="flex items-center gap-2">
                 {t.status === 'Pending Approval' && (

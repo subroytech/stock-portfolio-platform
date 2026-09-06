@@ -4,6 +4,7 @@ import {
   useCreateUser, useUpdateUser, useUsersWithRoles, type UpdateUserInput, type UserStatus, type UserWithRoles,
 } from '../api/users';
 import { ApiError } from '../api/client';
+import FlexQuotaOverridesModal from '../components/FlexQuotaOverridesModal';
 
 const STATUSES: UserStatus[] = ['active', 'deactivated', 'cancelled', 'pending'];
 
@@ -23,6 +24,7 @@ function UserRow({ user, roles }: UserRowProps) {
   const [status, setStatus] = useState<UserStatus>(user.status);
   const [role, setRole] = useState(user.roles[0] ?? '');
   const [error, setError] = useState<string | null>(null);
+  const [showQuotaModal, setShowQuotaModal] = useState(false);
 
   const currentRole = user.roles[0] ?? '';
   const dirty = email !== user.email || password.trim() !== '' || status !== user.status || role !== currentRole;
@@ -61,7 +63,7 @@ function UserRow({ user, roles }: UserRowProps) {
           onChange={(e) => setPassword(e.target.value)}
           placeholder="Leave blank to keep unchanged"
           aria-label={`Password for ${user.email}`}
-          className="min-w-0 rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-sm text-text-primary sm:flex-1"
+          className="min-w-0 rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-sm text-text-primary sm:w-40 sm:flex-none"
         />
         <select
           value={status}
@@ -88,6 +90,14 @@ function UserRow({ user, roles }: UserRowProps) {
 
         <button
           type="button"
+          onClick={() => setShowQuotaModal(true)}
+          className="rounded-btn border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-primary sm:w-28 sm:flex-none"
+        >
+          Flex Quotas
+        </button>
+
+        <button
+          type="button"
           onClick={handleSave}
           disabled={!dirty || updateUser.isPending}
           className="rounded-btn bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent-hover disabled:opacity-60 sm:w-20 sm:flex-none"
@@ -97,6 +107,7 @@ function UserRow({ user, roles }: UserRowProps) {
       </div>
 
       {error && <p className="mt-2 text-sm text-danger">{error}</p>}
+      {showQuotaModal && <FlexQuotaOverridesModal user={user} onClose={() => setShowQuotaModal(false)} />}
     </div>
   );
 }
@@ -207,7 +218,7 @@ export default function UserRolesPage() {
           aria-label="Filter by email"
           className="min-w-0 rounded-btn border border-border bg-bg-primary px-2 py-1 text-xs font-normal normal-case tracking-normal text-text-primary sm:flex-1"
         />
-        <span className="sm:flex-1">Password</span>
+        <span className="sm:w-40 sm:flex-none">New Password</span>
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as UserStatus | 'all')}
@@ -227,6 +238,7 @@ export default function UserRolesPage() {
           {roles?.map((r) => <option key={r.id} value={r.name}>{r.name}</option>)}
         </select>
         <span className="sm:w-36 sm:flex-none">API Keys</span>
+        <span className="sm:w-28 sm:flex-none">Flex Quotas</span>
         <span className="sm:w-20 sm:flex-none">Save</span>
       </div>
 

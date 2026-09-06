@@ -1,18 +1,28 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
+// Flex Portfolio Quota Limits (Phase 4) - createTemplate() now calls flexQuota's resolvers.
+// Mocked here (like usageTracking.service is elsewhere) so these pre-existing tests don't need
+// to know about Config Properties/users-override internals - just a default high limit so the
+// quota gate never trips them. Dedicated quota-blocking tests below override the mock per-case.
+jest.mock('../src/services/flexQuota.service');
 
 import { pool } from '../src/db/pool';
+import * as flexQuota from '../src/services/flexQuota.service';
 import {
   listApprovedTemplates, listMyPending, listAllTemplates, getTemplateDetail, getTemplateParseConfig, createTemplate,
   setTemplateStatus, deleteTemplate, validateTemplateName, InvalidTemplateNameError, DuplicateTemplateNameError,
-  TemplateNotFoundError, TemplateStatusError, TemplateInUseError,
+  TemplateNotFoundError, TemplateStatusError, TemplateInUseError, TemplateQuotaExceededError,
 } from '../src/services/portfolioTemplate.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockConnect = pool.connect as unknown as jest.Mock;
+const mockGetEffectivePendingTemplateLimit = flexQuota.getEffectivePendingTemplateLimit as jest.Mock;
+const mockGetEffectiveApprovedTemplateLimit = flexQuota.getEffectiveApprovedTemplateLimit as jest.Mock;
 
 beforeEach(() => {
   mockQuery.mockReset();
   mockConnect.mockReset();
+  mockGetEffectivePendingTemplateLimit.mockReset().mockResolvedValue(999);
+  mockGetEffectiveApprovedTemplateLimit.mockReset().mockResolvedValue(999);
 });
 
 describe('validateTemplateName', () => {
@@ -65,22 +75,33 @@ describe('listMyPending', () => {
 });
 
 describe('listAllTemplates', () => {
-  test('queries every template regardless of status/creator, pending-first', async () => {
+  test('queries every template regardless of status/creator, pending-first, joined to the creator\'s email', async () => {
     mockQuery.mockResolvedValueOnce({
       rows: [
-        { id: '1', template_name: 'A', status: 'Pending Approval', created_by: 'user-1', created_at: '2026-08-06T00:00:00Z', how_to_use_description: null },
-        { id: '2', template_name: 'B', status: 'Approved', created_by: 'user-2', created_at: '2026-08-05T00:00:00Z', how_to_use_description: 'Schwab export' },
+        { id: '1', template_name: 'A', status: 'Pending Approval', created_by: 'user-1', created_at: '2026-08-06T00:00:00Z', how_to_use_description: null, created_by_email: 'creator1@b.com' },
+        { id: '2', template_name: 'B', status: 'Approved', created_by: 'user-2', created_at: '2026-08-05T00:00:00Z', how_to_use_description: 'Schwab export', created_by_email: 'creator2@b.com' },
       ],
     });
     const result = await listAllTemplates();
     expect(result).toEqual([
-      { id: '1', templateName: 'A', status: 'Pending Approval', createdBy: 'user-1', createdAt: '2026-08-06T00:00:00Z', howToUseDescription: null },
-      { id: '2', templateName: 'B', status: 'Approved', createdBy: 'user-2', createdAt: '2026-08-05T00:00:00Z', howToUseDescription: 'Schwab export' },
+      { id: '1', templateName: 'A', status: 'Pending Approval', createdBy: 'user-1', createdAt: '2026-08-06T00:00:00Z', howToUseDescription: null, createdByEmail: 'creator1@b.com' },
+      { id: '2', templateName: 'B', status: 'Approved', createdBy: 'user-2', createdAt: '2026-08-05T00:00:00Z', howToUseDescription: 'Schwab export', createdByEmail: 'creator2@b.com' },
     ]);
     const [sql, params] = mockQuery.mock.calls[0];
     expect(sql).not.toContain('WHERE');
     expect(sql).toContain('how_to_use_description');
+    expect(sql).toContain('LEFT JOIN users');
     expect(params).toBeUndefined();
+  });
+
+  test('createdByEmail is null when the creator has no matching users row (LEFT JOIN, not INNER)', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        { id: '1', template_name: 'A', status: 'Pending Approval', created_by: null, created_at: '2026-08-06T00:00:00Z', how_to_use_description: null, created_by_email: null },
+      ],
+    });
+    const result = await listAllTemplates();
+    expect(result[0].createdByEmail).toBeNull();
   });
 });
 
@@ -172,6 +193,7 @@ describe('createTemplate', () => {
     const client = {
       query: jest.fn()
         .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [] }) // quota count query
         .mockResolvedValueOnce({ rows: [{ id: '1', created_at: '2026-08-06T00:00:00Z' }] }) // master INSERT
         .mockResolvedValueOnce(undefined) // dtls INSERT
         .mockResolvedValueOnce(undefined), // COMMIT
@@ -185,16 +207,16 @@ describe('createTemplate', () => {
       createdAt: '2026-08-06T00:00:00Z', howToUseDescription: null,
     });
 
-    const [masterSql, masterParams] = client.query.mock.calls[1];
+    const [masterSql, masterParams] = client.query.mock.calls[2];
     expect(masterSql).toContain('header_row_index');
     expect(masterSql).toContain('data_start_column_index');
     expect(masterSql).toContain('how_to_use_description');
     expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 1, 1, null, null, null, null]);
 
-    const [dtlsSql, dtlsParams] = client.query.mock.calls[2];
+    const [dtlsSql, dtlsParams] = client.query.mock.calls[3];
     expect(dtlsSql).toContain('INSERT INTO m_portfolio_template_mapping_dtls');
     expect(dtlsParams).toEqual(['1', 'symbol', 'Ticker', '1', 'quantity', 'Shares']);
-    expect(client.query).toHaveBeenNthCalledWith(4, 'COMMIT');
+    expect(client.query).toHaveBeenNthCalledWith(5, 'COMMIT');
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 
@@ -202,6 +224,7 @@ describe('createTemplate', () => {
     const client = {
       query: jest.fn()
         .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [] }) // quota count query
         .mockResolvedValueOnce({ rows: [{ id: '2', created_at: '2026-08-06T00:00:00Z' }] }) // master INSERT
         .mockResolvedValueOnce(undefined) // dtls INSERT
         .mockResolvedValueOnce(undefined), // COMMIT
@@ -214,7 +237,7 @@ describe('createTemplate', () => {
     });
     expect(result.howToUseDescription).toBe('Schwab export — headers on row 3');
 
-    const [, masterParams] = client.query.mock.calls[1];
+    const [, masterParams] = client.query.mock.calls[2];
     expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 3, 2, 'Schwab export — headers on row 3', null, null, null]);
   });
 
@@ -222,6 +245,7 @@ describe('createTemplate', () => {
     const client = {
       query: jest.fn()
         .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [] }) // quota count query
         .mockResolvedValueOnce({ rows: [{ id: '3', created_at: '2026-08-06T00:00:00Z' }] }) // master INSERT
         .mockResolvedValueOnce(undefined) // dtls INSERT
         .mockResolvedValueOnce(undefined), // COMMIT
@@ -231,7 +255,7 @@ describe('createTemplate', () => {
 
     await createTemplate({ ...input, footerMarkerColumnIndex: 1, footerMarkerText: 'Total' });
 
-    const [, masterParams] = client.query.mock.calls[1];
+    const [, masterParams] = client.query.mock.calls[2];
     expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 1, 1, null, 1, 'Total', null]);
   });
 
@@ -239,6 +263,7 @@ describe('createTemplate', () => {
     const client = {
       query: jest.fn()
         .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [] }) // quota count query
         .mockResolvedValueOnce({ rows: [{ id: '4', created_at: '2026-08-06T00:00:00Z' }] }) // master INSERT
         .mockResolvedValueOnce(undefined) // dtls INSERT
         .mockResolvedValueOnce(undefined), // COMMIT
@@ -249,7 +274,7 @@ describe('createTemplate', () => {
     const cashConfig = { markerColumnIndex: 2, markerText: 'CASH & CASH INVESTMENTS', valueSource: { type: 'column' as const, columnIndex: 4 } };
     await createTemplate({ ...input, cashConfig });
 
-    const [, masterParams] = client.query.mock.calls[1];
+    const [, masterParams] = client.query.mock.calls[2];
     expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 1, 1, null, null, null, JSON.stringify(cashConfig)]);
   });
 
@@ -257,6 +282,7 @@ describe('createTemplate', () => {
     const client = {
       query: jest.fn()
         .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [] }) // quota count query
         .mockResolvedValueOnce({ rows: [{ id: '5', created_at: '2026-08-06T00:00:00Z' }] }) // master INSERT
         .mockResolvedValueOnce(undefined) // dtls INSERT
         .mockResolvedValueOnce(undefined), // COMMIT
@@ -267,7 +293,7 @@ describe('createTemplate', () => {
     const cashConfig = { markerColumnIndex: 2, markerText: 'Cash, Money Funds and Bank Deposits', valueSource: { type: 'embedded' as const } };
     await createTemplate({ ...input, cashConfig });
 
-    const [, masterParams] = client.query.mock.calls[1];
+    const [, masterParams] = client.query.mock.calls[2];
     expect(masterParams).toEqual(['Fidelity CSV', 'user-1', JSON.stringify(input.samplePreview), 1, 1, null, null, null, JSON.stringify(cashConfig)]);
   });
 
@@ -280,6 +306,7 @@ describe('createTemplate', () => {
     const client = {
       query: jest.fn()
         .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [] }) // quota count query
         .mockRejectedValueOnce({ code: '23505' }) // master INSERT - duplicate name
         .mockResolvedValueOnce(undefined), // ROLLBACK
       release: jest.fn(),
@@ -287,8 +314,53 @@ describe('createTemplate', () => {
     mockConnect.mockResolvedValue(client);
 
     await expect(createTemplate(input)).rejects.toThrow(DuplicateTemplateNameError);
-    expect(client.query).toHaveBeenNthCalledWith(3, 'ROLLBACK');
+    expect(client.query).toHaveBeenNthCalledWith(4, 'ROLLBACK');
     expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  test('blocks creation and never opens a connection to insert when the caller is at the Pending Approval cap', async () => {
+    mockGetEffectivePendingTemplateLimit.mockResolvedValue(2);
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [{ status: 'Pending Approval', count: 2 }] }) // quota count query
+        .mockResolvedValueOnce(undefined), // ROLLBACK
+      release: jest.fn(),
+    };
+    mockConnect.mockResolvedValue(client);
+
+    await expect(createTemplate(input)).rejects.toThrow(TemplateQuotaExceededError);
+    expect(client.query.mock.calls.some((c: unknown[]) => c[0] === 'COMMIT')).toBe(false);
+  });
+
+  test('blocks creation when the caller is at the Approved cap, even though the new template would start Pending', async () => {
+    mockGetEffectiveApprovedTemplateLimit.mockResolvedValue(5);
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [{ status: 'Approved', count: 5 }] }) // quota count query
+        .mockResolvedValueOnce(undefined), // ROLLBACK
+      release: jest.fn(),
+    };
+    mockConnect.mockResolvedValue(client);
+
+    await expect(createTemplate(input)).rejects.toThrow(TemplateQuotaExceededError);
+  });
+
+  test('a per-user override raises the effective cap above the global default', async () => {
+    mockGetEffectivePendingTemplateLimit.mockResolvedValue(10);
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [{ status: 'Pending Approval', count: 2 }] }) // quota count query - would block at the default of 2
+        .mockResolvedValueOnce({ rows: [{ id: '6', created_at: '2026-08-06T00:00:00Z' }] }) // master INSERT
+        .mockResolvedValueOnce(undefined) // dtls INSERT
+        .mockResolvedValueOnce(undefined), // COMMIT
+      release: jest.fn(),
+    };
+    mockConnect.mockResolvedValue(client);
+
+    await expect(createTemplate(input)).resolves.toMatchObject({ id: '6' });
   });
 });
 

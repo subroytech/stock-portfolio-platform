@@ -10,6 +10,7 @@ import { applyLivePrices, HoldingLike } from './livePrices.service';
 import { ParseResult } from './parser.service';
 import { parseFlexCsv, ColumnMapping, CashConfig, assertWithinTemplateSampleLimit } from './flexParser.service';
 import * as portfolioTemplateService from './portfolioTemplate.service';
+import * as flexQuota from './flexQuota.service';
 
 // Matches an already-pair-formatted symbol (BTCUSD, BTC-USD, a USDT pair) -
 // shared by isPerfSkipped below and toFmpQuoteSymbol, so a symbol that's
@@ -46,6 +47,10 @@ export class PortfolioNameConflictError extends Error {}
 // portfolio that isn't a Flex portfolio currently in the 'Flex-Err' (needs-attention) state -
 // e.g. calling Save Template twice, or on a Classic/already-resolved portfolio.
 export class FlexTemplateStateError extends Error {}
+// Flex Portfolio Quota Limits (Phase 4) - createPortfolioFlex() throws this when the caller is
+// already at/over their effective max Flex portfolio count (flex_template_status IN ('Flex',
+// 'Flex-Err')).
+export class PortfolioQuotaExceededError extends Error {}
 
 const UNIQUE_VIOLATION = '23505';
 
@@ -531,6 +536,25 @@ export async function createPortfolioFlex(
     headerRowIndex, dataStartColumnIndex, footerMarkerColumnIndex, footerMarkerText, cashConfig,
   });
 
+  // Flex Portfolio Quota Limits (Phase 4) - checked only once the request is otherwise valid
+  // (past input-shape/sample-size/parse validation above), immediately before the actual
+  // write, so an already-invalid request still fails on its own terms with zero DB round-trips
+  // rather than spending one on a quota check first. Counts both 'Flex' and 'Flex-Err'
+  // portfolios (confirmed requirement: an unresolved Flex-Err portfolio still counts against
+  // the cap).
+  const [portfolioLimit, { rows: countRows }] = await Promise.all([
+    flexQuota.getEffectivePortfolioLimit(userId),
+    pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM tx_portfolios WHERE user_id = $1 AND flex_template_status IN ('Flex', 'Flex-Err')`,
+      [userId],
+    ),
+  ]);
+  if (countRows[0].count >= portfolioLimit) {
+    throw new PortfolioQuotaExceededError(
+      `You already have ${countRows[0].count} Flex portfolio(s) (limit ${portfolioLimit}). Ask an admin to raise your limit or delete an existing one.`,
+    );
+  }
+
   let portfolio: PortfolioSummary;
   try {
     const { rows } = await pool.query<PortfolioRow>(
@@ -719,6 +743,12 @@ export interface RefreshPricesResult {
   // keyed by symbol, ~130-day EOD bars, crypto-excluded, only successfully-
   // fetched symbols included - the Performance widget's period-return math.
   performanceHistory: Record<string, HistoricalBar[]>;
+  // Usage Audit (Phase 2) - real external FMP call counts for this refresh, surfaced so the
+  // controller can log them via usageTracking.logUsage() instead of the old implicit "1 event
+  // = 1 call" undercount. fmpQuoteCallCount is one call per holding (fmpQuoteSymbols.length);
+  // fmpHistoricalCallCount is one call per unique non-crypto symbol (historySymbols.length).
+  fmpQuoteCallCount: number;
+  fmpHistoricalCallCount: number;
 }
 
 function toHoldingLike(r: HoldingRow): HoldingLike {
@@ -760,7 +790,7 @@ export async function refreshPrices(userId: string, portfolioId: string): Promis
      FROM tx_holdings WHERE portfolio_id = $1`,
     [portfolioId],
   );
-  if (holdingRows.length === 0) return { holdings: [], performanceHistory: {} };
+  if (holdingRows.length === 0) return { holdings: [], performanceHistory: {}, fmpQuoteCallCount: 0, fmpHistoricalCallCount: 0 };
 
   const apiKey = await userSubscription.getDecryptedKey(userId, 'fmp');
   const holdings = holdingRows.map(toHoldingLike);
@@ -830,5 +860,8 @@ export async function refreshPrices(userId: string, portfolioId: string): Promis
       todayChangeDollar, todayChangePercent,
     });
   }
-  return { holdings: results, performanceHistory };
+  return {
+    holdings: results, performanceHistory,
+    fmpQuoteCallCount: fmpQuoteSymbols.length, fmpHistoricalCallCount: historySymbols.length,
+  };
 }

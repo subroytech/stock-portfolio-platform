@@ -92,6 +92,10 @@ export async function create(req: Request, res: Response, next: NextFunction): P
       res.status(409).json({ error: err.message });
       return;
     }
+    if (err instanceof portfolioTemplateService.TemplateQuotaExceededError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
     next(err);
   }
 }

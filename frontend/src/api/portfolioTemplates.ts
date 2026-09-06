@@ -30,6 +30,13 @@ export interface TemplateSummary {
   howToUseDescription: string | null;
 }
 
+// Admin "all templates" list only (useAllTemplates below) - mirrors the backend's own split
+// (portfolioTemplate.service.ts's AdminTemplateSummary, Phase 5) - useApprovedTemplates()/
+// useMyPendingTemplates() never carry a creator identity.
+export interface AdminTemplateSummary extends TemplateSummary {
+  createdByEmail: string | null;
+}
+
 export interface TemplateDetail extends TemplateSummary {
   reviewedBy: string | null;
   reviewedAt: string | null;
@@ -79,7 +86,7 @@ export function useMyPendingTemplates() {
 export function useAllTemplates() {
   return useQuery({
     queryKey: ['portfolioTemplates', 'admin', 'all'],
-    queryFn: () => apiFetch<{ templates: TemplateSummary[] }>('/portfolio-templates/admin/all').then((r) => r.templates),
+    queryFn: () => apiFetch<{ templates: AdminTemplateSummary[] }>('/portfolio-templates/admin/all').then((r) => r.templates),
   });
 }
 

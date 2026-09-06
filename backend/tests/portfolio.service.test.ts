@@ -16,16 +16,21 @@ jest.mock('../src/services/portfolioTemplate.service', () => ({
   getTemplateParseConfig: jest.fn(),
   createTemplate: jest.fn(),
 }));
+// Flex Portfolio Quota Limits (Phase 4) - createPortfolioFlex() now calls flexQuota's
+// resolver. Mocked (same precedent as portfolioTemplate.service.test.ts) so these pre-existing
+// tests don't need to know about Config Properties/users-override internals.
+jest.mock('../src/services/flexQuota.service');
 
 import { pool } from '../src/db/pool';
 import * as marketData from '../src/services/marketData.service';
 import * as userSubscription from '../src/services/userSubscription.service';
 import * as portfolioTemplateService from '../src/services/portfolioTemplate.service';
+import * as flexQuota from '../src/services/flexQuota.service';
 import {
   listPortfolios, createPortfolio, getPortfolio, updatePortfolio, deletePortfolio,
   listBoundPortfolios, deleteBoundPortfolio, listUnattachedFlexPortfolios, deleteUnattachedFlexPortfolio,
   importHoldings, refreshPrices, createPortfolioFlex, saveFlexTemplate, changeFlexTemplate,
-  PortfolioNotFoundError, PortfolioNameConflictError, FlexTemplateStateError,
+  PortfolioNotFoundError, PortfolioNameConflictError, FlexTemplateStateError, PortfolioQuotaExceededError,
 } from '../src/services/portfolio.service';
 import { ParseResult, HoldingEntry } from '../src/services/parser.service';
 import { TemplateSampleTooLargeError, MAX_TEMPLATE_SAMPLE_LINES } from '../src/services/flexParser.service';
@@ -37,6 +42,7 @@ const mockGetHistorical = marketData.getHistorical as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
 const mockGetTemplateParseConfig = portfolioTemplateService.getTemplateParseConfig as jest.Mock;
 const mockCreateTemplate = portfolioTemplateService.createTemplate as jest.Mock;
+const mockGetEffectivePortfolioLimit = flexQuota.getEffectivePortfolioLimit as jest.Mock;
 
 beforeEach(() => {
   mockQuery.mockReset();
@@ -48,6 +54,7 @@ beforeEach(() => {
   mockGetDecryptedKey.mockResolvedValue('fake-fmp-key'); // refreshPrices tests: real key resolution isn't under test here
   mockGetTemplateParseConfig.mockReset();
   mockCreateTemplate.mockReset();
+  mockGetEffectivePortfolioLimit.mockReset().mockResolvedValue(999);
 });
 
 describe('listPortfolios', () => {
@@ -442,7 +449,7 @@ describe('refreshPrices', () => {
   test('returns empty holdings/performanceHistory when the portfolio has no holdings (skips key resolution entirely)', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ id: '1' }] }).mockResolvedValueOnce({ rows: [] });
     const result = await refreshPrices('user-1', '1');
-    expect(result).toEqual({ holdings: [], performanceHistory: {} });
+    expect(result).toEqual({ holdings: [], performanceHistory: {}, fmpQuoteCallCount: 0, fmpHistoricalCallCount: 0 });
     expect(mockGetDecryptedKey).not.toHaveBeenCalled();
     expect(mockGetQuotes).not.toHaveBeenCalled();
   });
@@ -538,6 +545,7 @@ describe('createPortfolioFlex', () => {
   const mapping = { symbol: 'Ticker', quantity: 'Shares', currentPrice: 'Price' };
 
   function mockPortfolioInsert(row: Partial<{ id: string; upload_template_id: string | null; flex_template_status: string | null }> = {}) {
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: 0 }] }); // quota count query
     mockQuery.mockResolvedValueOnce({
       rows: [{
         id: 'portfolio-1', name: 'My Portfolio', broker: null, created_at: 't1', updated_at: 't1',
@@ -557,7 +565,7 @@ describe('createPortfolioFlex', () => {
     expect(result.portfolio.uploadTemplateId).toBe('template-1');
     expect(result.portfolio.flexTemplateStatus).toBe('Flex');
     expect(result.importResult.holdingsCount).toBe(1);
-    const [insertSql, insertParams] = mockQuery.mock.calls[0];
+    const [insertSql, insertParams] = mockQuery.mock.calls[1];
     expect(insertSql).toContain('INSERT INTO tx_portfolios');
     expect(insertParams).toEqual(['user-1', 'My Portfolio', null, 'template-1', 'Flex']);
   });
@@ -582,7 +590,7 @@ describe('createPortfolioFlex', () => {
     expect(mockGetTemplateParseConfig).not.toHaveBeenCalled();
     expect(result.portfolio.uploadTemplateId).toBeNull();
     expect(result.portfolio.flexTemplateStatus).toBe('Flex-Err');
-    const [, insertParams] = mockQuery.mock.calls[0];
+    const [, insertParams] = mockQuery.mock.calls[1];
     expect(insertParams).toEqual(['user-1', 'My Portfolio', null, null, 'Flex-Err']);
   });
 
@@ -600,9 +608,30 @@ describe('createPortfolioFlex', () => {
   });
 
   test('maps a unique-violation on the portfolio name to PortfolioNameConflictError', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: 0 }] }); // quota count query
     mockQuery.mockRejectedValueOnce({ code: '23505' });
     await expect(createPortfolioFlex('user-1', { name: 'Dup', broker: null, columnMapping: mapping, filename: 'f.csv', content: csv }))
       .rejects.toBeInstanceOf(PortfolioNameConflictError);
+  });
+
+  test('blocks creation with PortfolioQuotaExceededError when at the effective portfolio cap, without ever attempting the insert', async () => {
+    mockGetEffectivePortfolioLimit.mockResolvedValue(6);
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: 6 }] }); // quota count query
+    await expect(createPortfolioFlex('user-1', { name: 'X', broker: null, columnMapping: mapping, filename: 'f.csv', content: csv }))
+      .rejects.toBeInstanceOf(PortfolioQuotaExceededError);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  test('a per-user override raises the effective cap above the global default', async () => {
+    mockGetEffectivePortfolioLimit.mockResolvedValue(10);
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: 6 }] }); // would block at the global default of 6
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'portfolio-1', name: 'X', broker: null, created_at: 't1', updated_at: 't1', upload_template_id: null, flex_template_status: 'Flex-Err' }],
+    });
+    mockConnect.mockResolvedValue(makeMockClient({ existingHoldings: [] }));
+
+    await expect(createPortfolioFlex('user-1', { name: 'X', broker: null, columnMapping: mapping, filename: 'f.csv', content: csv }))
+      .resolves.toMatchObject({ portfolio: { id: 'portfolio-1' } });
   });
 
   test('rejects a brand-new-mapping sample file over the template size limit, before ever creating a portfolio row', async () => {

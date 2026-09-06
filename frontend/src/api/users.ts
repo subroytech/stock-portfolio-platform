@@ -9,6 +9,10 @@ export interface UserWithRoles {
   roles: string[];
   apiKeyProviders: string[];
   status: UserStatus;
+  // Flex Portfolio Quota Limits (Phase 6) - null means "use the global Config Property default".
+  flexMaxPendingTemplatesOverride: number | null;
+  flexMaxApprovedTemplatesOverride: number | null;
+  flexMaxPortfoliosOverride: number | null;
 }
 
 // GET /users (backend/src/routes/users.routes.ts, requirePermission('users:manage_roles')) -
@@ -61,6 +65,12 @@ export interface UpdateUserInput {
   password?: string;
   status?: UserStatus;
   role?: string;
+  // Flex Portfolio Quota Limits (Phase 6) - omitted means "don't touch"; null explicitly clears
+  // the override back to the global default; a number sets it (backend's own !== undefined
+  // per-field semantics, users.controller.ts's updateUser()).
+  flexMaxPendingTemplatesOverride?: number | null;
+  flexMaxApprovedTemplatesOverride?: number | null;
+  flexMaxPortfoliosOverride?: number | null;
 }
 
 // Manage Users edit-then-save (Admin Console Phase 7) - a single consolidated PUT, body is

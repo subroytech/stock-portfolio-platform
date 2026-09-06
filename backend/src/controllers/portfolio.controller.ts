@@ -251,6 +251,10 @@ export async function createFlex(req: Request, res: Response, next: NextFunction
       res.status(409).json({ error: err.message });
       return;
     }
+    if (err instanceof portfolioService.PortfolioQuotaExceededError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
     if (err instanceof portfolioTemplateService.TemplateNotFoundError) {
       res.status(404).json({ error: err.message });
       return;
@@ -311,6 +315,10 @@ export async function saveFlexTemplate(req: Request, res: Response, next: NextFu
       return;
     }
     if (err instanceof portfolioTemplateService.DuplicateTemplateNameError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof portfolioTemplateService.TemplateQuotaExceededError) {
       res.status(409).json({ error: err.message });
       return;
     }
@@ -382,9 +390,10 @@ export async function changeFlexTemplate(req: Request, res: Response, next: Next
 export async function refreshPrices(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const userId = getUserId(req);
-    const result = await portfolioService.refreshPrices(userId, getIdParam(req));
-    usageTracking.logUsage(userId, 'portfolio_refresh').catch((e) => console.error('usage log failed', e));
-    res.json(result);
+    const { holdings, performanceHistory, fmpQuoteCallCount, fmpHistoricalCallCount } = await portfolioService.refreshPrices(userId, getIdParam(req));
+    usageTracking.logUsage(userId, 'portfolio_refresh', { fmp_quote: fmpQuoteCallCount, fmp_historical: fmpHistoricalCallCount })
+      .catch((e) => console.error('usage log failed', e));
+    res.json({ holdings, performanceHistory });
   } catch (err) {
     if (err instanceof portfolioService.PortfolioNotFoundError) {
       res.status(404).json({ error: err.message });

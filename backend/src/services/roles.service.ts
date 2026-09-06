@@ -48,6 +48,9 @@ export interface UserWithRoles {
   roles: string[];
   apiKeyProviders: string[];
   status: string;
+  flexMaxPendingTemplatesOverride: number | null;
+  flexMaxApprovedTemplatesOverride: number | null;
+  flexMaxPortfoliosOverride: number | null;
 }
 
 export async function getUserRoles(userId: string): Promise<string[]> {
@@ -207,8 +210,14 @@ export async function revokePermission(roleId: string, permissionKey: string): P
 // value" boundary users_subscriptions already enforces everywhere else) - answers "whose API
 // key is whose" from the admin's user list instead of needing a separate screen.
 export async function listUsersWithRoles(): Promise<UserWithRoles[]> {
-  const { rows } = await pool.query<{ id: string; email: string; status: string; role_name: string | null; provider: string | null }>(
-    `SELECT u.id, u.email, u.status, r.name AS role_name, s.provider
+  const { rows } = await pool.query<{
+    id: string; email: string; status: string; role_name: string | null; provider: string | null;
+    flex_max_pending_templates_override: number | null;
+    flex_max_approved_templates_override: number | null;
+    flex_max_portfolios_override: number | null;
+  }>(
+    `SELECT u.id, u.email, u.status, r.name AS role_name, s.provider,
+            u.flex_max_pending_templates_override, u.flex_max_approved_templates_override, u.flex_max_portfolios_override
      FROM users u
      LEFT JOIN users_roles ur ON ur.user_id = u.id
      LEFT JOIN m_roles r ON r.id = ur.role_id
@@ -219,7 +228,12 @@ export async function listUsersWithRoles(): Promise<UserWithRoles[]> {
   for (const row of rows) {
     let entry = byId.get(row.id);
     if (!entry) {
-      entry = { id: row.id, email: row.email, roles: [], apiKeyProviders: [], status: row.status };
+      entry = {
+        id: row.id, email: row.email, roles: [], apiKeyProviders: [], status: row.status,
+        flexMaxPendingTemplatesOverride: row.flex_max_pending_templates_override == null ? null : Number(row.flex_max_pending_templates_override),
+        flexMaxApprovedTemplatesOverride: row.flex_max_approved_templates_override == null ? null : Number(row.flex_max_approved_templates_override),
+        flexMaxPortfoliosOverride: row.flex_max_portfolios_override == null ? null : Number(row.flex_max_portfolios_override),
+      };
       byId.set(row.id, entry);
     }
     if (row.role_name && !entry.roles.includes(row.role_name)) entry.roles.push(row.role_name);

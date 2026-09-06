@@ -200,41 +200,54 @@ describe('grantPermission / revokePermission', () => {
   });
 });
 
+const NO_OVERRIDES = {
+  flexMaxPendingTemplatesOverride: null, flexMaxApprovedTemplatesOverride: null, flexMaxPortfoliosOverride: null,
+};
+
 describe('listUsersWithRoles', () => {
   test('groups multi-row join results by user, one entry per user with a roles array', async () => {
     mockQuery.mockResolvedValueOnce({
       rows: [
-        { id: '1', email: 'a@b.com', status: 'active', role_name: 'user', provider: null },
-        { id: '2', email: 'admin@b.com', status: 'active', role_name: 'admin', provider: null },
+        { id: '1', email: 'a@b.com', status: 'active', role_name: 'user', provider: null, flex_max_pending_templates_override: null, flex_max_approved_templates_override: null, flex_max_portfolios_override: null },
+        { id: '2', email: 'admin@b.com', status: 'active', role_name: 'admin', provider: null, flex_max_pending_templates_override: null, flex_max_approved_templates_override: null, flex_max_portfolios_override: null },
       ],
     });
     expect(await listUsersWithRoles()).toEqual([
-      { id: '1', email: 'a@b.com', roles: ['user'], apiKeyProviders: [], status: 'active' },
-      { id: '2', email: 'admin@b.com', roles: ['admin'], apiKeyProviders: [], status: 'active' },
+      { id: '1', email: 'a@b.com', roles: ['user'], apiKeyProviders: [], status: 'active', ...NO_OVERRIDES },
+      { id: '2', email: 'admin@b.com', roles: ['admin'], apiKeyProviders: [], status: 'active', ...NO_OVERRIDES },
     ]);
   });
 
   test('a roleless user (LEFT JOIN with null role_name) gets an empty roles array', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ id: '1', email: 'a@b.com', status: 'active', role_name: null, provider: null }] });
-    expect(await listUsersWithRoles()).toEqual([{ id: '1', email: 'a@b.com', roles: [], apiKeyProviders: [], status: 'active' }]);
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: '1', email: 'a@b.com', status: 'active', role_name: null, provider: null, flex_max_pending_templates_override: null, flex_max_approved_templates_override: null, flex_max_portfolios_override: null }] });
+    expect(await listUsersWithRoles()).toEqual([{ id: '1', email: 'a@b.com', roles: [], apiKeyProviders: [], status: 'active', ...NO_OVERRIDES }]);
   });
 
   test('a user with subscription rows gets a deduped apiKeyProviders array, even across the role/provider cross-product', async () => {
     mockQuery.mockResolvedValueOnce({
       rows: [
-        { id: '1', email: 'a@b.com', status: 'active', role_name: 'user', provider: 'fmp' },
-        { id: '1', email: 'a@b.com', status: 'active', role_name: 'user', provider: 'finnhub' },
+        { id: '1', email: 'a@b.com', status: 'active', role_name: 'user', provider: 'fmp', flex_max_pending_templates_override: null, flex_max_approved_templates_override: null, flex_max_portfolios_override: null },
+        { id: '1', email: 'a@b.com', status: 'active', role_name: 'user', provider: 'finnhub', flex_max_pending_templates_override: null, flex_max_approved_templates_override: null, flex_max_portfolios_override: null },
       ],
     });
     expect(await listUsersWithRoles()).toEqual([
-      { id: '1', email: 'a@b.com', roles: ['user'], apiKeyProviders: ['fmp', 'finnhub'], status: 'active' },
+      { id: '1', email: 'a@b.com', roles: ['user'], apiKeyProviders: ['fmp', 'finnhub'], status: 'active', ...NO_OVERRIDES },
     ]);
   });
 
   test('surfaces a non-active status', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ id: '1', email: 'a@b.com', status: 'deactivated', role_name: 'user', provider: null }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: '1', email: 'a@b.com', status: 'deactivated', role_name: 'user', provider: null, flex_max_pending_templates_override: null, flex_max_approved_templates_override: null, flex_max_portfolios_override: null }] });
     expect(await listUsersWithRoles()).toEqual([
-      { id: '1', email: 'a@b.com', roles: ['user'], apiKeyProviders: [], status: 'deactivated' },
+      { id: '1', email: 'a@b.com', roles: ['user'], apiKeyProviders: [], status: 'deactivated', ...NO_OVERRIDES },
+    ]);
+  });
+
+  test('surfaces non-null Flex quota overrides', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: '1', email: 'a@b.com', status: 'active', role_name: 'user', provider: null, flex_max_pending_templates_override: 4, flex_max_approved_templates_override: 8, flex_max_portfolios_override: 12 }],
+    });
+    expect(await listUsersWithRoles()).toEqual([
+      { id: '1', email: 'a@b.com', roles: ['user'], apiKeyProviders: [], status: 'active', flexMaxPendingTemplatesOverride: 4, flexMaxApprovedTemplatesOverride: 8, flexMaxPortfoliosOverride: 12 },
     ]);
   });
 });
