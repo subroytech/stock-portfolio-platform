@@ -73,7 +73,14 @@ export async function scanBatch(req: Request, res: Response, next: NextFunction)
       cf.assembleScanBatch(batches[idx], key, quality, clampedScanDays),
       updateAllTickerData === true ? cf.refreshTickerDataBatch(batches[idx], key, 'all') : Promise.resolve(undefined),
     ]);
-    usageTracking.logUsage(getUserId(req), 'contrarian_finder_scan').catch((e) => console.error('usage log failed', e));
+    // fetchStockData() (contrarianFinder.service.ts) makes 2 real FMP calls per symbol in the
+    // batch - /quote and /historical-price-eod - same two-call-per-symbol shape as
+    // portfolio.service.ts's refreshPrices(). Doesn't additionally count the optional
+    // "Run Scan (+ Mkt Cap)" profile calls refreshTickerDataBatch() makes when
+    // updateAllTickerData is set - a rarer, confirm-gated path, left as a known simplification.
+    usageTracking.logUsage(getUserId(req), 'contrarian_finder_scan', {
+      fmp_quote: batches[idx].length, fmp_historical: batches[idx].length,
+    }).catch((e) => console.error('usage log failed', e));
     res.json({ batchIndex: idx, totalBatches: batches.length, universeSize: universe.length, results, tickerRefresh });
   } catch (err) {
     if (err instanceof userSubscription.MissingUserApiKeyError) {

@@ -10,6 +10,7 @@ import RolesPage from './RolesPage';
 import PortfolioTemplateApprovalPage from './PortfolioTemplateApprovalPage';
 import ConfigPropertiesPage from './ConfigPropertiesPage';
 import AdminSupportTicketsPage from './AdminSupportTicketsPage';
+import UsageAuditPage from './UsageAuditPage';
 import UserPersonaBadge from '../components/UserPersonaBadge';
 import ImpersonationBanner from '../components/ImpersonationBanner';
 import LoginAsModal from '../components/LoginAsModal';
@@ -17,16 +18,28 @@ import LoginAsModal from '../components/LoginAsModal';
 const TABS = [
   { id: 'apis', label: 'My API(s)' },
   { id: 'masterData', label: 'Master Data' },
+  { id: 'userAttributes', label: 'Manage User Attribute' },
+  { id: 'portfolioTemplates', label: 'Portfolio Templates' },
+  { id: 'configProperties', label: 'Config Properties' },
+  { id: 'support', label: 'Support Tickets' },
+  { id: 'usageAudit', label: 'User Usage' },
+] as const;
+
+type TabId = (typeof TABS)[number]['id'];
+
+// Admin Console UI Cleanup - Manage Users/Functions/Permission/Role collapsed from 4 flat
+// top-level tabs into one "Manage User Attribute" parent, revealing these as sub-tabs -
+// same sub-tab pattern TabShell.tsx already uses for Portfolio's Legacy/Flex split. Pure
+// navigation regrouping - none of these 4 were ever hidden by permission (server-side
+// enforcement only), and that's unchanged here.
+const SUB_TABS = [
   { id: 'users', label: 'Manage Users' },
   { id: 'functions', label: 'Manage Functions' },
   { id: 'permissions', label: 'Manage Permission' },
   { id: 'roles', label: 'Manage Role' },
-  { id: 'portfolioTemplates', label: 'Portfolio Templates' },
-  { id: 'configProperties', label: 'Config Properties' },
-  { id: 'support', label: 'Support Tickets' },
 ] as const;
 
-type TabId = (typeof TABS)[number]['id'];
+type SubTabId = (typeof SUB_TABS)[number]['id'];
 
 // Dedicated full-screen Admin page (Admin Console Phase 7), replacing the "Admin ▾"
 // dropdown-of-modals from Phases 1-5. Not nested inside TabShell - its own header/tab bar,
@@ -56,11 +69,14 @@ export default function AdminPage() {
   // Helpdesk / Support Tickets (2026-09-05) - zero default grants, same hidden-not-disabled
   // pattern as every other permission-gated tab on this page.
   const canManageSupport = session?.permissions?.includes('support:manage') ?? false;
+  // User Usage Dashboard (2026-09-05) - zero default grants, same hidden-not-disabled pattern.
+  const canViewUsageAudit = session?.permissions?.includes('usage_audit:view') ?? false;
   // "Login-as" (CLAUDE.md's "Login-as" section) - grantable only to admin-master
   // (roles.service.ts's ADMIN_MASTER_ONLY_PERMISSIONS), same hidden-not-disabled pattern as
   // every other permission-gated header control on this page.
   const canImpersonate = session?.permissions?.includes('users:impersonate') ?? false;
   const [activeTab, setActiveTab] = useState<TabId>('apis');
+  const [activeSubTab, setActiveSubTab] = useState<SubTabId>('users');
   const [showLoginAs, setShowLoginAs] = useState(false);
 
   // Client-side convenience only - every proxied endpoint's own requirePermission is the
@@ -73,6 +89,7 @@ export default function AdminPage() {
     if (tab.id === 'portfolioTemplates') return canManagePortfolioTemplates;
     if (tab.id === 'configProperties') return canManageConfigProperties;
     if (tab.id === 'support') return canManageSupport;
+    if (tab.id === 'usageAudit') return canViewUsageAudit;
     return true;
   });
 
@@ -112,6 +129,23 @@ export default function AdminPage() {
         </div>
       </header>
 
+      {activeTab === 'userAttributes' && (
+        <nav className="flex flex-wrap items-center gap-1 border-b border-border bg-bg-secondary px-4 py-2 sm:px-6">
+          {SUB_TABS.map((subTab) => (
+            <button
+              key={subTab.id}
+              type="button"
+              onClick={() => setActiveSubTab(subTab.id)}
+              className={`rounded-btn px-3 py-1 text-sm font-medium transition-colors ${
+                activeSubTab === subTab.id ? 'bg-accent text-white' : 'text-text-secondary hover:bg-bg-primary'
+              }`}
+            >
+              {subTab.label}
+            </button>
+          ))}
+        </nav>
+      )}
+
       {session && <ImpersonationBanner session={session} returnPath="/admin" />}
 
       {showLoginAs && (
@@ -121,13 +155,14 @@ export default function AdminPage() {
       <main className="p-4 sm:p-6">
         {activeTab === 'apis' && canManageOwnKeys && <SubscriptionsPage />}
         {activeTab === 'masterData' && canManageMasterData && <MasterDataPage />}
-        {activeTab === 'users' && <UserRolesPage />}
-        {activeTab === 'functions' && <FunctionsPage />}
-        {activeTab === 'permissions' && <RolePermissionsPage />}
-        {activeTab === 'roles' && <RolesPage />}
+        {activeTab === 'userAttributes' && activeSubTab === 'users' && <UserRolesPage />}
+        {activeTab === 'userAttributes' && activeSubTab === 'functions' && <FunctionsPage />}
+        {activeTab === 'userAttributes' && activeSubTab === 'permissions' && <RolePermissionsPage />}
+        {activeTab === 'userAttributes' && activeSubTab === 'roles' && <RolesPage />}
         {activeTab === 'portfolioTemplates' && canManagePortfolioTemplates && <PortfolioTemplateApprovalPage />}
         {activeTab === 'configProperties' && canManageConfigProperties && <ConfigPropertiesPage />}
         {activeTab === 'support' && canManageSupport && <AdminSupportTicketsPage />}
+        {activeTab === 'usageAudit' && canViewUsageAudit && <UsageAuditPage />}
       </main>
     </div>
   );

@@ -44,7 +44,8 @@ Tables are prefixed by category (settled 2026-07-10):
   the precedent for the still-open "what prefix for non-user-scoped shared/cache data"
   question `user_evt_`'s own note below flags (e.g. the on-hold shared quote cache) — future
   shared/global tables can follow this same `tx_` precedent instead of inventing a new bucket.
-- **`sys_`** — internal bookkeeping, not app data (`sys_schema_migrations`).
+- **`sys_`** — internal bookkeeping, not app data (`sys_schema_migrations`;
+  `sys_usage_aggregation_watermark` added 2026-09-05, Usage Audit Phase 1).
 - **unprefixed** — `users`, `users_subscriptions`, `users_roles`, `users_security_answers`
   (added 2026-08-29, Self-Registration & Password Policy). Deliberately left out of the
   `tx_` bucket (they're account-level, not portfolio-scoped transactional data) and don't fit
@@ -122,6 +123,7 @@ appearing in a portfolio or an index shouldn't be blocked by missing metadata co
 | `email` | `VARCHAR(255)` | `NOT NULL`, unique |
 | `password_hash` | `VARCHAR(255)` | nullable; bcrypt hash, set/read by `auth.service.ts` since 2026-07-12 |
 | `first_name` / `last_name` | `VARCHAR(50)` | nullable; added by migration `033`, 2026-08-29 (Self-Registration & Password Policy). Required by self-registration (`POST /auth/signup`), needed for the password policy's own name-substring rule — nullable so existing rows and admin-created accounts (`users.service.ts`'s `createUserAccount`, which still doesn't collect a name) are unaffected; that rule just silently doesn't apply when these are `NULL` |
+| `flex_max_pending_templates_override` / `flex_max_approved_templates_override` / `flex_max_portfolios_override` | `INT8` | nullable; added by migration `039`, 2026-09-05 (Flex Portfolio Quota Limits, Phase 3). Per-user overrides of the 3 global `Flex Portfolio Limits` Config Properties (`portfolio_flex_max_pending_templates`/`_approved_templates`/`portfolio_flex_max_portfolios`) — `NULL` means "use the global default", a set value overrides it for that one user. Schema only as of `039`; not yet read by any enforcement code |
 | `created_at` | `TIMESTAMPTZ` | default `now()` |
 | `updated_at` | `TIMESTAMPTZ` | default `now()` |
 
@@ -266,6 +268,7 @@ automatically by CockroachDB's background TTL job, no cron/application cleanup c
 | `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` |
 | `feature` | `VARCHAR(50)` | `NOT NULL` — free text (app-enforced vocabulary, not a DB enum) |
 | `created_at` | `TIMESTAMPTZ` | default `now()` |
+| `api_call_details` | `JSONB` | nullable, added migration `038` (Phase 1, 2026-09-05) — per-event breakdown of real external API calls, e.g. `{"fmp_quote": 20, "fmp_historical": 22}` for one `portfolio_refresh` event. `NULL` for low-volume features where one event already means ~1 call and `feature`/`event_count` already cover it. Schema-only as of `038` — stays `NULL` on every row until a later phase wires `logUsage()` to populate it. |
 
 Indexes: `user_evt_usage_pkey` (PK).
 
@@ -290,6 +293,7 @@ was first created."
 | `month` | `DATE` | `NOT NULL` — first of the month, e.g. `2026-08-01` |
 | `event_count` | `INT8` | `NOT NULL`, default `0` |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+| `api_call_details` | `JSONB` | nullable, added migration `038` (Phase 1, 2026-09-05) — CUMULATIVE per-identifier call-count sums for this `(user_id, feature, month)`, e.g. `{"fmp_quote": 940, "fmp_historical": 968}`. Intentionally **not** written by the real-time upsert above — `event_count` stays the only real-time field; this column is meant to be populated only by a once-daily aggregation job (not yet built as of `038`) that merges `user_evt_usage.api_call_details` into it, keeping the hot path exactly as cheap as before. |
 
 Indexes: `user_evt_usage_summary_monthly_pkey` (PK),
 `user_evt_usage_summary_monthly_user_id_feature_month_key` (unique on `user_id, feature,
@@ -714,6 +718,19 @@ creates `sys_schema_migrations` directly from the start.
 |---|---|---|
 | `filename` | `VARCHAR(255)` | PK |
 | `applied_at` | `TIMESTAMPTZ` | default `now()` |
+
+### `sys_usage_aggregation_watermark`
+Added by migration `038`, 2026-09-05 (Usage Audit Phase 1). Single-row table (`id` fixed to
+`1` via a `CHECK` constraint) tracking how far the not-yet-built daily aggregation job (a
+later phase) has progressed merging `user_evt_usage.api_call_details` into
+`user_evt_usage_summary_monthly.api_call_details`. `sys_` bucket — internal bookkeeping, same
+category as `sys_schema_migrations`, not app/business data. Seeded with one row
+(`last_aggregated_at = '2000-01-01'`) so the first real run always finds itself "overdue."
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT2` | PK, `DEFAULT 1`, `CHECK (id = 1)` — enforces exactly one row |
+| `last_aggregated_at` | `TIMESTAMPTZ` | `NOT NULL`, default `'2000-01-01'` |
 
 ## CockroachDB-specific notes
 

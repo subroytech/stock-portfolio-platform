@@ -17,6 +17,7 @@ import functionMasterRoutes from './routes/functionMaster.routes';
 import portfolioTemplateRoutes from './routes/portfolioTemplate.routes';
 import configPropertyRoutes from './routes/configProperty.routes';
 import supportTicketRoutes from './routes/supportTicket.routes';
+import usageAuditRoutes from './routes/usageAudit.routes';
 import errorHandler from './middleware/errorHandler';
 import rateLimiters from './middleware/rateLimit';
 import requireAuth from './middleware/requireAuth';
@@ -81,6 +82,7 @@ app.use('/config-properties', requireAuth, rateLimiters, configPropertyRoutes);
 // the admin-only routes are individually gated by requirePermission('support:manage') inside
 // supportTicket.routes.ts itself.
 app.use('/support', requireAuth, rateLimiters, supportTicketRoutes);
+app.use('/usage-audit', requireAuth, rateLimiters, usageAuditRoutes);
 
 app.use(errorHandler);
 

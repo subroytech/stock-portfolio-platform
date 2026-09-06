@@ -180,10 +180,10 @@ describe('POST /contrarian-finder/scan-batch', () => {
     expect(mockAssembleScanBatch.mock.calls[0][0]).toHaveLength(cf.CF_BATCH);
   });
 
-  test('logs usage on a successful batch scan', async () => {
+  test('logs usage on a successful batch scan, with real per-symbol FMP call counts for the batch', async () => {
     const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
     expect(res.status).toBe(200);
-    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'contrarian_finder_scan');
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'contrarian_finder_scan', { fmp_quote: 125, fmp_historical: 125 });
   });
 
   test('a failed usage log does not turn a successful response into a 500 (fire-and-forget)', async () => {

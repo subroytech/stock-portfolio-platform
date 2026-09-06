@@ -12,16 +12,23 @@ jest.mock('../src/services/impersonation.service', () => ({
   startImpersonation: jest.fn(),
   endImpersonation: jest.fn(),
 }));
+// Usage Audit Phase 2 - login() fires maybeRunDailyUsageAggregation() fire-and-forget. Auto-
+// mocked (same precedent as portfolio.controller.test.ts/contrarianFinder.controller.test.ts)
+// so its real transaction logic never runs against this file's own raw pool mock, which is
+// already sequenced per-test for login/resolveSession's own queries.
+jest.mock('../src/services/usageTracking.service');
 import request from 'supertest';
 import { pool } from '../src/db/pool';
 import { hashPassword, signToken, signPasswordResetChallengeToken, signPasswordResetToken } from '../src/services/auth.service';
 import * as impersonationService from '../src/services/impersonation.service';
+import * as usageTracking from '../src/services/usageTracking.service';
 import app from '../src/app';
 
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockConnect = pool.connect as unknown as jest.Mock;
 const mockStartImpersonation = impersonationService.startImpersonation as jest.Mock;
 const mockEndImpersonation = impersonationService.endImpersonation as jest.Mock;
+const mockMaybeRunDailyUsageAggregation = usageTracking.maybeRunDailyUsageAggregation as jest.Mock;
 
 // Self-Registration & Password Policy: signup() no longer assigns a role (that's now an admin
 // step, see the describe block below) but DOES save 5 security answers transactionally via
@@ -152,7 +159,11 @@ describe('POST /auth/signup', () => {
 });
 
 describe('POST /auth/login', () => {
-  beforeEach(() => mockQuery.mockReset());
+  beforeEach(() => {
+    mockQuery.mockReset();
+    mockMaybeRunDailyUsageAggregation.mockReset();
+    mockMaybeRunDailyUsageAggregation.mockResolvedValue(undefined);
+  });
 
   test('logs in with correct credentials and sets the auth cookie', async () => {
     const passwordHash = await hashPassword('correctpassword');
@@ -196,6 +207,22 @@ describe('POST /auth/login', () => {
     const wrongRes = await request(app).post('/auth/login').send({ email: 'a@b.com', password: 'wrongpassword' });
 
     expect(unknownRes.body.error).toBe(wrongRes.body.error);
+  });
+
+  test('triggers the watermark-gated daily usage aggregation sweep, fire-and-forget', async () => {
+    const passwordHash = await hashPassword('correctpassword');
+    mockDb({ existingUser: { id: '1', email: 'a@b.com', password_hash: passwordHash } });
+    const res = await request(app).post('/auth/login').send({ email: 'a@b.com', password: 'correctpassword' });
+    expect(res.status).toBe(200);
+    expect(mockMaybeRunDailyUsageAggregation).toHaveBeenCalled();
+  });
+
+  test('a failed aggregation sweep does not turn a successful login into a 500 (fire-and-forget)', async () => {
+    const passwordHash = await hashPassword('correctpassword');
+    mockDb({ existingUser: { id: '1', email: 'a@b.com', password_hash: passwordHash } });
+    mockMaybeRunDailyUsageAggregation.mockRejectedValue(new Error('usage aggregation db exploded'));
+    const res = await request(app).post('/auth/login').send({ email: 'a@b.com', password: 'correctpassword' });
+    expect(res.status).toBe(200);
   });
 });
 

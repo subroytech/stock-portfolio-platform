@@ -6,6 +6,7 @@ import * as securityQuestionService from '../services/securityQuestion.service';
 import * as passwordHistoryService from '../services/passwordHistory.service';
 import * as usersService from '../services/users.service';
 import * as supportTicketService from '../services/supportTicket.service';
+import * as usageTracking from '../services/usageTracking.service';
 import { validatePasswordPolicy } from '../utils/passwordPolicy';
 import env from '../config/env';
 
@@ -125,6 +126,11 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     // frontend is what gates them down to the banner-only view (ProtectedRoute.tsx), based on
     // this same status field returned here (and by GET /auth/me right after).
     res.json(await resolveSession(user.id, false));
+    // Usage Audit (Phase 2) - the once-a-day, watermark-gated aggregation sweep. Login (not
+    // GET /auth/me) is the deliberate trigger point - matches "whenever a user logs in for the
+    // first time in a day" and fires far less often than session-check calls. Fire-and-forget,
+    // same as every logUsage() call site - a failure here must never affect the login response.
+    usageTracking.maybeRunDailyUsageAggregation().catch((e) => console.error('usage aggregation failed', e));
   } catch (err) {
     if (err instanceof authService.InvalidCredentialsError) {
       res.status(401).json({ error: err.message });
