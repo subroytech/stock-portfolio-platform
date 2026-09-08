@@ -1,4 +1,31 @@
+// Daily FMP cache (fmpDailyCache.service.ts, migration 042, Phase 2) sits between this module
+// and the real network fetch now. Mocked to a pure pass-through (always calls fetchFn, always
+// reports a miss) by default - every existing test below still exercises the real fmpGet ->
+// global.fetch chain unchanged, and since nothing is ever actually served from cache in that
+// default mode, "every call attempted" still equals "every call counted", so the pre-existing
+// apiCallCounts assertions are untouched. isMarketOpenNow defaults to false (market closed) so
+// quote behaves like every other cacheable call unless a specific test says otherwise.
+jest.mock('../src/services/fmpDailyCache.service', () => ({
+  ...jest.requireActual('../src/services/fmpDailyCache.service'),
+  getOrFetch: jest.fn(),
+  isMarketOpenNow: jest.fn(),
+}));
+
 import { fetchContrarianComebackData } from '../src/services/contrarianComebackData.service';
+import * as fmpDailyCache from '../src/services/fmpDailyCache.service';
+
+const mockGetOrFetch = fmpDailyCache.getOrFetch as jest.Mock;
+const mockIsMarketOpenNow = fmpDailyCache.isMarketOpenNow as jest.Mock;
+
+beforeEach(() => {
+  mockIsMarketOpenNow.mockReset().mockReturnValue(false);
+  mockGetOrFetch.mockReset().mockImplementation(
+    async (_symbol: string, _apiName: string, _description: string, fetchFn: () => Promise<unknown>) => ({
+      data: await fetchFn(),
+      wasCached: false,
+    }),
+  );
+});
 
 function jsonResponse(body: unknown, status = 200) {
   return { status, ok: status < 300, json: () => Promise.resolve(body) };
@@ -58,6 +85,9 @@ describe('fetchContrarianComebackData', () => {
     expect(data.cashAndCashEquivalents).toBe(400);
     expect(data.operatingCashFlow).toBe(300);
     expect(data.capitalExpenditure).toBe(-50);
+    // 7 critical + 1 conditional ETF historical (mapped sector) + 2 fundamentals = 10 FMP
+    // calls, 1 Finnhub (key given).
+    expect(data.apiCallCounts).toEqual({ fmp: 10, finnhub: 1 });
   });
 
   test('balance-sheet/cash-flow fetch failure degrades gracefully - Fundamental Health just sees null fields', async () => {
@@ -83,6 +113,9 @@ describe('fetchContrarianComebackData', () => {
     expect(data.etfSymbol).toBeNull();
     expect(data.etfDailyBars).toEqual([]);
     expect(fetchSpy.mock.calls.filter((c) => String(c[0]).includes('historical-price-eod'))).toHaveLength(1); // stock only
+    // No ETF mapping means the conditional call is never attempted: 7 critical + 0 + 2
+    // fundamentals = 9 FMP calls.
+    expect(data.apiCallCounts).toEqual({ fmp: 9, finnhub: 0 });
   });
 
   test('ETF fetch failure degrades gracefully - Check 3 just sees no ETF data', async () => {
@@ -107,6 +140,9 @@ describe('fetchContrarianComebackData', () => {
 
     expect(data.news).toEqual([]);
     expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('finnhub'))).toBe(false);
+    // Technology (the default profile's sector here) maps to an ETF, so the conditional
+    // call is still attempted even with no Finnhub key: 7 + 1 + 2 = 10 FMP, 0 Finnhub.
+    expect(data.apiCallCounts).toEqual({ fmp: 10, finnhub: 0 });
   });
 
   test('a critical call rejecting (e.g. invalid FMP key) propagates the error', async () => {
@@ -116,5 +152,45 @@ describe('fetchContrarianComebackData', () => {
     }) as unknown as typeof fetch;
 
     await expect(fetchContrarianComebackData('AAPL', 'bad-key')).rejects.toThrow();
+  });
+
+  test('a fully cached day (every getOrFetch call reports a hit) logs zero real FMP calls', async () => {
+    // Real cache hits never invoke fetchFn at all - returns canned data directly per apiName,
+    // proving the dynamic count actually drops to 0 rather than just relying on fetchFn never
+    // resolving. No ETF mapping here (Unmapped Sector) so the conditional call never even fires.
+    const CACHED_DATA: Record<string, unknown> = {
+      profile: [{ companyName: 'Apple Inc.', sector: 'Unmapped Sector', exchange: 'NASDAQ', mktCap: 3e12 }],
+      quote: [{ price: 200, yearHigh: 260, marketCap: 3e12 }],
+      'income-statement': [{ fiscalYear: '2026', revenue: 1100, eps: 5 }],
+      'price-target-consensus': [{ targetConsensus: 230, targetHigh: 260, targetLow: 190 }],
+      grades: [],
+      'insider-trading': [],
+      'historical-price-eod': [{ date: '2026-07-20', high: 205, low: 195, close: 200, volume: 1000 }],
+      'balance-sheet-statement': [{ totalDebt: 1000 }],
+      'cash-flow-statement': [{ operatingCashFlow: 300 }],
+    };
+    mockGetOrFetch.mockImplementation(async (_symbol: string, apiName: string) => ({
+      data: CACHED_DATA[apiName] ?? [],
+      wasCached: true,
+    }));
+
+    const data = await fetchContrarianComebackData('AAPL', 'fake-fmp-key', undefined);
+
+    expect(data.companyName).toBe('Apple Inc.');
+    expect(data.apiCallCounts).toEqual({ fmp: 0, finnhub: 0 });
+  });
+
+  test('only the subject\'s own quote is requested with forceFresh while the market is open - every other call is not', async () => {
+    mockIsMarketOpenNow.mockReturnValue(true);
+    mockFetchByUrl({ ...CRITICAL_HAPPY_ROUTES, '/profile?': [{ companyName: 'Apple Inc.', sector: 'Unmapped Sector', mktCap: 3e12 }] });
+
+    await fetchContrarianComebackData('AAPL', 'fake-fmp-key', undefined);
+
+    const quoteCall = mockGetOrFetch.mock.calls.find((c) => c[0] === 'AAPL' && c[1] === 'quote');
+    expect(quoteCall?.[4]).toEqual({ forceFresh: true });
+    const profileCall = mockGetOrFetch.mock.calls.find((c) => c[1] === 'profile');
+    expect(profileCall?.[4]).toBeUndefined();
+    const incomeCall = mockGetOrFetch.mock.calls.find((c) => c[1] === 'income-statement');
+    expect(incomeCall?.[4]).toBeUndefined();
   });
 });

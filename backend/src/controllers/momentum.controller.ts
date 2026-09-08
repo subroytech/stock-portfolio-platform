@@ -46,7 +46,8 @@ export async function analyze(req: Request, res: Response, next: NextFunction): 
     const price = quote?.price ?? closes[0];
 
     const analysis = await analysisService.computeMomentumAnalysis({ closes, lows, volumes, price });
-    usageTracking.logUsage(getUserId(req), 'momentum').catch((e) => console.error('usage log failed', e));
+    usageTracking.logUsage(getUserId(req), 'momentum', { fmp_historical: 1, fmp_quote: 1 })
+      .catch((e) => console.error('usage log failed', e));
     res.json({ symbol, name: quote?.name ?? null, analysis });
   } catch (err) {
     if (err instanceof userSubscription.MissingUserApiKeyError) {

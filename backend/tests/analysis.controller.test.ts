@@ -18,11 +18,20 @@ jest.mock('../src/services/userSubscription.service', () => ({
   getDecryptedKey: jest.fn(),
 }));
 jest.mock('../src/services/usageTracking.service');
+// The 2 new Gate<->Submit cache tests below push this file's total real request count against
+// these routes past the real rateLimiters' per-user window (found live: a Gate request was
+// silently 429'd mid-suite, which looked like a cache/expiry bug until traced to this) - same
+// pass-through mock precedent as flexQuota.controller.test.ts.
+jest.mock('../src/middleware/rateLimit', () => ({
+  __esModule: true,
+  default: [(_req: unknown, _res: unknown, next: () => void) => next(), (_req: unknown, _res: unknown, next: () => void) => next()],
+}));
 
 import request from 'supertest';
 import * as analysisService from '../src/services/analysisService';
 import * as longTermAnalysisData from '../src/services/longTermAnalysisData.service';
 import * as contrarianComebackData from '../src/services/contrarianComebackData.service';
+import * as contrarianComebackCache from '../src/services/contrarianComebackCache';
 import * as userSubscription from '../src/services/userSubscription.service';
 import * as usageTracking from '../src/services/usageTracking.service';
 import { InvalidTickerError } from '../src/utils/errors';
@@ -53,6 +62,10 @@ beforeEach(() => {
   );
   mockLogUsage.mockReset();
   mockLogUsage.mockResolvedValue(undefined);
+  // contrarianComebackCache is the real module (not mocked) - several tests below reuse
+  // 'user-1'/'AAPL', so without this an earlier test's Gate call would leak a cache hit into a
+  // later, unrelated Submit test.
+  contrarianComebackCache.clearAll();
 });
 
 describe('GET /analysis/health', () => {
@@ -137,12 +150,12 @@ describe('GET /analysis/long-term/:symbol', () => {
     expect(res.body).toEqual({ error: 'No data returned for ZZZZ. Check the ticker symbol or your API key.' });
   });
 
-  test('logs usage on a successful analysis', async () => {
-    mockFetchLongTermAnalysisData.mockResolvedValue({ symbol: 'AAPL' });
+  test('logs usage on a successful analysis, with real per-provider API call counts', async () => {
+    mockFetchLongTermAnalysisData.mockResolvedValue({ symbol: 'AAPL', apiCallCounts: { fmp: 15, finnhub: 1 } });
     mockComputeLongTermAnalysis.mockResolvedValue({ symbol: 'AAPL' });
     const res = await request(app).get('/analysis/long-term/AAPL').set('Cookie', authCookie);
     expect(res.status).toBe(200);
-    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'long_term_analysis');
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'long_term_analysis', { fmp: 15, finnhub: 1 });
   });
 
   test('a failed usage log does not turn a successful response into a 500 (fire-and-forget)', async () => {
@@ -173,15 +186,34 @@ describe('GET /analysis/contrarian-comeback/:symbol/gate', () => {
   });
 
   test('200 happy path, symbol uppercased regardless of request casing', async () => {
-    mockFetchContrarianComebackData.mockResolvedValue({ symbol: 'AAPL' });
+    mockFetchContrarianComebackData.mockResolvedValue({ symbol: 'AAPL', apiCallCounts: { fmp: 9, finnhub: 1 } });
     mockComputeContrarianComebackGate.mockResolvedValue({ symbol: 'AAPL', check1Pass: true, failedCheck: null });
     const res = await request(app).get('/analysis/contrarian-comeback/aapl/gate').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ symbol: 'AAPL', check1Pass: true, failedCheck: null });
     expect(mockFetchContrarianComebackData).toHaveBeenCalledWith('AAPL', 'fake-fmp-key', undefined);
-    // Gate is a lightweight preview step, not a full run - only the POST
-    // .../submit below counts as "usage" for tracking purposes.
-    expect(mockLogUsage).not.toHaveBeenCalled();
+    // apiCallCounts is stripped before reaching the analysis-service call - same "don't leak
+    // internal bookkeeping into the cross-service payload" precedent as Submit below.
+    expect(mockComputeContrarianComebackGate).toHaveBeenCalledWith({ symbol: 'AAPL' });
+  });
+
+  test('logs usage on a successful gate check, with real per-provider API call counts', async () => {
+    mockFetchContrarianComebackData.mockResolvedValue({ symbol: 'AAPL', apiCallCounts: { fmp: 9, finnhub: 1 } });
+    mockComputeContrarianComebackGate.mockResolvedValue({ symbol: 'AAPL', check1Pass: true, failedCheck: null });
+    const res = await request(app).get('/analysis/contrarian-comeback/AAPL/gate').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    // Gate runs the exact same full fetch as Submit - previously only Submit was logged, which
+    // meant an attempt that failed the gate (or was never carried through to Submit) left its
+    // real FMP/Finnhub cost with zero record. Same feature bucket as Submit, not a new one.
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'contrarian_comeback', { fmp: 9, finnhub: 1 });
+  });
+
+  test('a failed usage log does not turn a successful gate response into a 500 (fire-and-forget)', async () => {
+    mockFetchContrarianComebackData.mockResolvedValue({ symbol: 'AAPL' });
+    mockComputeContrarianComebackGate.mockResolvedValue({ symbol: 'AAPL', check1Pass: true, failedCheck: null });
+    mockLogUsage.mockRejectedValue(new Error('usage log db exploded'));
+    const res = await request(app).get('/analysis/contrarian-comeback/AAPL/gate').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
   });
 
   test('503 when the Python service errors', async () => {
@@ -267,12 +299,12 @@ describe('POST /analysis/contrarian-comeback/:symbol', () => {
     expect(res.body).toEqual({ error: 'No data returned for ZZZZ. Check the ticker symbol or your API key.' });
   });
 
-  test('logs usage on a successful submit', async () => {
-    mockFetchContrarianComebackData.mockResolvedValue({ symbol: 'AAPL' });
+  test('logs usage on a successful submit, with real per-provider API call counts', async () => {
+    mockFetchContrarianComebackData.mockResolvedValue({ symbol: 'AAPL', apiCallCounts: { fmp: 10, finnhub: 1 } });
     mockComputeContrarianComebackSubmit.mockResolvedValue({ symbol: 'AAPL', format: 'A' });
     const res = await request(app).post('/analysis/contrarian-comeback/AAPL').set('Cookie', authCookie).send(validBody);
     expect(res.status).toBe(200);
-    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'contrarian_comeback');
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'contrarian_comeback', { fmp: 10, finnhub: 1 });
   });
 
   test('a failed usage log does not turn a successful response into a 500 (fire-and-forget)', async () => {
@@ -281,5 +313,52 @@ describe('POST /analysis/contrarian-comeback/:symbol', () => {
     mockLogUsage.mockRejectedValue(new Error('usage log db exploded'));
     const res = await request(app).post('/analysis/contrarian-comeback/AAPL').set('Cookie', authCookie).send(validBody);
     expect(res.status).toBe(200);
+  });
+
+  test('reuses a fresh Gate result within 30 minutes, skips the fetch and key lookup, and logs a zero-cost event', async () => {
+    mockFetchContrarianComebackData.mockResolvedValue({ symbol: 'AAPL', price: 100, apiCallCounts: { fmp: 9, finnhub: 1 } });
+    mockComputeContrarianComebackGate.mockResolvedValue({ symbol: 'AAPL', check1Pass: true, failedCheck: null });
+    const gateRes = await request(app).get('/analysis/contrarian-comeback/AAPL/gate').set('Cookie', authCookie);
+    expect(gateRes.status).toBe(200);
+
+    const decryptedKeyCallsAfterGate = mockGetDecryptedKey.mock.calls.length;
+
+    mockComputeContrarianComebackSubmit.mockResolvedValue({ symbol: 'AAPL', format: 'A' });
+    const submitRes = await request(app).post('/analysis/contrarian-comeback/AAPL').set('Cookie', authCookie).send(validBody);
+    expect(submitRes.status).toBe(200);
+
+    expect(mockFetchContrarianComebackData).toHaveBeenCalledTimes(1); // only Gate's fetch - Submit reused it
+    expect(mockGetDecryptedKey.mock.calls.length).toBe(decryptedKeyCallsAfterGate); // Submit never resolved keys
+    expect(mockComputeContrarianComebackSubmit).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'AAPL', price: 100 }));
+    expect(mockLogUsage).toHaveBeenNthCalledWith(1, 'user-1', 'contrarian_comeback', { fmp: 9, finnhub: 1 }); // Gate - real cost
+    expect(mockLogUsage).toHaveBeenNthCalledWith(2, 'user-1', 'contrarian_comeback', { fmp: 0, finnhub: 0 }); // Submit - cache hit
+  });
+
+  test('an expired (30+ minute old) Gate result is not reused - Submit falls back to a fresh fetch', async () => {
+    // Date.now() is mocked directly rather than via jest.useFakeTimers() - full fake timers
+    // interferes with supertest's own request/response round trip. The cache module's own
+    // expiry logic (contrarianComebackCache.test.ts) is already covered directly against real
+    // time; this test's job is only to confirm the controller wiring falls back correctly once
+    // getCachedGateResult reports a miss. Both mock values are anchored to one captured instant
+    // (not two separate Date.now() reads) so the test can't be sensitive to how much real wall-
+    // clock time elapses between the Gate and Submit requests.
+    const anchor = Date.now();
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(anchor);
+    try {
+      mockFetchContrarianComebackData.mockResolvedValue({ symbol: 'AAPL', apiCallCounts: { fmp: 9, finnhub: 1 } });
+      mockComputeContrarianComebackGate.mockResolvedValue({ symbol: 'AAPL', check1Pass: true, failedCheck: null });
+      await request(app).get('/analysis/contrarian-comeback/AAPL/gate').set('Cookie', authCookie);
+
+      nowSpy.mockReturnValue(anchor + 30 * 60 * 1000 + 1);
+
+      mockComputeContrarianComebackSubmit.mockResolvedValue({ symbol: 'AAPL', format: 'A' });
+      const submitRes = await request(app).post('/analysis/contrarian-comeback/AAPL').set('Cookie', authCookie).send(validBody);
+
+      expect(submitRes.status).toBe(200);
+      expect(mockFetchContrarianComebackData).toHaveBeenCalledTimes(2); // Gate, then Submit's own fresh fetch
+      expect(mockLogUsage).toHaveBeenNthCalledWith(2, 'user-1', 'contrarian_comeback', { fmp: 9, finnhub: 1 }); // real cost again, not zero
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });

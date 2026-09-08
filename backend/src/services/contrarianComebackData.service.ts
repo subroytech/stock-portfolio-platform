@@ -6,13 +6,24 @@
 // (analysis-service/app/scoring/contrarian_comeback.py). One fetch function,
 // called independently by both the gate-preview and submit controller
 // handlers (stateless - see contrarian_comeback.py's header comment for why
-// that's safe/cheap to do twice).
+// that's safe/cheap to do twice) - though a short-lived in-memory cache
+// (contrarianComebackCache.service.ts) now short-circuits a same-user Submit
+// within 30 minutes of its own Gate before this function is even called again.
 //
 // TS interfaces below mirror analysis-service/app/models/contrarian_comeback
 // .py's Pydantic models field-for-field - no shared-schema codegen in this
 // repo, keep both in sync by hand if either shape changes.
+//
+// Shared daily FMP cache (m_fmp_daily_cache, migration 042, Phase 2 2026-09-07) - every FMP call
+// below except quote (which stays live during market hours, folding into the day-cache after
+// close - see fmpDailyCache.service.ts's isMarketOpenNow()) is routed through
+// fmpDailyCache.getOrFetch() instead of calling fmpGet directly. Symbol-keyed, not per-user, and
+// shared with longTermAnalysisData.service.ts's own cached calls - profile/quote/
+// income-statement/price-target-consensus/grades are the exact same (symbol, api_name) rows, so
+// a symbol already looked up via either feature today benefits the other for free.
 
 import { fmpGet } from './marketData.service';
+import * as fmpDailyCache from './fmpDailyCache.service';
 import env from '../config/env';
 import { InvalidTickerError } from '../utils/errors';
 
@@ -102,6 +113,10 @@ export interface ContrarianComebackData {
   cashAndCashEquivalents: number | null;
   operatingCashFlow: number | null;
   capitalExpenditure: number | null;
+  // Usage Audit follow-on (2026-09-06) - real per-provider call counts for this run. Since the
+  // daily cache (Phase 2, 2026-09-07) landed, this reflects calls actually made (cache misses /
+  // the forced-fresh quote call during market hours), not a fixed formula.
+  apiCallCounts?: { fmp: number; finnhub: number };
 }
 
 function first<T = any>(data: T[] | T | null | undefined): T | null {
@@ -138,14 +153,17 @@ const EMPTY_FUNDAMENTALS: FundamentalsRaw = {
 // Non-critical, like the ETF/news fetches below - a stock with no balance-
 // sheet/cash-flow data on this account's FMP tier just degrades to null
 // tiers in Fundamental Health, it never blocks the gate/score report.
-async function fetchFundamentals(symbol: string, fmpKey: string): Promise<FundamentalsRaw> {
+async function fetchFundamentals(symbol: string, fmpKey: string): Promise<FundamentalsRaw & { realCalls: number }> {
   try {
-    const [bsRaw, cfRaw] = await Promise.all([
-      fmpGet<any>(`${env.fmpBaseUrl}/balance-sheet-statement?symbol=${symbol}&period=annual&limit=1&apikey=${fmpKey}`),
-      fmpGet<any>(`${env.fmpBaseUrl}/cash-flow-statement?symbol=${symbol}&period=annual&limit=1&apikey=${fmpKey}`),
+    const [bsResult, cfResult] = await Promise.all([
+      fmpDailyCache.getOrFetch(symbol, 'balance-sheet-statement', `GET /balance-sheet-statement?symbol=${symbol}&period=annual&limit=1`,
+        () => fmpGet<any>(`${env.fmpBaseUrl}/balance-sheet-statement?symbol=${symbol}&period=annual&limit=1&apikey=${fmpKey}`)),
+      fmpDailyCache.getOrFetch(symbol, 'cash-flow-statement', `GET /cash-flow-statement?symbol=${symbol}&period=annual&limit=1`,
+        () => fmpGet<any>(`${env.fmpBaseUrl}/cash-flow-statement?symbol=${symbol}&period=annual&limit=1&apikey=${fmpKey}`)),
     ]);
-    const bs = first<any>(bsRaw);
-    const cf = first<any>(cfRaw);
+    const bs = first<any>(bsResult.data);
+    const cf = first<any>(cfResult.data);
+    const realCalls = (bsResult.wasCached ? 0 : 1) + (cfResult.wasCached ? 0 : 1);
     return {
       totalDebt: bs?.totalDebt ?? null,
       totalStockholdersEquity: bs?.totalStockholdersEquity ?? null,
@@ -154,9 +172,13 @@ async function fetchFundamentals(symbol: string, fmpKey: string): Promise<Fundam
       cashAndCashEquivalents: bs?.cashAndCashEquivalents ?? null,
       operatingCashFlow: cf?.operatingCashFlow ?? null,
       capitalExpenditure: cf?.capitalExpenditure ?? null,
+      realCalls,
     };
-  } catch {
-    return EMPTY_FUNDAMENTALS;
+  } catch (err) {
+    // See fetchFundamentals's counterpart comment in longTermAnalysisData.service.ts - a cache
+    // hit can't reach here, so this was a real (failed) attempt. Logged (previously silent).
+    console.error(`fetchFundamentals failed for ${symbol}:`, err);
+    return { ...EMPTY_FUNDAMENTALS, realCalls: 1 };
   }
 }
 
@@ -186,26 +208,47 @@ export async function fetchContrarianComebackData(
   finnhubKey?: string,
 ): Promise<ContrarianComebackData> {
   const critical = await Promise.allSettled([
-    fmpGet<any>(`${env.fmpBaseUrl}/profile?symbol=${symbol}&apikey=${fmpKey}`),
-    fmpGet<any>(`${env.fmpBaseUrl}/quote?symbol=${symbol}&apikey=${fmpKey}`),
-    fmpGet<any>(`${env.fmpBaseUrl}/income-statement?symbol=${symbol}&period=annual&limit=4&apikey=${fmpKey}`),
-    fmpGet<any>(`${env.fmpBaseUrl}/price-target-consensus?symbol=${symbol}&apikey=${fmpKey}`),
-    fmpGet<any>(`${env.fmpBaseUrl}/grades?symbol=${symbol}&limit=50&apikey=${fmpKey}`),
-    // NOT /v4/insider-trading — confirmed live 2026-07-27 that FMP retired the
-    // v4 endpoint ("Legacy Endpoint", 403) for accounts created after
-    // 2025-08-31. /stable/insider-trading/search is the current replacement,
-    // and unlike the old v4 shape, its field is correctly spelled
-    // acquisitionOrDisposition (not acquistionOrDisposition).
-    fmpGet<any>(`${env.fmpBaseUrl}/insider-trading/search?symbol=${symbol}&limit=20&apikey=${fmpKey}`),
-    fmpGet<any>(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${symbol}&limit=1000&apikey=${fmpKey}`),
+    fmpDailyCache.getOrFetch(symbol, 'profile', `GET /profile?symbol=${symbol}`,
+      () => fmpGet<any>(`${env.fmpBaseUrl}/profile?symbol=${symbol}&apikey=${fmpKey}`)),
+    // quote stays live while the market is open, same hybrid rule (and same cached row) as
+    // longTermAnalysisData.service.ts's own subject quote.
+    fmpDailyCache.getOrFetch(symbol, 'quote', `GET /quote?symbol=${symbol}`,
+      () => fmpGet<any>(`${env.fmpBaseUrl}/quote?symbol=${symbol}&apikey=${fmpKey}`),
+      { forceFresh: fmpDailyCache.isMarketOpenNow() }),
+    // limit=5, not 4 - shares the exact same cached row longTermAnalysisData.service.ts already
+    // fetches (its own superset-fetch rule), sliced to 4 periods here instead of 3.
+    fmpDailyCache.getOrFetch(symbol, 'income-statement', `GET /income-statement?symbol=${symbol}&period=annual&limit=5`,
+      () => fmpGet<any>(`${env.fmpBaseUrl}/income-statement?symbol=${symbol}&period=annual&limit=5&apikey=${fmpKey}`)),
+    fmpDailyCache.getOrFetch(symbol, 'price-target-consensus', `GET /price-target-consensus?symbol=${symbol}`,
+      () => fmpGet<any>(`${env.fmpBaseUrl}/price-target-consensus?symbol=${symbol}&apikey=${fmpKey}`)),
+    // limit=50 - matches longTermAnalysisData.service.ts's own grades call exactly (standardized
+    // 2026-09-07, see that file's own comment) so both features always share one correct row.
+    fmpDailyCache.getOrFetch(symbol, 'grades', `GET /grades?symbol=${symbol}&limit=50`,
+      () => fmpGet<any>(`${env.fmpBaseUrl}/grades?symbol=${symbol}&limit=50&apikey=${fmpKey}`)),
+    fmpDailyCache.getOrFetch(symbol, 'insider-trading', `GET /insider-trading/search?symbol=${symbol}&limit=20`,
+      // NOT /v4/insider-trading — confirmed live 2026-07-27 that FMP retired the
+      // v4 endpoint ("Legacy Endpoint", 403) for accounts created after
+      // 2025-08-31. /stable/insider-trading/search is the current replacement,
+      // and unlike the old v4 shape, its field is correctly spelled
+      // acquisitionOrDisposition (not acquistionOrDisposition).
+      () => fmpGet<any>(`${env.fmpBaseUrl}/insider-trading/search?symbol=${symbol}&limit=20&apikey=${fmpKey}`)),
+    fmpDailyCache.getOrFetch(symbol, 'historical-price-eod', `GET /historical-price-eod/full?symbol=${symbol}&limit=1000`,
+      () => fmpGet<any>(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${symbol}&limit=1000&apikey=${fmpKey}`)),
   ]);
 
   const rejected = critical.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
   if (rejected) throw rejected.reason;
 
-  const [profileRaw, quoteRaw, incomeRaw, ptRaw, gradesRaw, insiderRaw, histRaw] = critical.map(
-    (r) => (r as PromiseFulfilledResult<any>).value,
-  );
+  const criticalResults = critical.map((r) => (r as PromiseFulfilledResult<fmpDailyCache.GetOrFetchResult<any>>).value);
+  const [profileResult, quoteResult, incomeResult, ptResult, gradesResult, insiderResult, histResult] = criticalResults;
+  const profileRaw = profileResult.data;
+  const quoteRaw = quoteResult.data;
+  const incomeRaw = incomeResult.data;
+  const ptRaw = ptResult.data;
+  const gradesRaw = gradesResult.data;
+  const insiderRaw = insiderResult.data;
+  const histRaw = histResult.data;
+  const criticalRealCalls = criticalResults.filter((r) => !r.wasCached).length;
 
   const profile = first<any>(profileRaw);
   const quote = first<any>(quoteRaw);
@@ -251,12 +294,19 @@ export async function fetchContrarianComebackData(
   const etfSymbol = sector ? (SECTOR_ETF[sector] ?? null) : null;
 
   let etfDailyBars: DailyBar[] = [];
+  let etfRealCalls = 0;
   if (etfSymbol) {
     try {
-      const etfRaw = await fmpGet<any>(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${etfSymbol}&limit=260&apikey=${fmpKey}`);
-      etfDailyBars = normalizeBars(etfRaw);
-    } catch {
+      const etfResult = await fmpDailyCache.getOrFetch(etfSymbol, 'historical-price-eod', `GET /historical-price-eod/full?symbol=${etfSymbol}&limit=260`,
+        () => fmpGet<any>(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${etfSymbol}&limit=260&apikey=${fmpKey}`));
+      etfDailyBars = normalizeBars(etfResult.data);
+      etfRealCalls = etfResult.wasCached ? 0 : 1;
+    } catch (err) {
+      // Logged (previously silent) - a cache hit can't reach here, so this was a real (failed)
+      // attempt.
+      console.error(`ETF historical-price-eod failed for ${etfSymbol}:`, err);
       etfDailyBars = []; // non-critical - Check 3 just degrades to "no ETF data"
+      etfRealCalls = 1;
     }
   }
 
@@ -275,6 +325,9 @@ export async function fetchContrarianComebackData(
   const eps0 = Array.isArray(incomeRaw) ? (incomeRaw[0]?.eps ?? incomeRaw[0]?.epsDiluted ?? null) : null;
   const peRatio = eps0 && eps0 > 0 && price > 0 ? price / eps0 : null;
 
+  const { realCalls: fundamentalsRealCalls, ...fundamentalsData } = fundamentals;
+  const fmpCallCount = criticalRealCalls + etfRealCalls + fundamentalsRealCalls;
+
   return {
     symbol,
     companyName: profile.companyName ?? null,
@@ -292,6 +345,7 @@ export async function fetchContrarianComebackData(
     grades,
     insiderTrades,
     news,
-    ...fundamentals,
+    ...fundamentalsData,
+    apiCallCounts: { fmp: fmpCallCount, finnhub: finnhubKey ? 1 : 0 },
   };
 }

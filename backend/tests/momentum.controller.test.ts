@@ -141,7 +141,7 @@ describe('GET /momentum/:symbol', () => {
     mockGetQuotes.mockResolvedValue({});
     const res = await request(app).get('/momentum/AAPL').set('Cookie', authCookie);
     expect(res.status).toBe(200);
-    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'momentum');
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'momentum', { fmp_historical: 1, fmp_quote: 1 });
   });
 
   test('a failed usage log does not turn a successful response into a 500 (fire-and-forget)', async () => {
