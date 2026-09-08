@@ -4,6 +4,7 @@ jest.mock('../src/services/usageTracking.service', () => ({
   getUsageRankingLast3Days: jest.fn(),
   getUsageRankingForMonth: jest.fn(),
   getAvailableUsageMonths: jest.fn(),
+  getUsageAggregationCutoff: jest.fn(),
 }));
 // Enough real requests against the real /usage-audit router (mounted with rateLimiters in
 // app.ts) to potentially trip the actual per-IP/per-user limiter - same no-op mock already
@@ -23,15 +24,20 @@ const mockQuery = pool.query as unknown as jest.Mock;
 const mockGetUsageRankingLast3Days = usageTracking.getUsageRankingLast3Days as jest.Mock;
 const mockGetUsageRankingForMonth = usageTracking.getUsageRankingForMonth as jest.Mock;
 const mockGetAvailableUsageMonths = usageTracking.getAvailableUsageMonths as jest.Mock;
+const mockGetUsageAggregationCutoff = usageTracking.getUsageAggregationCutoff as jest.Mock;
 
 const authCookie = `auth_token=${signToken('u1')}`;
-const RANKING = [{ userId: 'u1', email: 'a@b.com', totalScore: 10, byFeature: { momentum: 10 } }];
+const RANKING = [{
+  userId: 'u1', email: 'a@b.com', totalFunctionCalls: 10, totalFmpCalls: 10, totalFinnhubCalls: 0,
+  byFeature: { momentum: { functionCalls: 10, fmpCalls: 10, finnhubCalls: 0 } },
+}];
 
 beforeEach(() => {
   mockQuery.mockReset();
   mockGetUsageRankingLast3Days.mockReset();
   mockGetUsageRankingForMonth.mockReset();
   mockGetAvailableUsageMonths.mockReset();
+  mockGetUsageAggregationCutoff.mockReset().mockResolvedValue('2026-09-04T00:00:00.000Z');
 });
 
 describe('GET /usage-audit/last-3-days', () => {
@@ -57,13 +63,14 @@ describe('GET /usage-audit/monthly', () => {
     expect(res.status).toBe(403);
   });
 
-  test('defaults to the current month when omitted', async () => {
+  test('defaults to the current month when omitted, and includes the sweep\'s data cutoff', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
     mockGetUsageRankingForMonth.mockResolvedValue(RANKING);
     const res = await request(app).get('/usage-audit/monthly').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     const expectedMonth = new Date().toISOString().slice(0, 7) + '-01';
     expect(res.body.month).toBe(expectedMonth);
+    expect(res.body.dataCutoff).toBe('2026-09-04T00:00:00.000Z');
     expect(mockGetUsageRankingForMonth).toHaveBeenCalledWith(expectedMonth);
   });
 
@@ -74,6 +81,15 @@ describe('GET /usage-audit/monthly', () => {
     expect(res.status).toBe(200);
     expect(res.body.month).toBe('2026-07-01');
     expect(mockGetUsageRankingForMonth).toHaveBeenCalledWith('2026-07-01');
+  });
+
+  test('dataCutoff is null when the sweep has never run', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
+    mockGetUsageRankingForMonth.mockResolvedValue(RANKING);
+    mockGetUsageAggregationCutoff.mockResolvedValue(null);
+    const res = await request(app).get('/usage-audit/monthly').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.dataCutoff).toBeNull();
   });
 
   test('400 for a malformed month', async () => {

@@ -5,13 +5,21 @@ import { apiFetch } from './client';
 // data that's been write-only since it was built. UsageFeature mirrors backend/src/services/
 // usageTracking.service.ts's own type exactly.
 export type UsageFeature = 'momentum' | 'contrarian_finder_scan' | 'long_term_analysis'
-  | 'contrarian_comeback' | 'portfolio_refresh';
+  | 'contrarian_comeback' | 'portfolio_refresh' | 'stock_preview';
+
+export interface FeatureUsage {
+  functionCalls: number;
+  fmpCalls: number;
+  finnhubCalls: number;
+}
 
 export interface UsageRankingEntry {
   userId: string;
   email: string;
-  totalScore: number;
-  byFeature: Partial<Record<UsageFeature, number>>;
+  totalFunctionCalls: number;
+  totalFmpCalls: number;
+  totalFinnhubCalls: number;
+  byFeature: Partial<Record<UsageFeature, FeatureUsage>>;
 }
 
 export function useUsageLast3Days() {
@@ -24,7 +32,7 @@ export function useUsageLast3Days() {
 export function useUsageForMonth(month: string) {
   return useQuery({
     queryKey: ['usageAudit', 'monthly', month],
-    queryFn: () => apiFetch<{ month: string; ranking: UsageRankingEntry[] }>(`/usage-audit/monthly?month=${month}`).then((r) => r.ranking),
+    queryFn: () => apiFetch<{ month: string; ranking: UsageRankingEntry[]; dataCutoff: string | null }>(`/usage-audit/monthly?month=${month}`),
   });
 }
 

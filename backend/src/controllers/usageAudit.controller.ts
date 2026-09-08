@@ -26,8 +26,11 @@ export async function getMonthly(req: Request, res: Response, next: NextFunction
     return;
   }
   try {
-    const ranking = await usageTracking.getUsageRankingForMonth(month);
-    res.json({ month, ranking });
+    const [ranking, dataCutoff] = await Promise.all([
+      usageTracking.getUsageRankingForMonth(month),
+      usageTracking.getUsageAggregationCutoff(),
+    ]);
+    res.json({ month, ranking, dataCutoff });
   } catch (err) {
     next(err);
   }

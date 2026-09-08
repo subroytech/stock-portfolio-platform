@@ -257,10 +257,13 @@ from migration 015 didn't move, its *meaning* just shifted), `permissions:manage
 
 ### `user_evt_usage`
 Added by migration `015`. Raw per-user usage event log — one row per tracked action
-(Momentum run, Contrarian Finder scan, Long-Term Analysis, Contrarian Comeback, portfolio
-Refresh Prices), written by `usageTracking.service.ts`'s `logUsage()`. Retained via
-CockroachDB's native row-level TTL (`WITH (ttl_expire_after = '35 days')`) — rows are deleted
-automatically by CockroachDB's background TTL job, no cron/application cleanup code needed.
+(Momentum run, Contrarian Finder scan, Long-Term Analysis, Contrarian Comeback, Portfolio
+Refresh Prices, Stock Preview), written by `usageTracking.service.ts`'s insert-only `logUsage()`.
+In normal operation, rows are actively deleted by the app-level daily sweep
+(`maybeRunDailyUsageAggregation()`) once they turn 3 days old — see
+`user_evt_usage_summary_monthly` below. CockroachDB's native row-level TTL
+(`WITH (ttl_expire_after = '35 days')`) is only a backstop for when the sweep hasn't run (e.g. no
+logins for an extended period) and should rarely if ever actually fire.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -273,9 +276,15 @@ automatically by CockroachDB's background TTL job, no cron/application cleanup c
 Indexes: `user_evt_usage_pkey` (PK).
 
 ### `user_evt_usage_summary_monthly`
-Added by migration `015`. One row per `(user_id, feature, month)`, incremented via
-`INSERT ... ON CONFLICT ... DO UPDATE SET event_count = event_count + 1` on every single
-`logUsage()` call — a real-time running total, not a periodic batch rollup. Retained via TTL
+Added by migration `015`. One row per `(user_id, feature, month)`. **Not** touched in real time by
+`logUsage()` (that call is insert-only, straight into `user_evt_usage` above) — both `event_count`
+and `api_call_details` are written exclusively by the same watermark-gated daily sweep
+(`maybeRunDailyUsageAggregation()`, `usageTracking.service.ts`), which rolls every raw event row
+older than 3 days into an `INSERT ... ON CONFLICT ... DO UPDATE` here, then deletes those raw rows.
+A brand-new `(user_id, feature, month)` triplet has no row here at all until the sweep first runs
+for it — up to ~3 days after that combination's first-ever event — which is exactly the gap the
+User Usage Dashboard's Monthly tab surfaces via its "data reflects until `<cutoff>`" banner rather
+than hiding. Retained via TTL
 (`WITH (ttl_expire_after = '366 days')`) for the ~12-month cap. **Note on how the TTL actually
 behaves**: CockroachDB's TTL clock resets on every row `UPDATE` (confirmed live via
 `SHOW CREATE TABLE`: `ON UPDATE current_timestamp() + '366 days'`), not just at row creation —
