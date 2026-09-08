@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { hasAdminConsoleAccess, useLogout, useSession } from '../api/auth';
 import { ApiKeysModalContext } from '../lib/apiKeysModal';
 import { TickerHandoffContext, type HandoffTarget, type TickerHandoff } from '../lib/tickerHandoff';
@@ -12,6 +12,7 @@ import MomentumPage from '../pages/MomentumPage';
 import ContrarianFinderPage from '../pages/ContrarianFinderPage';
 import LongTermAnalysisPage from '../pages/LongTermAnalysisPage';
 import ContrarianComebackPage from '../pages/ContrarianComebackPage';
+import StockAnalysisPage from '../pages/StockAnalysisPage';
 import SubscriptionsPage from '../pages/SubscriptionsPage';
 
 const TABS = [
@@ -31,7 +32,7 @@ export default function TabShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const logout = useLogout();
-  const { data: session } = useSession();
+  const { data: session, isLoading: sessionLoading } = useSession();
   // Permission-based, not a hardcoded roles.includes('admin') check - a superset role like
   // admin-master holds every admin-console permission without literally being named "admin".
   const isAdmin = hasAdminConsoleAccess(session);
@@ -57,6 +58,12 @@ export default function TabShell() {
   const [portfolioSubTab, setPortfolioSubTab] = useState<'legacy' | 'flex'>('legacy');
   const effectivePortfolioSubTab = canLegacy && canFlex ? portfolioSubTab : (canFlex && !canLegacy ? 'flex' : 'legacy');
 
+  // Stock Analysis tab - gated Function (migration 041), zero default grants. Hidden entirely
+  // (not just disabled) from the nav when absent, same pattern as Admin/API Keys above - and
+  // the first top-level tab that also needs a direct-URL guard (see the panel below), since
+  // every other tab here has always been open to any signed-in session.
+  const canStockAnalysis = session?.permissions?.includes('stock_analysis:view') ?? false;
+
   function launch(target: HandoffTarget, symbol: string) {
     requestIdRef.current += 1;
     setHandoff({ target, symbol, requestId: requestIdRef.current });
@@ -69,7 +76,7 @@ export default function TabShell() {
       <div className="min-h-screen bg-bg-primary">
         <header className="flex flex-wrap items-center gap-3 border-b border-border bg-bg-secondary px-4 py-3 shadow-card sm:px-6">
           <nav className="flex flex-wrap items-center gap-1">
-            {TABS.map((tab) => {
+            {[...TABS, ...(canStockAnalysis ? [{ path: '/stock-analysis', label: 'Stock Analysis' }] : [])].map((tab) => {
               const active = location.pathname === tab.path;
               return (
                 <Link
@@ -157,6 +164,13 @@ export default function TabShell() {
         <div data-testid="tab-panel-contrarian-finder" className={location.pathname === '/contrarian-finder' ? '' : 'hidden'}><ContrarianFinderPage /></div>
         <div data-testid="tab-panel-contrarian-comeback" className={location.pathname === '/contrarian-comeback' ? '' : 'hidden'}><ContrarianComebackPage /></div>
         <div data-testid="tab-panel-momentum" className={location.pathname === '/momentum' ? '' : 'hidden'}><MomentumPage /></div>
+        {/* !sessionLoading guard mirrors AdminPage.tsx's own redirect-on-no-access precedent -
+            without it, a user who DOES hold stock_analysis:view would get bounced away on
+            every direct visit, before the session query has even resolved. */}
+        {location.pathname === '/stock-analysis' && !sessionLoading && !canStockAnalysis && <Navigate to="/" replace />}
+        <div data-testid="tab-panel-stock-analysis" className={location.pathname === '/stock-analysis' ? '' : 'hidden'}>
+          {canStockAnalysis && <StockAnalysisPage />}
+        </div>
       </div>
 
       {showApiKeys && (

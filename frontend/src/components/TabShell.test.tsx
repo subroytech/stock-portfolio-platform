@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -299,5 +299,76 @@ describe('TabShell', () => {
     expect(screen.getByTestId('tab-panel-contrarian-comeback')).not.toHaveClass('hidden');
     expect(within(screen.getByTestId('tab-panel-contrarian-comeback')).getByLabelText('Ticker')).toHaveValue('AAA');
     expect(client.apiFetch).toHaveBeenCalledWith('/analysis/contrarian-comeback/AAA/gate');
+  });
+
+  describe('Stock Analysis tab (gated by stock_analysis:view, migration 041)', () => {
+    test('without the permission, no nav link renders and a direct URL visit redirects to Portfolio', async () => {
+      renderShell('/stock-analysis');
+      // "Log out" renders unconditionally from the very first paint, so it can't prove the
+      // session has resolved - "API Keys" depends on the (default-mocked) session's
+      // permissions, so waiting for it is what actually proves canStockAnalysis is settled.
+      await screen.findByRole('button', { name: 'API Keys' });
+      expect(screen.queryByRole('link', { name: 'Stock Analysis' })).not.toBeInTheDocument();
+      // Navigate's own redirect fires from a useEffect, one tick after the render that first
+      // computes canStockAnalysis === false - waitFor gives it room to actually land instead of
+      // asserting synchronously right after the (already-resolved) API Keys button appears.
+      await waitFor(() => {
+        expect(screen.getByTestId('tab-panel-portfolio')).not.toHaveClass('hidden');
+      });
+      expect(screen.getByTestId('tab-panel-stock-analysis')).toHaveClass('hidden');
+    });
+
+    test('with the permission, the nav link appears and is navigable to the 4-quadrant panel', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['stock_analysis:view'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await userEvent.click(await screen.findByRole('link', { name: 'Stock Analysis' }));
+      expect(screen.getByTestId('tab-panel-stock-analysis')).not.toHaveClass('hidden');
+      expect(screen.getAllByTestId('stock-analysis-quadrant-input')).toHaveLength(4);
+    });
+
+    test('with the permission, a direct URL visit renders the panel without redirecting', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['stock_analysis:view'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        return Promise.resolve({});
+      });
+      renderShell('/stock-analysis');
+
+      // tab-panel-stock-analysis is mounted unconditionally from the very first paint (like
+      // every other tab panel), so findByTestId alone would resolve before the session (and
+      // canStockAnalysis) has settled - the nav link only appears once permission is confirmed.
+      await screen.findByRole('link', { name: 'Stock Analysis' });
+      expect(screen.getByTestId('tab-panel-stock-analysis')).not.toHaveClass('hidden');
+      expect(screen.getAllByTestId('stock-analysis-quadrant-input')).toHaveLength(4);
+    });
+
+    test("a quadrant's LT/CC buttons launch Long-Term Analysis/Contrarian Comeback with that ticker", async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['stock_analysis:view'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        if (url === '/stock-preview/AAPL') return Promise.resolve({ symbol: 'AAPL', quote: null, historical: [] });
+        if (url.startsWith('/analysis/long-term/')) return new Promise(() => {}); // left pending - only firing/handoff matters here
+        if (url.endsWith('/gate')) return new Promise(() => {}); // left pending - only firing/handoff matters here
+        return Promise.resolve({});
+      });
+      renderShell('/stock-analysis');
+
+      await userEvent.type((await screen.findAllByTestId('stock-analysis-quadrant-input'))[0], 'aapl');
+      await userEvent.click(screen.getAllByTestId('stock-analysis-quadrant-go')[0]);
+
+      await userEvent.click(await screen.findByTestId('stock-analysis-quadrant-lt'));
+      expect(screen.getByTestId('tab-panel-long-term-analysis')).not.toHaveClass('hidden');
+      expect(within(screen.getByTestId('tab-panel-long-term-analysis')).getByLabelText('Ticker')).toHaveValue('AAPL');
+
+      await userEvent.click(await screen.findByRole('link', { name: 'Stock Analysis' }));
+      await userEvent.click(screen.getByTestId('stock-analysis-quadrant-cc'));
+      expect(screen.getByTestId('tab-panel-contrarian-comeback')).not.toHaveClass('hidden');
+      expect(within(screen.getByTestId('tab-panel-contrarian-comeback')).getByLabelText('Ticker')).toHaveValue('AAPL');
+    });
   });
 });

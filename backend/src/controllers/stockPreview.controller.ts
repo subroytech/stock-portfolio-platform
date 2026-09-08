@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import * as marketData from '../services/marketData.service';
 import * as userSubscription from '../services/userSubscription.service';
+import * as usageTracking from '../services/usageTracking.service';
 
 // This route sits behind requireAuth (see app.ts), so req.user is always
 // populated by the time this handler runs.
@@ -35,6 +36,13 @@ export async function preview(req: Request, res: Response, next: NextFunction): 
     );
 
     const quote = quoteResult.status === 'fulfilled' ? quoteResult.value[symbol] : undefined;
+
+    // Shared by every symbol-preview entry point (Dashboard/Flex Holdings click, Momentum/
+    // Contrarian Finder/Long-Term Analysis/Contrarian Comeback's "view price chart", and the
+    // Stock Analysis tab) - tracked here once, at the actual call site, rather than needing
+    // each caller to log it separately.
+    usageTracking.logUsage(getUserId(req), 'stock_preview', { fmp_historical: 1, fmp_quote: 1 })
+      .catch((e) => console.error('usage log failed', e));
 
     res.json({ symbol, quote: quote ?? null, historical: hist });
   } catch (err) {

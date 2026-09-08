@@ -4,16 +4,19 @@ jest.mock('../src/services/userSubscription.service', () => ({
   ...jest.requireActual('../src/services/userSubscription.service'),
   getDecryptedKey: jest.fn(),
 }));
+jest.mock('../src/services/usageTracking.service');
 
 import request from 'supertest';
 import * as marketData from '../src/services/marketData.service';
 import * as userSubscription from '../src/services/userSubscription.service';
+import * as usageTracking from '../src/services/usageTracking.service';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
 
 const mockGetHistorical = marketData.getHistorical as jest.Mock;
 const mockGetQuotes = marketData.getQuotes as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
+const mockLogUsage = usageTracking.logUsage as jest.Mock;
 
 const authCookie = `auth_token=${signToken('user-1')}`;
 
@@ -22,6 +25,7 @@ beforeEach(() => {
   mockGetQuotes.mockReset();
   mockGetDecryptedKey.mockReset();
   mockGetDecryptedKey.mockResolvedValue('fake-fmp-key');
+  mockLogUsage.mockReset().mockResolvedValue(undefined);
 });
 
 describe('GET /stock-preview/:symbol', () => {
@@ -54,6 +58,13 @@ describe('GET /stock-preview/:symbol', () => {
     expect(res.body.symbol).toBe('AAPL');
     expect(res.body.quote).toMatchObject({ price: 150, name: 'Apple Inc.' });
     expect(res.body.historical.map((d: { date: string }) => d.date)).toEqual(['2026-01-03', '2026-01-02', '2026-01-01']);
+  });
+
+  test('logs real usage - 1 historical + 1 quote FMP call, shared by every caller of this endpoint', async () => {
+    mockGetQuotes.mockResolvedValue({ AAPL: { price: 150 } });
+    mockGetHistorical.mockResolvedValue([{ date: '2026-01-01', close: 100, low: 99, volume: 10 }]);
+    await request(app).get('/stock-preview/AAPL').set('Cookie', authCookie);
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'stock_preview', { fmp_historical: 1, fmp_quote: 1 });
   });
 
   test('200 with quote:null when the quote call fails - historical data alone is enough', async () => {
