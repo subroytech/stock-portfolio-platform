@@ -29,7 +29,7 @@ import * as flexQuota from '../src/services/flexQuota.service';
 import {
   listPortfolios, createPortfolio, getPortfolio, updatePortfolio, deletePortfolio,
   listBoundPortfolios, deleteBoundPortfolio, listUnattachedFlexPortfolios, deleteUnattachedFlexPortfolio,
-  importHoldings, refreshPrices, createPortfolioFlex, saveFlexTemplate, changeFlexTemplate,
+  importHoldings, refreshPrices, createPortfolioFlex, saveFlexTemplate, changeFlexTemplate, countFlexPortfolios,
   PortfolioNotFoundError, PortfolioNameConflictError, FlexTemplateStateError, PortfolioQuotaExceededError,
 } from '../src/services/portfolio.service';
 import { ParseResult, HoldingEntry } from '../src/services/parser.service';
@@ -537,6 +537,14 @@ describe('refreshPrices', () => {
     mockGetDecryptedKey.mockRejectedValue(new userSubscription.MissingUserApiKeyError('No fmp API key on file.'));
     await expect(refreshPrices('user-1', '1')).rejects.toBeInstanceOf(userSubscription.MissingUserApiKeyError);
     expect(mockGetQuotes).not.toHaveBeenCalled();
+  });
+});
+
+describe('countFlexPortfolios', () => {
+  test('counts both Flex and Flex-Err portfolios', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: 4 }] });
+    expect(await countFlexPortfolios('user-1')).toBe(4);
+    expect(mockQuery.mock.calls[0][0]).toContain("IN ('Flex', 'Flex-Err')");
   });
 });
 

@@ -493,6 +493,16 @@ export interface CreatePortfolioFlexInput {
   content: string;
 }
 
+// Flex Portfolio Quota Limits - shared by createPortfolioFlex()'s enforcement below and the
+// new read-only GET /flex-quota/status endpoint, so both always agree on the same count.
+export async function countFlexPortfolios(userId: string): Promise<number> {
+  const { rows } = await pool.query<{ count: number }>(
+    `SELECT count(*)::int AS count FROM tx_portfolios WHERE user_id = $1 AND flex_template_status IN ('Flex', 'Flex-Err')`,
+    [userId],
+  );
+  return rows[0].count;
+}
+
 export async function createPortfolioFlex(
   userId: string,
   input: CreatePortfolioFlexInput,
@@ -542,16 +552,13 @@ export async function createPortfolioFlex(
   // rather than spending one on a quota check first. Counts both 'Flex' and 'Flex-Err'
   // portfolios (confirmed requirement: an unresolved Flex-Err portfolio still counts against
   // the cap).
-  const [portfolioLimit, { rows: countRows }] = await Promise.all([
+  const [portfolioLimit, portfolioCount] = await Promise.all([
     flexQuota.getEffectivePortfolioLimit(userId),
-    pool.query<{ count: number }>(
-      `SELECT count(*)::int AS count FROM tx_portfolios WHERE user_id = $1 AND flex_template_status IN ('Flex', 'Flex-Err')`,
-      [userId],
-    ),
+    countFlexPortfolios(userId),
   ]);
-  if (countRows[0].count >= portfolioLimit) {
+  if (portfolioCount >= portfolioLimit) {
     throw new PortfolioQuotaExceededError(
-      `You already have ${countRows[0].count} Flex portfolio(s) (limit ${portfolioLimit}). Ask an admin to raise your limit or delete an existing one.`,
+      `You already have ${portfolioCount} Flex portfolio(s) (limit ${portfolioLimit}). Ask an admin to raise your limit or delete an existing one.`,
     );
   }
 

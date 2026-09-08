@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from './client';
 import type { PerformanceBar } from '../lib/performanceMath';
 import type { ColumnMapping, CashConfig } from './portfolioTemplates';
+import { FLEX_QUOTA_STATUS_QUERY_KEY } from './flexQuota';
 
 // Portfolio Upload - Flex (CLAUDE.md's "Portfolio Upload - Flex" section) - null for every
 // portfolio created through today's Legacy import, unchanged.
@@ -247,7 +248,10 @@ export function useCreatePortfolioFlex() {
       method: 'POST',
       body: JSON.stringify(input),
     }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['portfolios'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['portfolios'] });
+      queryClient.invalidateQueries({ queryKey: FLEX_QUOTA_STATUS_QUERY_KEY });
+    },
   });
 }
 
@@ -281,6 +285,7 @@ export function useSaveFlexTemplate(portfolioId: string) {
       queryClient.invalidateQueries({ queryKey: ['portfolios', portfolioId] });
       queryClient.invalidateQueries({ queryKey: ['portfolios'] });
       queryClient.invalidateQueries({ queryKey: ['portfolioTemplates'] });
+      queryClient.invalidateQueries({ queryKey: FLEX_QUOTA_STATUS_QUERY_KEY });
     },
   });
 }

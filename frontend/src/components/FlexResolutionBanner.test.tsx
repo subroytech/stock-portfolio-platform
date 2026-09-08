@@ -16,6 +16,14 @@ function renderBanner(sessionMapping: MappingReadyResult | null, onSaved = vi.fn
   return { onSaved, onDeleted };
 }
 
+// Flex Portfolio quota UX polish - a default "nowhere near any cap" status, so pre-existing
+// tests that don't care about quotas never get blocked/tripped up by it.
+const DEFAULT_QUOTA_STATUS = {
+  pendingTemplates: { current: 0, limit: 2 },
+  approvedTemplates: { current: 0, limit: 5 },
+  flexPortfolios: { current: 0, limit: 6 },
+};
+
 const mapping: MappingReadyResult = {
   columnMapping: { symbol: 'Ticker', quantity: 'Shares', currentPrice: 'Price' },
   filename: 'f.csv',
@@ -40,6 +48,7 @@ describe('FlexResolutionBanner', () => {
 
   test('with a session mapping available, Save Template only needs a name and calls onSaved', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
+      if (url === '/flex-quota/status') return Promise.resolve(DEFAULT_QUOTA_STATUS);
       if (url === '/portfolios/p1/flex-template' && options?.method === 'POST') {
         const body = JSON.parse(options.body as string);
         expect(body.templateName).toBe('Schwab Export');
@@ -64,6 +73,7 @@ describe('FlexResolutionBanner', () => {
 
   test('saving without editing the pre-filled name uses the portfolio\'s own name as the template name', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
+      if (url === '/flex-quota/status') return Promise.resolve(DEFAULT_QUOTA_STATUS);
       if (url === '/portfolios/p1/flex-template' && options?.method === 'POST') {
         const body = JSON.parse(options.body as string);
         expect(body.templateName).toBe('My Flex Portfolio');
@@ -79,6 +89,7 @@ describe('FlexResolutionBanner', () => {
 
   test('a filled-in how-to-use description is sent along with Save Template', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
+      if (url === '/flex-quota/status') return Promise.resolve(DEFAULT_QUOTA_STATUS);
       if (url === '/portfolios/p1/flex-template' && options?.method === 'POST') {
         const body = JSON.parse(options.body as string);
         expect(body.howToUseDescription).toBe('Headers on row 1');
@@ -102,7 +113,10 @@ describe('FlexResolutionBanner', () => {
   });
 
   test('Delete Portfolio requires confirmation before calling onDeleted', async () => {
-    vi.spyOn(client, 'apiFetch').mockResolvedValue({ success: true });
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/flex-quota/status') return Promise.resolve(DEFAULT_QUOTA_STATUS);
+      return Promise.resolve({ success: true });
+    });
     const { onDeleted } = renderBanner(mapping);
 
     await userEvent.click(screen.getByRole('button', { name: 'Delete Portfolio' }));
@@ -110,5 +124,45 @@ describe('FlexResolutionBanner', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Confirm Delete' }));
     expect(onDeleted).toHaveBeenCalled();
+  });
+
+  test('shows live pending/approved template counts without a warning while under both limits', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/flex-quota/status') return Promise.resolve({ ...DEFAULT_QUOTA_STATUS, pendingTemplates: { current: 1, limit: 2 }, approvedTemplates: { current: 3, limit: 5 } });
+      return Promise.resolve({});
+    });
+    renderBanner(mapping);
+
+    const pending = await screen.findByTestId('flex-quota-pending-templates');
+    const approved = screen.getByTestId('flex-quota-approved-templates');
+    expect(pending).toHaveTextContent('Templates pending: 1/2');
+    expect(approved).toHaveTextContent('Templates approved: 3/5');
+    expect(pending).not.toHaveTextContent(/limit reached/i);
+    expect(approved).not.toHaveTextContent(/limit reached/i);
+    expect(screen.getByTestId('flex-save-template-submit')).not.toBeDisabled();
+  });
+
+  test('at the pending-template limit, the indicator warns and Save Template is disabled', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/flex-quota/status') return Promise.resolve({ ...DEFAULT_QUOTA_STATUS, pendingTemplates: { current: 2, limit: 2 } });
+      return Promise.resolve({});
+    });
+    renderBanner(mapping);
+
+    expect(await screen.findByTestId('flex-quota-pending-templates')).toHaveTextContent(/limit reached/i);
+    // A valid, non-empty name is present (pre-filled from the portfolio's own name) - the only
+    // thing blocking Save Template here is the quota guard itself.
+    expect(screen.getByTestId('flex-save-template-submit')).toBeDisabled();
+  });
+
+  test('at the approved-template limit, Save Template is disabled even with pending templates still under its own cap', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/flex-quota/status') return Promise.resolve({ ...DEFAULT_QUOTA_STATUS, approvedTemplates: { current: 5, limit: 5 } });
+      return Promise.resolve({});
+    });
+    renderBanner(mapping);
+
+    expect(await screen.findByTestId('flex-quota-approved-templates')).toHaveTextContent(/limit reached/i);
+    expect(screen.getByTestId('flex-save-template-submit')).toBeDisabled();
   });
 });

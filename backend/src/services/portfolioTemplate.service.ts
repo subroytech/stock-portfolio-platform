@@ -206,6 +206,23 @@ export interface CreateTemplateInput {
   cashConfig?: CashConfig | null;
 }
 
+// Flex Portfolio Quota Limits - shared by createTemplate()'s enforcement below and the new
+// read-only GET /flex-quota/status endpoint, so both always agree on the same counts. Accepts
+// an optional connection so createTemplate() can run this inside its own transaction (same
+// snapshot as the INSERT that follows); the new status endpoint calls it with no argument,
+// using the plain pool.
+export async function countTemplatesByStatus(userId: string, conn: Pick<PoolClient, 'query'> = pool): Promise<{ pending: number; approved: number }> {
+  const { rows } = await conn.query<{ status: TemplateStatus; count: number }>(
+    `SELECT status, count(*)::int AS count FROM m_portfolio_template_mapping_master
+     WHERE created_by = $1 AND status IN ('Pending Approval', 'Approved') GROUP BY status`,
+    [userId],
+  );
+  return {
+    pending: rows.find((r) => r.status === 'Pending Approval')?.count ?? 0,
+    approved: rows.find((r) => r.status === 'Approved')?.count ?? 0,
+  };
+}
+
 // Save Template - master + dtls rows, always lands at 'Pending Approval'. Only ever called
 // once a real Dashboard has already been rendered from this exact mapping (enforced by the
 // caller, not here) - the DB layer just persists what it's given.
@@ -229,17 +246,11 @@ export async function createTemplate(input: CreateTemplateInput, client?: PoolCl
     // count also gates whether they may create another: "once a user has the max Approved
     // templates, they can't create any more until an admin raises their quota" (confirmed
     // requirement) - setTemplateStatus() itself has no matching check.
-    const [pendingLimit, approvedLimit] = await Promise.all([
+    const [pendingLimit, approvedLimit, { pending: pendingCount, approved: approvedCount }] = await Promise.all([
       flexQuota.getEffectivePendingTemplateLimit(input.createdBy),
       flexQuota.getEffectiveApprovedTemplateLimit(input.createdBy),
+      countTemplatesByStatus(input.createdBy, conn),
     ]);
-    const { rows: countRows } = await conn.query<{ status: TemplateStatus; count: number }>(
-      `SELECT status, count(*)::int AS count FROM m_portfolio_template_mapping_master
-       WHERE created_by = $1 AND status IN ('Pending Approval', 'Approved') GROUP BY status`,
-      [input.createdBy],
-    );
-    const pendingCount = countRows.find((r) => r.status === 'Pending Approval')?.count ?? 0;
-    const approvedCount = countRows.find((r) => r.status === 'Approved')?.count ?? 0;
     if (pendingCount >= pendingLimit) {
       throw new TemplateQuotaExceededError(
         `You already have ${pendingCount} template(s) in Pending Approval status (limit ${pendingLimit}). Ask an admin to review one before creating another.`,

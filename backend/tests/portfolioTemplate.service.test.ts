@@ -9,8 +9,8 @@ import { pool } from '../src/db/pool';
 import * as flexQuota from '../src/services/flexQuota.service';
 import {
   listApprovedTemplates, listMyPending, listAllTemplates, getTemplateDetail, getTemplateParseConfig, createTemplate,
-  setTemplateStatus, deleteTemplate, validateTemplateName, InvalidTemplateNameError, DuplicateTemplateNameError,
-  TemplateNotFoundError, TemplateStatusError, TemplateInUseError, TemplateQuotaExceededError,
+  setTemplateStatus, deleteTemplate, validateTemplateName, countTemplatesByStatus, InvalidTemplateNameError,
+  DuplicateTemplateNameError, TemplateNotFoundError, TemplateStatusError, TemplateInUseError, TemplateQuotaExceededError,
 } from '../src/services/portfolioTemplate.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
@@ -176,6 +176,20 @@ describe('getTemplateParseConfig', () => {
     expect(await getTemplateParseConfig('1')).toEqual({
       columnMapping: {}, headerRowIndex: 1, dataStartColumnIndex: 1, footerMarkerColumnIndex: null, footerMarkerText: null,
     });
+  });
+});
+
+describe('countTemplatesByStatus', () => {
+  test('returns the pending/approved counts, defaulting missing statuses to 0', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'Pending Approval', count: 2 }] });
+    expect(await countTemplatesByStatus('user-1')).toEqual({ pending: 2, approved: 0 });
+  });
+
+  test('reads via a passed-in connection when given (createTemplate\'s own transaction)', async () => {
+    const conn = { query: jest.fn().mockResolvedValue({ rows: [{ status: 'Approved', count: 5 }] }) };
+    expect(await countTemplatesByStatus('user-1', conn as never)).toEqual({ pending: 0, approved: 5 });
+    expect(conn.query).toHaveBeenCalled();
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 });
 

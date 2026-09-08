@@ -18,6 +18,7 @@ import portfolioTemplateRoutes from './routes/portfolioTemplate.routes';
 import configPropertyRoutes from './routes/configProperty.routes';
 import supportTicketRoutes from './routes/supportTicket.routes';
 import usageAuditRoutes from './routes/usageAudit.routes';
+import flexQuotaRoutes from './routes/flexQuota.routes';
 import errorHandler from './middleware/errorHandler';
 import rateLimiters from './middleware/rateLimit';
 import requireAuth from './middleware/requireAuth';
@@ -83,6 +84,7 @@ app.use('/config-properties', requireAuth, rateLimiters, configPropertyRoutes);
 // supportTicket.routes.ts itself.
 app.use('/support', requireAuth, rateLimiters, supportTicketRoutes);
 app.use('/usage-audit', requireAuth, rateLimiters, usageAuditRoutes);
+app.use('/flex-quota', requireAuth, rateLimiters, flexQuotaRoutes);
 
 app.use(errorHandler);
 

@@ -7,6 +7,22 @@ import * as client from '../api/client';
 import FlexPortfolioPage from './FlexPortfolioPage';
 import type { PortfolioDetail, PortfolioSummary } from '../api/portfolios';
 
+// This page's Dashboard section (KpiCards/AllocationChart/PerformanceChart) is exercised by
+// DashboardPage.test.tsx already - what this file cares about is the Flex creation/wizard/
+// resolution flow around it. Real react-chartjs-2 charts under jsdom (no `canvas` package)
+// are usually harmless ("Not implemented: getContext" noise only), but adding the new
+// useFlexQuotaStatus() query to this page introduced one more sibling re-render alongside
+// AllocationChart's own mount/update cycle - enough to occasionally trip a known chart.js
+// DOM-attach/detach race in jsdom (a stray resize callback firing against an already-torn-
+// down chart instance), which crashes the whole render since there's no error boundary.
+// Stubbing the chart components sidesteps that jsdom-only incompatibility entirely rather
+// than chasing its exact timing.
+vi.mock('react-chartjs-2', () => ({
+  Pie: () => <div data-testid="chart-stub-pie" />,
+  Bar: () => <div data-testid="chart-stub-bar" />,
+  Line: () => <div data-testid="chart-stub-line" />,
+}));
+
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -39,6 +55,14 @@ function csvFile(content: string, name = 'holdings.csv') {
   return new File([content], name, { type: 'text/csv' });
 }
 
+// Flex Portfolio quota UX polish - a default "nowhere near any cap" status, so pre-existing
+// tests that don't care about quotas never get blocked/tripped up by it.
+const DEFAULT_QUOTA_STATUS = {
+  pendingTemplates: { current: 0, limit: 2 },
+  approvedTemplates: { current: 0, limit: 5 },
+  flexPortfolios: { current: 0, limit: 6 },
+};
+
 // jsdom doesn't implement IntersectionObserver - ColumnMappingWizard's "scroll to review" gate
 // on Use This Mapping needs one. Captures every observer's callback so a test can simulate its
 // sentinel scrolling into view on demand, without a real scroll.
@@ -61,6 +85,7 @@ describe('FlexPortfolioPage', () => {
 
   test('only lists portfolios with a non-null flexTemplateStatus', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/flex-quota/status') return Promise.resolve(DEFAULT_QUOTA_STATUS);
       if (url === '/portfolios') {
         return Promise.resolve({
           portfolios: [
@@ -79,6 +104,7 @@ describe('FlexPortfolioPage', () => {
 
   test('a Flex-Err portfolio shows a warning marker on its pill and the resolution banner once selected', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/flex-quota/status') return Promise.resolve(DEFAULT_QUOTA_STATUS);
       if (url === '/portfolios') return Promise.resolve({ portfolios: [summary({ id: '2', name: 'Needs Fix', flexTemplateStatus: 'Flex-Err' })] });
       if (url === '/portfolios/2') return Promise.resolve({ portfolio: detail({ id: '2', name: 'Needs Fix' }) });
       return Promise.resolve({});
@@ -94,6 +120,7 @@ describe('FlexPortfolioPage', () => {
 
   test('clicking "+ New Flex Portfolio" clears the currently selected portfolio\'s Dashboard, not just opens the wizard on top of it', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/flex-quota/status') return Promise.resolve(DEFAULT_QUOTA_STATUS);
       if (url === '/portfolios') return Promise.resolve({ portfolios: [summary({ id: '2', name: 'Existing Flex', flexTemplateStatus: 'Flex', uploadTemplateId: 't1' })] });
       if (url === '/portfolios/2') return Promise.resolve({ portfolio: detail({ id: '2', name: 'Existing Flex', flexTemplateStatus: 'Flex', uploadTemplateId: 't1' }) });
       if (url === '/portfolio-templates') return Promise.resolve({ templates: [] });
@@ -113,6 +140,7 @@ describe('FlexPortfolioPage', () => {
 
   test('creating a new Flex portfolio from an existing template skips the mapping wizard entirely', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
+      if (url === '/flex-quota/status') return Promise.resolve(DEFAULT_QUOTA_STATUS);
       if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
       if (url === '/portfolio-templates') return Promise.resolve({ templates: [{ id: 't1', templateName: 'Schwab Export', status: 'Approved', createdBy: 'u1', createdAt: 't1' }] });
       if (url === '/portfolio-templates/mine/pending') return Promise.resolve({ templates: [] });
@@ -147,6 +175,7 @@ describe('FlexPortfolioPage', () => {
 
   test('creating with a brand-new mapping goes through Inspect Data before Create Portfolio is offered', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
+      if (url === '/flex-quota/status') return Promise.resolve(DEFAULT_QUOTA_STATUS);
       if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
       if (url === '/portfolio-templates') return Promise.resolve({ templates: [] });
       if (url === '/portfolio-templates/mine/pending') return Promise.resolve({ templates: [] });
@@ -197,5 +226,46 @@ describe('FlexPortfolioPage', () => {
     await userEvent.click(screen.getByTestId('flex-create-portfolio-submit'));
 
     expect(await screen.findByText(/this portfolio needs attention/i)).toBeInTheDocument();
+  });
+
+  test('shows the live Flex portfolio count without a warning while under the limit', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/flex-quota/status') return Promise.resolve({ ...DEFAULT_QUOTA_STATUS, flexPortfolios: { current: 4, limit: 6 } });
+      if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+      return Promise.resolve({});
+    });
+    renderPage();
+
+    const indicator = await screen.findByTestId('flex-quota-portfolios');
+    expect(indicator).toHaveTextContent('Flex portfolios: 4/6');
+    expect(indicator).not.toHaveTextContent(/limit reached/i);
+  });
+
+  test('at the Flex portfolio limit, the indicator warns and Create Portfolio is disabled before any submission', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/flex-quota/status') return Promise.resolve({ ...DEFAULT_QUOTA_STATUS, flexPortfolios: { current: 6, limit: 6 } });
+      if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+      if (url === '/portfolio-templates') return Promise.resolve({ templates: [{ id: 't1', templateName: 'Schwab Export', status: 'Approved', createdBy: 'u1', createdAt: 't1' }] });
+      if (url === '/portfolio-templates/mine/pending') return Promise.resolve({ templates: [] });
+      return Promise.resolve({});
+    });
+    renderPage();
+
+    expect(await screen.findByTestId('flex-quota-portfolios')).toHaveTextContent(/limit reached/i);
+
+    await userEvent.click(screen.getByTestId('flex-new-portfolio-button'));
+    await userEvent.click(await screen.findByTestId('flex-template-option-t1'));
+
+    const formIndicator = await screen.findByTestId('flex-quota-portfolios-form');
+    expect(formIndicator).toHaveTextContent('Flex portfolios: 6/6');
+    expect(formIndicator).toHaveTextContent(/limit reached/i);
+
+    await userEvent.type(screen.getByTestId('flex-portfolio-name-input'), 'One Too Many');
+    await userEvent.upload(screen.getByTestId('flex-existing-template-file-input'), csvFile('Ticker,Shares,Price\nAAPL,10,150'));
+
+    // Disabled purely from the quota guard - a valid name and file are both present, so the
+    // only thing blocking submission is being at the limit. Proves the guard fires before any
+    // request is sent, not just after a 409 comes back.
+    expect(screen.getByTestId('flex-create-portfolio-submit')).toBeDisabled();
   });
 });

@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { useSaveFlexTemplate, useDeletePortfolio } from '../api/portfolios';
+import { useFlexQuotaStatus, isAtOrOverLimit } from '../api/flexQuota';
 import { ApiError } from '../api/client';
 import ColumnMappingWizard, { type MappingReadyResult } from './ColumnMappingWizard';
+import QuotaIndicator from './QuotaIndicator';
 
 interface FlexResolutionBannerProps {
   portfolioId: string;
@@ -31,6 +33,10 @@ export default function FlexResolutionBanner({ portfolioId, portfolioName, sessi
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const saveTemplate = useSaveFlexTemplate(portfolioId);
   const deletePortfolio = useDeletePortfolio();
+  const { data: quotaStatus } = useFlexQuotaStatus();
+  const atTemplateLimit = quotaStatus?.pendingTemplates && quotaStatus.approvedTemplates
+    ? isAtOrOverLimit(quotaStatus.pendingTemplates) || isAtOrOverLimit(quotaStatus.approvedTemplates)
+    : false;
 
   async function handleSave() {
     if (!remapping || !templateName.trim()) return;
@@ -98,13 +104,19 @@ export default function FlexResolutionBanner({ portfolioId, portfolioName, sessi
             <button
               type="button"
               onClick={handleSave}
-              disabled={!templateName.trim() || saveTemplate.isPending}
+              disabled={!templateName.trim() || saveTemplate.isPending || atTemplateLimit}
               data-testid="flex-save-template-submit"
               className="rounded-btn bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
             >
               {saveTemplate.isPending ? 'Saving…' : 'Save Template'}
             </button>
           </div>
+          {quotaStatus?.pendingTemplates && quotaStatus.approvedTemplates && (
+            <div className="flex flex-wrap gap-3">
+              <QuotaIndicator label="Templates pending" metric={quotaStatus.pendingTemplates} testId="flex-quota-pending-templates" />
+              <QuotaIndicator label="Templates approved" metric={quotaStatus.approvedTemplates} testId="flex-quota-approved-templates" />
+            </div>
+          )}
           <div>
             <label htmlFor="flex-save-template-description" className="mb-1 block text-sm font-medium text-text-primary">
               How to use this template <span className="font-normal text-text-muted">(optional)</span>
@@ -120,9 +132,16 @@ export default function FlexResolutionBanner({ portfolioId, portfolioName, sessi
             />
           </div>
           {saveTemplate.isError && (
-            <p className="w-full text-sm text-danger">
+            <div
+              className={`w-full rounded-btn p-2 text-sm ${
+                saveTemplate.error instanceof ApiError && saveTemplate.error.status === 409
+                  ? 'border border-warning bg-warning/20 text-warning'
+                  : 'text-danger'
+              }`}
+              data-testid="flex-save-template-error"
+            >
               {saveTemplate.error instanceof ApiError ? saveTemplate.error.message : 'Could not save the template.'}
-            </p>
+            </div>
           )}
         </div>
       )}

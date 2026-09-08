@@ -2,12 +2,14 @@ import { useRef, useState, type FormEvent } from 'react';
 import { usePortfolios, usePortfolio, useCreatePortfolioFlex, useChangeFlexTemplate, useRefreshPrices } from '../api/portfolios';
 import type { RefreshPricesResult } from '../api/portfolios';
 import type { TemplateSummary } from '../api/portfolioTemplates';
+import { useFlexQuotaStatus, isAtOrOverLimit } from '../api/flexQuota';
 import { ApiError } from '../api/client';
 import { formatAsOf } from '../lib/format';
 import { xlsxFileToCsv } from '../lib/xlsxToCsv';
 import FlexTemplatePicker from '../components/FlexTemplatePicker';
 import ColumnMappingWizard, { type MappingReadyResult } from '../components/ColumnMappingWizard';
 import FlexResolutionBanner from '../components/FlexResolutionBanner';
+import QuotaIndicator from '../components/QuotaIndicator';
 import KpiCards from '../components/KpiCards';
 import AllocationChart, { AllocationModeToggle } from '../components/AllocationChart';
 import type { AllocationMode } from '../components/AllocationChart';
@@ -39,6 +41,8 @@ export default function FlexPortfolioPage() {
   const [existingFileError, setExistingFileError] = useState<string | null>(null);
   const existingFileInputRef = useRef<HTMLInputElement>(null);
   const createFlex = useCreatePortfolioFlex();
+  const { data: quotaStatus } = useFlexQuotaStatus();
+  const atPortfolioLimit = quotaStatus?.flexPortfolios ? isAtOrOverLimit(quotaStatus.flexPortfolios) : false;
 
   // Keyed by portfolio id, not a single slot — mirrors DashboardPage's resultsByPortfolio
   // pattern. Holds the mapping/preview that just created a Flex-Err portfolio so
@@ -177,6 +181,9 @@ export default function FlexPortfolioPage() {
           >
             + New Flex Portfolio
           </button>
+          {quotaStatus?.flexPortfolios && (
+            <QuotaIndicator label="Flex portfolios" metric={quotaStatus.flexPortfolios} testId="flex-quota-portfolios" />
+          )}
         </div>
 
         {createStep !== 'closed' && (
@@ -236,18 +243,28 @@ export default function FlexPortfolioPage() {
                 )}
 
                 <div>
+                  {quotaStatus?.flexPortfolios && (
+                    <QuotaIndicator label="Flex portfolios" metric={quotaStatus.flexPortfolios} testId="flex-quota-portfolios-form" />
+                  )}
                   <button
                     type="submit"
-                    disabled={createFlex.isPending || !name.trim() || (!!selectedTemplate && !existingFile)}
+                    disabled={createFlex.isPending || !name.trim() || (!!selectedTemplate && !existingFile) || atPortfolioLimit}
                     data-testid="flex-create-portfolio-submit"
-                    className="rounded-btn bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
+                    className="mt-1 rounded-btn bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
                   >
                     {createFlex.isPending ? 'Creating…' : 'Create Portfolio'}
                   </button>
                   {createFlex.isError && (
-                    <p className="mt-2 text-sm text-danger">
+                    <div
+                      className={`mt-2 rounded-btn p-2 text-sm ${
+                        createFlex.error instanceof ApiError && createFlex.error.status === 409
+                          ? 'border border-warning/40 bg-warning/10 text-warning'
+                          : 'text-danger'
+                      }`}
+                      data-testid="flex-create-portfolio-error"
+                    >
                       {createFlex.error instanceof ApiError ? createFlex.error.message : 'Could not create the portfolio.'}
-                    </p>
+                    </div>
                   )}
                 </div>
               </form>
