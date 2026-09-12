@@ -3,7 +3,7 @@ jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn(
 import { pool } from '../src/db/pool';
 import {
   logUsage, maybeRunDailyUsageAggregation, getUsageAggregationCutoff,
-  getUsageRankingLast3Days, getUsageRankingForMonth, getAvailableUsageMonths,
+  getUsageRankingLast3Days, getUsageRankingForDay, getUsageRankingForMonth, getAvailableUsageMonths,
 } from '../src/services/usageTracking.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
@@ -212,7 +212,7 @@ describe('getUsageAggregationCutoff', () => {
 });
 
 describe('getUsageRankingLast3Days', () => {
-  test('reports Function Calls (1 per event) and FMP/Finnhub Calls split by key prefix, and sorts descending by combined API volume', async () => {
+  test('reports Function Calls (1 per event) and FMP/Finnhub Calls split by key prefix, sorts descending by combined API volume, and attaches each user\'s roles from a separate query', async () => {
     mockQuery.mockResolvedValueOnce({
       rows: [
         { user_id: 'u1', email: 'heavy@b.com', feature: 'portfolio_refresh', api_call_details: { fmp_quote: 5, fmp_historical: 3 } },
@@ -221,26 +221,33 @@ describe('getUsageRankingLast3Days', () => {
         { user_id: 'u3', email: 'idle@b.com', feature: null, api_call_details: null },
       ],
     });
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        { user_id: 'u1', name: 'admin' },
+        { user_id: 'u2', name: 'user' },
+      ],
+    });
 
     const result = await getUsageRankingLast3Days();
 
     expect(result).toEqual([
       {
-        userId: 'u1', email: 'heavy@b.com', totalFunctionCalls: 2, totalFmpCalls: 10, totalFinnhubCalls: 1,
+        userId: 'u1', email: 'heavy@b.com', roles: ['admin'], totalFunctionCalls: 2, totalFmpCalls: 10, totalFinnhubCalls: 1,
         byFeature: {
           portfolio_refresh: { functionCalls: 1, fmpCalls: 8, finnhubCalls: 0 },
           long_term_analysis: { functionCalls: 1, fmpCalls: 2, finnhubCalls: 1 },
         },
       },
       {
-        userId: 'u2', email: 'light@b.com', totalFunctionCalls: 1, totalFmpCalls: 0, totalFinnhubCalls: 0,
+        userId: 'u2', email: 'light@b.com', roles: ['user'], totalFunctionCalls: 1, totalFmpCalls: 0, totalFinnhubCalls: 0,
         byFeature: { momentum: { functionCalls: 1, fmpCalls: 0, finnhubCalls: 0 } },
       },
-      { userId: 'u3', email: 'idle@b.com', totalFunctionCalls: 0, totalFmpCalls: 0, totalFinnhubCalls: 0, byFeature: {} },
+      { userId: 'u3', email: 'idle@b.com', roles: [], totalFunctionCalls: 0, totalFmpCalls: 0, totalFinnhubCalls: 0, byFeature: {} },
     ]);
   });
 
   test('queries a rolling 3-day window via a LEFT JOIN from users, so zero-usage users are never omitted', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
     mockQuery.mockResolvedValueOnce({ rows: [] });
     await getUsageRankingLast3Days();
     const [sql] = mockQuery.mock.calls[0];
@@ -249,8 +256,40 @@ describe('getUsageRankingLast3Days', () => {
   });
 });
 
+describe('getUsageRankingForDay', () => {
+  test('reports a single calendar day\'s usage and attaches roles, same shape as the other ranking functions', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        { user_id: 'u1', email: 'heavy@b.com', feature: 'momentum', api_call_details: { fmp_quote: 4 } },
+        { user_id: 'u2', email: 'idle@b.com', feature: null, api_call_details: null },
+      ],
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [{ user_id: 'u1', name: 'user' }] });
+
+    const result = await getUsageRankingForDay(1);
+
+    expect(result).toEqual([
+      {
+        userId: 'u1', email: 'heavy@b.com', roles: ['user'], totalFunctionCalls: 1, totalFmpCalls: 4, totalFinnhubCalls: 0,
+        byFeature: { momentum: { functionCalls: 1, fmpCalls: 4, finnhubCalls: 0 } },
+      },
+      { userId: 'u2', email: 'idle@b.com', roles: [], totalFunctionCalls: 0, totalFmpCalls: 0, totalFinnhubCalls: 0, byFeature: {} },
+    ]);
+  });
+
+  test('bounds the window to a single calendar day at the given offset, via a LEFT JOIN from users', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    await getUsageRankingForDay(2);
+    const [sql, params] = mockQuery.mock.calls[0];
+    expect(sql).toContain('LEFT JOIN user_evt_usage');
+    expect(sql).toContain("date_trunc('day', now())");
+    expect(params).toEqual([2]);
+  });
+});
+
 describe('getUsageRankingForMonth', () => {
-  test('reports event_count as Function Calls and FMP/Finnhub Calls split by key prefix, sorted descending by combined API volume', async () => {
+  test('reports event_count as Function Calls and FMP/Finnhub Calls split by key prefix, sorted descending by combined API volume, and attaches each user\'s roles from a separate query', async () => {
     mockQuery.mockResolvedValueOnce({
       rows: [
         { user_id: 'u1', email: 'heavy@b.com', feature: 'contrarian_finder_scan', event_count: '3', api_call_details: { fmp_quote: 300 } },
@@ -258,23 +297,29 @@ describe('getUsageRankingForMonth', () => {
         { user_id: 'u3', email: 'idle@b.com', feature: null, event_count: null, api_call_details: null },
       ],
     });
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        { user_id: 'u1', name: 'admin-master' },
+      ],
+    });
 
     const result = await getUsageRankingForMonth('2026-09-01');
 
     expect(result).toEqual([
       {
-        userId: 'u1', email: 'heavy@b.com', totalFunctionCalls: 3, totalFmpCalls: 300, totalFinnhubCalls: 0,
+        userId: 'u1', email: 'heavy@b.com', roles: ['admin-master'], totalFunctionCalls: 3, totalFmpCalls: 300, totalFinnhubCalls: 0,
         byFeature: { contrarian_finder_scan: { functionCalls: 3, fmpCalls: 300, finnhubCalls: 0 } },
       },
       {
-        userId: 'u2', email: 'mid@b.com', totalFunctionCalls: 2, totalFmpCalls: 10, totalFinnhubCalls: 5,
+        userId: 'u2', email: 'mid@b.com', roles: [], totalFunctionCalls: 2, totalFmpCalls: 10, totalFinnhubCalls: 5,
         byFeature: { long_term_analysis: { functionCalls: 2, fmpCalls: 10, finnhubCalls: 5 } },
       },
-      { userId: 'u3', email: 'idle@b.com', totalFunctionCalls: 0, totalFmpCalls: 0, totalFinnhubCalls: 0, byFeature: {} },
+      { userId: 'u3', email: 'idle@b.com', roles: [], totalFunctionCalls: 0, totalFmpCalls: 0, totalFinnhubCalls: 0, byFeature: {} },
     ]);
   });
 
   test('passes the requested month as a query parameter', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
     mockQuery.mockResolvedValueOnce({ rows: [] });
     await getUsageRankingForMonth('2026-08-01');
     expect(mockQuery).toHaveBeenCalledWith(expect.any(String), ['2026-08-01']);

@@ -2,6 +2,7 @@ jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn(
 jest.mock('../src/services/usageTracking.service', () => ({
   ...jest.requireActual('../src/services/usageTracking.service'),
   getUsageRankingLast3Days: jest.fn(),
+  getUsageRankingForDay: jest.fn(),
   getUsageRankingForMonth: jest.fn(),
   getAvailableUsageMonths: jest.fn(),
   getUsageAggregationCutoff: jest.fn(),
@@ -22,6 +23,7 @@ import app from '../src/app';
 
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockGetUsageRankingLast3Days = usageTracking.getUsageRankingLast3Days as jest.Mock;
+const mockGetUsageRankingForDay = usageTracking.getUsageRankingForDay as jest.Mock;
 const mockGetUsageRankingForMonth = usageTracking.getUsageRankingForMonth as jest.Mock;
 const mockGetAvailableUsageMonths = usageTracking.getAvailableUsageMonths as jest.Mock;
 const mockGetUsageAggregationCutoff = usageTracking.getUsageAggregationCutoff as jest.Mock;
@@ -35,6 +37,7 @@ const RANKING = [{
 beforeEach(() => {
   mockQuery.mockReset();
   mockGetUsageRankingLast3Days.mockReset();
+  mockGetUsageRankingForDay.mockReset();
   mockGetUsageRankingForMonth.mockReset();
   mockGetAvailableUsageMonths.mockReset();
   mockGetUsageAggregationCutoff.mockReset().mockResolvedValue('2026-09-04T00:00:00.000Z');
@@ -53,6 +56,33 @@ describe('GET /usage-audit/last-3-days', () => {
     const res = await request(app).get('/usage-audit/last-3-days').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ranking: RANKING });
+  });
+});
+
+describe('GET /usage-audit/day', () => {
+  test('403 without usage_audit:view', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).get('/usage-audit/day?offset=0').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+  });
+
+  test('200 with the ranking for a valid offset', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
+    mockGetUsageRankingForDay.mockResolvedValue(RANKING);
+    const res = await request(app).get('/usage-audit/day?offset=1').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ offset: 1, ranking: RANKING });
+    expect(mockGetUsageRankingForDay).toHaveBeenCalledWith(1);
+  });
+
+  test('400 for a missing or out-of-range offset', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
+    let res = await request(app).get('/usage-audit/day').set('Cookie', authCookie);
+    expect(res.status).toBe(400);
+
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
+    res = await request(app).get('/usage-audit/day?offset=3').set('Cookie', authCookie);
+    expect(res.status).toBe(400);
   });
 });
 

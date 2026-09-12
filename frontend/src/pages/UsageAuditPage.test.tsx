@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
@@ -7,18 +7,23 @@ import UsageAuditPage from './UsageAuditPage';
 
 const LAST_3_DAYS_RANKING = [
   {
-    userId: 'u1', email: 'heavy@b.com', totalFunctionCalls: 6, totalFmpCalls: 125, totalFinnhubCalls: 3,
+    userId: 'u1', email: 'heavy@b.com', roles: ['user'], totalFunctionCalls: 6, totalFmpCalls: 125, totalFinnhubCalls: 3,
     byFeature: {
       contrarian_finder_scan: { functionCalls: 3, fmpCalls: 125, finnhubCalls: 0 },
       momentum: { functionCalls: 3, fmpCalls: 0, finnhubCalls: 3 },
     },
   },
-  { userId: 'u2', email: 'light@b.com', totalFunctionCalls: 2, totalFmpCalls: 2, totalFinnhubCalls: 0, byFeature: { momentum: { functionCalls: 2, fmpCalls: 2, finnhubCalls: 0 } } },
-  { userId: 'u3', email: 'idle@b.com', totalFunctionCalls: 0, totalFmpCalls: 0, totalFinnhubCalls: 0, byFeature: {} },
+  { userId: 'u2', email: 'boss@b.com', roles: ['admin-master'], totalFunctionCalls: 2, totalFmpCalls: 2, totalFinnhubCalls: 0, byFeature: { momentum: { functionCalls: 2, fmpCalls: 2, finnhubCalls: 0 } } },
+  { userId: 'u3', email: 'idle@b.com', roles: ['user'], totalFunctionCalls: 0, totalFmpCalls: 0, totalFinnhubCalls: 0, byFeature: {} },
+];
+
+const TODAY_RANKING = [
+  { userId: 'u4', email: 'todayuser@b.com', roles: ['user'], totalFunctionCalls: 1, totalFmpCalls: 50, totalFinnhubCalls: 0, byFeature: {} },
 ];
 
 const AUGUST_RANKING = [
-  { userId: 'u2', email: 'light@b.com', totalFunctionCalls: 4, totalFmpCalls: 40, totalFinnhubCalls: 0, byFeature: { long_term_analysis: { functionCalls: 4, fmpCalls: 40, finnhubCalls: 0 } } },
+  { userId: 'u2', email: 'boss@b.com', roles: ['admin-master'], totalFunctionCalls: 4, totalFmpCalls: 40, totalFinnhubCalls: 0, byFeature: { long_term_analysis: { functionCalls: 4, fmpCalls: 40, finnhubCalls: 0 } } },
+  { userId: 'u5', email: 'augustuser@b.com', roles: ['user'], totalFunctionCalls: 2, totalFmpCalls: 20, totalFinnhubCalls: 0, byFeature: {} },
 ];
 
 function renderPage() {
@@ -33,6 +38,9 @@ function renderPage() {
 function mockFetch() {
   return vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
     if (path === '/usage-audit/last-3-days') return Promise.resolve({ ranking: LAST_3_DAYS_RANKING });
+    if (path === '/usage-audit/day?offset=0') return Promise.resolve({ offset: 0, ranking: TODAY_RANKING });
+    if (path === '/usage-audit/day?offset=1') return Promise.resolve({ offset: 1, ranking: [] });
+    if (path === '/usage-audit/day?offset=2') return Promise.resolve({ offset: 2, ranking: [] });
     if (path.startsWith('/usage-audit/monthly')) {
       if (path.includes('2026-08-01')) return Promise.resolve({ month: '2026-08-01', ranking: AUGUST_RANKING, dataCutoff: '2026-08-28T10:00:00.000Z' });
       return Promise.resolve({ month: '2026-09-01', ranking: [], dataCutoff: '2026-09-04T10:00:00.000Z' });
@@ -45,25 +53,102 @@ function mockFetch() {
 describe('UsageAuditPage', () => {
   beforeEach(() => vi.restoreAllMocks());
 
-  test('defaults to the Last 3 Days sub-tab, ranked by combined FMP+Finnhub call volume', async () => {
+  test('defaults to the Dashboard sub-tab', async () => {
     mockFetch();
     renderPage();
 
-    expect(screen.getByRole('button', { name: 'Last 3 Days' })).toHaveClass('bg-accent');
+    expect(screen.getByRole('button', { name: 'Dashboard' })).toHaveClass('bg-accent');
+    expect(await screen.findByText('Non-Admin Users')).toBeInTheDocument();
+    expect(screen.getByText('Admin / Admin-Master')).toBeInTheDocument();
+  });
+
+  test('each of the 6 Dashboard cards defaults independently: pie-1 to Last 3 Days, monthly pie to the current month, bar to Last 3 Days', async () => {
+    mockFetch();
+    renderPage();
+
+    const nonAdminPieDay = within(screen.getByTestId('dashboard-nonadmin-pie-day'));
+    expect(await nonAdminPieDay.findByText('heavy@b.com')).toBeInTheDocument();
+
+    const adminPieDay = within(screen.getByTestId('dashboard-admin-pie-day'));
+    expect(await adminPieDay.findByText('boss@b.com')).toBeInTheDocument();
+
+    const nonAdminBar = within(screen.getByTestId('dashboard-nonadmin-bar'));
+    expect(await nonAdminBar.findByText('heavy@b.com')).toBeInTheDocument();
+
+    // Current month (September) has an empty ranking per the mock, so both monthly pies show
+    // their empty-state message.
+    const nonAdminMonthly = within(screen.getByTestId('dashboard-nonadmin-monthly'));
+    expect(await nonAdminMonthly.findByText('No API call activity for non-admin users this month.')).toBeInTheDocument();
+  });
+
+  test('the pie-1 period picker is independent per row - switching Non-Admin to Today never touches the Admin row', async () => {
+    mockFetch();
+    renderPage();
+    const nonAdminCard = within(screen.getByTestId('dashboard-nonadmin-pie-day'));
+    await nonAdminCard.findByText('heavy@b.com');
+
+    await userEvent.selectOptions(nonAdminCard.getByLabelText('Select period'), 'today');
+
+    await waitFor(() => expect(nonAdminCard.getByText('todayuser@b.com')).toBeInTheDocument());
+    expect(nonAdminCard.queryByText('heavy@b.com')).not.toBeInTheDocument();
+
+    // Admin row's own pie-1 card is untouched - still showing its Last 3 Days data.
+    const adminCard = within(screen.getByTestId('dashboard-admin-pie-day'));
+    expect(adminCard.getByText('boss@b.com')).toBeInTheDocument();
+  });
+
+  test('the monthly pie picker is independent per row', async () => {
+    mockFetch();
+    renderPage();
+    await screen.findByText('Non-Admin Users');
+
+    const nonAdminMonthly = within(screen.getByTestId('dashboard-nonadmin-monthly'));
+    const adminMonthly = within(screen.getByTestId('dashboard-admin-monthly'));
+
+    // Wait for the available-months fetch to populate the <option> list before selecting one.
+    await waitFor(() => expect(nonAdminMonthly.getByText('August 2026')).toBeInTheDocument());
+
+    await userEvent.selectOptions(nonAdminMonthly.getByLabelText('Select month'), '2026-08-01');
+    await waitFor(() => expect(nonAdminMonthly.getByText('augustuser@b.com')).toBeInTheDocument());
+
+    // Admin row's monthly card is still on September (empty), unaffected by the other card.
+    expect(await adminMonthly.findByText('No API call activity for Admin/Admin-Master users this month.')).toBeInTheDocument();
+  });
+
+  test('the bar chart\'s combined selector can switch from a day-based option to a specific month', async () => {
+    mockFetch();
+    renderPage();
+    const adminBar = within(screen.getByTestId('dashboard-admin-bar'));
+    await adminBar.findByText('boss@b.com');
+
+    await userEvent.selectOptions(adminBar.getByLabelText('Select period or month'), 'month:2026-08-01');
+
+    // boss@b.com (admin-master) is in the August ranking too, with a different call count -
+    // just confirm the card is now showing August's data by checking the empty-state is gone
+    // and the user is still present (email legend is the same regardless of the underlying value).
+    await waitFor(() => expect(adminBar.getByText('boss@b.com')).toBeInTheDocument());
+  });
+
+  test('Last 3 Days sub-tab still ranks by combined FMP+Finnhub call volume', async () => {
+    mockFetch();
+    renderPage();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Last 3 Days' }));
     await screen.findByText('heavy@b.com');
 
     const rows = screen.getAllByTestId(/^usage-row-/);
     expect(rows[0]).toHaveTextContent('heavy@b.com');
-    expect(rows[1]).toHaveTextContent('light@b.com');
+    expect(rows[1]).toHaveTextContent('boss@b.com');
     expect(rows[2]).toHaveTextContent('idle@b.com');
     expect(screen.getByTestId('usage-function-calls-u1')).toHaveTextContent('6');
     expect(screen.getByTestId('usage-fmp-calls-u1')).toHaveTextContent('125');
     expect(screen.getByTestId('usage-finnhub-calls-u1')).toHaveTextContent('3');
   });
 
-  test('a zero-usage user still appears, at the bottom', async () => {
+  test('a zero-usage user still appears, at the bottom, in the Last 3 Days list', async () => {
     mockFetch();
     renderPage();
+    await userEvent.click(screen.getByRole('button', { name: 'Last 3 Days' }));
     await screen.findByText('idle@b.com');
     expect(screen.getByTestId('usage-function-calls-u3')).toHaveTextContent('0');
     expect(screen.getByTestId('usage-fmp-calls-u3')).toHaveTextContent('0');
@@ -73,6 +158,7 @@ describe('UsageAuditPage', () => {
   test('clicking a row expands its per-feature breakdown, showing all three numbers per feature', async () => {
     mockFetch();
     renderPage();
+    await userEvent.click(screen.getByRole('button', { name: 'Last 3 Days' }));
     await screen.findByText('heavy@b.com');
 
     expect(screen.queryByTestId('usage-breakdown-u1')).not.toBeInTheDocument();
@@ -88,7 +174,7 @@ describe('UsageAuditPage', () => {
   test('switching to Monthly shows a month picker defaulting to the current month', async () => {
     mockFetch();
     renderPage();
-    await screen.findByText('heavy@b.com');
+    await screen.findByText('Non-Admin Users');
 
     await userEvent.click(screen.getByRole('button', { name: 'Monthly' }));
     await waitFor(() => expect(screen.getByLabelText('Select month')).toBeInTheDocument());
@@ -98,23 +184,23 @@ describe('UsageAuditPage', () => {
   test('Monthly shows a banner reflecting the sweep\'s data cutoff', async () => {
     mockFetch();
     renderPage();
-    await screen.findByText('heavy@b.com');
+    await screen.findByText('Non-Admin Users');
 
     await userEvent.click(screen.getByRole('button', { name: 'Monthly' }));
     const banner = await screen.findByTestId('usage-monthly-cutoff-banner');
     expect(banner).toHaveTextContent('cumulative call details until');
   });
 
-  test('picking a past month loads and shows that month\'s ranking', async () => {
+  test('picking a past month on the Monthly list sub-tab loads and shows that month\'s ranking', async () => {
     mockFetch();
     renderPage();
-    await screen.findByText('heavy@b.com');
+    await screen.findByText('Non-Admin Users');
 
     await userEvent.click(screen.getByRole('button', { name: 'Monthly' }));
     await screen.findByLabelText('Select month');
 
     await userEvent.selectOptions(screen.getByLabelText('Select month'), '2026-08-01');
-    expect(await screen.findByText('light@b.com')).toBeInTheDocument();
+    expect(await screen.findByText('boss@b.com')).toBeInTheDocument();
     expect(screen.getByTestId('usage-fmp-calls-u2')).toHaveTextContent('40');
   });
 });

@@ -1,8 +1,22 @@
 import { useState } from 'react';
 import {
-  useUsageLast3Days, useUsageForMonth, useAvailableUsageMonths,
+  useUsageLast3Days, useUsageForDay, useUsageForMonth, useAvailableUsageMonths,
   type UsageRankingEntry, type UsageFeature,
 } from '../api/usageAudit';
+import { UsagePieDayCard, UsageMonthlyPieCard, UsageBarCard } from '../components/UsageDashboardCards';
+import { currentMonth, formatMonthLabel } from '../lib/usageDates';
+import type { PeriodDatasets } from '../lib/usagePeriods';
+
+// Dashboard sub-tab's role grouping: "Admin/Admin-Master" is any user holding either role
+// name, everyone else (plain 'user', 'user-contra-*', 'user-premium', etc.) is "Non-Admin" -
+// regardless of what other custom roles they might also hold.
+const ADMIN_ROLE_NAMES = ['admin', 'admin-master'];
+function isAdminUser(entry: UsageRankingEntry): boolean {
+  return entry.roles.some((role) => ADMIN_ROLE_NAMES.includes(role));
+}
+function isNonAdminUser(entry: UsageRankingEntry): boolean {
+  return !isAdminUser(entry);
+}
 
 const FEATURE_LABELS: Record<UsageFeature, string> = {
   momentum: 'Momentum Analysis',
@@ -12,14 +26,6 @@ const FEATURE_LABELS: Record<UsageFeature, string> = {
   portfolio_refresh: 'Portfolio Refresh',
   stock_preview: 'Stock Preview',
 };
-
-function currentMonth(): string {
-  return new Date().toISOString().slice(0, 7) + '-01';
-}
-
-function formatMonthLabel(month: string): string {
-  return new Date(month).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-}
 
 function formatCutoff(iso: string): string {
   return new Date(iso).toLocaleString('en-US', {
@@ -106,14 +112,39 @@ function RankingList({ ranking, isLoading, emptyMessage }: RankingListProps) {
   );
 }
 
+interface MonthPickerProps {
+  selectedMonth: string;
+  monthOptions: string[];
+  onChange: (month: string) => void;
+}
+
+// Used only by the Monthly list sub-tab below - the Dashboard sub-tab's own month pickers are
+// independent per-card (see UsageDashboardCards.tsx), not shared with this one.
+function MonthPicker({ selectedMonth, monthOptions, onChange }: MonthPickerProps) {
+  return (
+    <select
+      value={selectedMonth}
+      onChange={(e) => onChange(e.target.value)}
+      aria-label="Select month"
+      className="w-48 rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-sm text-text-primary"
+    >
+      {monthOptions.map((m) => <option key={m} value={m}>{formatMonthLabel(m)}</option>)}
+    </select>
+  );
+}
+
 // Admin Console "User Usage" tab - the first read/reporting surface over the Usage Audit data
-// (write side built earlier, never had a view before this). Two sub-tabs: Last 3 Days
-// (default) and Monthly.
+// (write side built earlier, never had a view before this). Three sub-tabs: Dashboard
+// (landing/default - 3 charts x 2 rows, Non-Admin vs. Admin/Admin-Master usage share), Last 3
+// Days, and Monthly.
 export default function UsageAuditPage() {
-  const [activeSubTab, setActiveSubTab] = useState<'last3Days' | 'monthly'>('last3Days');
+  const [activeSubTab, setActiveSubTab] = useState<'dashboard' | 'last3Days' | 'monthly'>('dashboard');
   const [selectedMonth, setSelectedMonth] = useState(currentMonth());
 
   const last3Days = useUsageLast3Days();
+  const today = useUsageForDay(0);
+  const yesterday = useUsageForDay(1);
+  const dayBeforeYesterday = useUsageForDay(2);
   const monthly = useUsageForMonth(selectedMonth);
   const { data: availableMonths } = useAvailableUsageMonths();
 
@@ -123,9 +154,28 @@ export default function UsageAuditPage() {
     ? availableMonths
     : [currentMonth(), ...(availableMonths ?? [])];
 
+  // Fetched once here, at the page level, and handed down to every Dashboard card that needs
+  // one of these 4 day-based options - each card picks its own selection independently (see
+  // UsageDashboardCards.tsx), but the underlying data for a given option is shared/cached.
+  const periodDatasets: PeriodDatasets = {
+    last3Days: { data: last3Days.data, isLoading: last3Days.isLoading },
+    today: { data: today.data, isLoading: today.isLoading },
+    yesterday: { data: yesterday.data, isLoading: yesterday.isLoading },
+    dayBeforeYesterday: { data: dayBeforeYesterday.data, isLoading: dayBeforeYesterday.isLoading },
+  };
+
   return (
     <div className="flex flex-col gap-4">
       <nav className="flex flex-wrap items-center gap-1 border-b border-border pb-2">
+        <button
+          type="button"
+          onClick={() => setActiveSubTab('dashboard')}
+          className={`rounded-btn px-3 py-1.5 text-sm font-medium transition-colors ${
+            activeSubTab === 'dashboard' ? 'bg-accent text-white' : 'text-text-secondary hover:bg-bg-primary'
+          }`}
+        >
+          Dashboard
+        </button>
         <button
           type="button"
           onClick={() => setActiveSubTab('last3Days')}
@@ -146,6 +196,64 @@ export default function UsageAuditPage() {
         </button>
       </nav>
 
+      {activeSubTab === 'dashboard' && (
+        <div className="flex flex-col gap-4">
+          <p className="text-sm text-text-secondary">
+            API call share by user - each chart is that group&apos;s combined FMP + Finnhub call volume. Every chart has its own period/month control.
+          </p>
+
+          <div>
+            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-text-muted">Non-Admin Users</h2>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <UsagePieDayCard
+                testId="dashboard-nonadmin-pie-day"
+                datasets={periodDatasets}
+                roleFilter={isNonAdminUser}
+                emptyMessage="No API call activity for non-admin users in this period."
+              />
+              <UsageMonthlyPieCard
+                testId="dashboard-nonadmin-monthly"
+                monthOptions={monthOptions}
+                roleFilter={isNonAdminUser}
+                emptyMessage="No API call activity for non-admin users this month."
+              />
+              <UsageBarCard
+                testId="dashboard-nonadmin-bar"
+                datasets={periodDatasets}
+                monthOptions={monthOptions}
+                roleFilter={isNonAdminUser}
+                emptyMessage="No API call activity for non-admin users in this period."
+              />
+            </div>
+          </div>
+
+          <div>
+            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-text-muted">Admin / Admin-Master</h2>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <UsagePieDayCard
+                testId="dashboard-admin-pie-day"
+                datasets={periodDatasets}
+                roleFilter={isAdminUser}
+                emptyMessage="No API call activity for Admin/Admin-Master users in this period."
+              />
+              <UsageMonthlyPieCard
+                testId="dashboard-admin-monthly"
+                monthOptions={monthOptions}
+                roleFilter={isAdminUser}
+                emptyMessage="No API call activity for Admin/Admin-Master users this month."
+              />
+              <UsageBarCard
+                testId="dashboard-admin-bar"
+                datasets={periodDatasets}
+                monthOptions={monthOptions}
+                roleFilter={isAdminUser}
+                emptyMessage="No API call activity for Admin/Admin-Master users in this period."
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {activeSubTab === 'last3Days' && (
         <RankingList
           ranking={last3Days.data}
@@ -156,14 +264,7 @@ export default function UsageAuditPage() {
 
       {activeSubTab === 'monthly' && (
         <>
-          <select
-            value={selectedMonth}
-            onChange={(e) => setSelectedMonth(e.target.value)}
-            aria-label="Select month"
-            className="w-48 rounded-btn border border-border bg-bg-primary px-3 py-1.5 text-sm text-text-primary"
-          >
-            {monthOptions.map((m) => <option key={m} value={m}>{formatMonthLabel(m)}</option>)}
-          </select>
+          <MonthPicker selectedMonth={selectedMonth} monthOptions={monthOptions} onChange={setSelectedMonth} />
           {monthly.data?.dataCutoff && (
             <p className="rounded-card bg-bg-primary px-3 py-2 text-xs text-text-secondary" data-testid="usage-monthly-cutoff-banner">
               This tab&apos;s data reflects cumulative call details until {formatCutoff(monthly.data.dataCutoff)}.

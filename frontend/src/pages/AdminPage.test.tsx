@@ -212,12 +212,18 @@ describe('AdminPage', () => {
       if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'admin@b.com', roles: ['admin'], permissions: ['api_keys:manage_own', 'users:manage_roles', 'usage_audit:view'] });
       if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
       if (url === '/usage-audit/last-3-days') return Promise.resolve({ ranking: [] });
+      if (url.startsWith('/usage-audit/monthly')) return Promise.resolve({ month: '2026-09-01', ranking: [], dataCutoff: null });
+      if (url === '/usage-audit/available-months') return Promise.resolve({ months: [] });
       return Promise.resolve({});
     });
     renderPage();
     await screen.findByText('FMP (Financial Modeling Prep)');
 
     await userEvent.click(screen.getByRole('button', { name: 'User Usage' }));
+    // Lands on the Dashboard sub-tab (the new landing tab) by default.
+    expect(await screen.findByText('Non-Admin Users')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Last 3 Days' }));
     expect(await screen.findByText('No users to show.')).toBeInTheDocument();
   });
 

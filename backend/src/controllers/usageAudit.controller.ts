@@ -18,6 +18,24 @@ export async function getLast3Days(_req: Request, res: Response, next: NextFunct
   }
 }
 
+const VALID_DAY_OFFSETS = [0, 1, 2];
+
+// GET /usage-audit/day?offset=0|1|2 - a single calendar day's ranking (0=today, 1=yesterday,
+// 2=day before yesterday), backing the Dashboard sub-tab's per-card day picker.
+export async function getDay(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const offset = typeof req.query.offset === 'string' ? Number(req.query.offset) : NaN;
+  if (!VALID_DAY_OFFSETS.includes(offset)) {
+    res.status(400).json({ error: 'offset must be 0 (today), 1 (yesterday), or 2 (day before yesterday).' });
+    return;
+  }
+  try {
+    const ranking = await usageTracking.getUsageRankingForDay(offset as usageTracking.UsageDayOffset);
+    res.json({ offset, ranking });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // GET /usage-audit/monthly?month=YYYY-MM-01 - defaults to the current month when omitted.
 export async function getMonthly(req: Request, res: Response, next: NextFunction): Promise<void> {
   const month = typeof req.query.month === 'string' ? req.query.month : currentMonth();

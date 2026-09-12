@@ -154,10 +154,38 @@ export interface FeatureUsage {
 export interface UsageRankingEntry {
   userId: string;
   email: string;
+  roles: string[];
   totalFunctionCalls: number;
   totalFmpCalls: number;
   totalFinnhubCalls: number;
   byFeature: Partial<Record<UsageFeature, FeatureUsage>>;
+}
+
+// Dashboard sub-tab (2026-09-09) needs to split users into "Admin/Admin-Master" vs everyone
+// else, which the per-feature ranking query above has no reason to know about. Fetched as a
+// separate, independent query rather than joined into that one - joining users_roles/m_roles
+// in would multiply each user's feature rows by however many roles they hold, silently
+// corrupting the FMP/Finnhub sums buildRanking() adds up below.
+async function fetchRolesByUser(): Promise<Map<string, string[]>> {
+  const { rows } = await pool.query<{ user_id: string; name: string }>(
+    `SELECT ur.user_id::text AS user_id, r.name
+     FROM users_roles ur
+     JOIN m_roles r ON r.id = ur.role_id`,
+  );
+  const rolesByUser = new Map<string, string[]>();
+  for (const { user_id, name } of rows) {
+    const list = rolesByUser.get(user_id) ?? [];
+    list.push(name);
+    rolesByUser.set(user_id, list);
+  }
+  return rolesByUser;
+}
+
+function attachRoles(entries: UsageRankingEntry[], rolesByUser: Map<string, string[]>): UsageRankingEntry[] {
+  for (const entry of entries) {
+    entry.roles = rolesByUser.get(entry.userId) ?? [];
+  }
+  return entries;
 }
 
 function splitByProvider(details: ApiCallDetails | null): { fmp: number; finnhub: number } {
@@ -177,7 +205,7 @@ function buildRanking(
   for (const row of rows) {
     let entry = byUser.get(row.user_id);
     if (!entry) {
-      entry = { userId: row.user_id, email: row.email, totalFunctionCalls: 0, totalFmpCalls: 0, totalFinnhubCalls: 0, byFeature: {} };
+      entry = { userId: row.user_id, email: row.email, roles: [], totalFunctionCalls: 0, totalFmpCalls: 0, totalFinnhubCalls: 0, byFeature: {} };
       byUser.set(row.user_id, entry);
     }
     if (row.feature) {
@@ -201,44 +229,89 @@ function buildRanking(
 // LEFT JOIN from users, not an inner join from the event table - a user with zero activity in
 // the window must still appear (all-zero row), not be silently omitted from an audit view.
 export async function getUsageRankingLast3Days(): Promise<UsageRankingEntry[]> {
-  const { rows } = await pool.query<{ user_id: string; email: string; feature: UsageFeature | null; api_call_details: ApiCallDetails | null }>(
-    `SELECT u.id AS user_id, u.email, ue.feature, ue.api_call_details
-     FROM users u
-     LEFT JOIN user_evt_usage ue ON ue.user_id = u.id AND ue.created_at >= now() - interval '3 days'`,
-  );
-  return buildRanking(rows.map((r) => {
+  const [{ rows }, rolesByUser] = await Promise.all([
+    pool.query<{ user_id: string; email: string; feature: UsageFeature | null; api_call_details: ApiCallDetails | null }>(
+      `SELECT u.id AS user_id, u.email, ue.feature, ue.api_call_details
+       FROM users u
+       LEFT JOIN user_evt_usage ue ON ue.user_id = u.id AND ue.created_at >= now() - interval '3 days'`,
+    ),
+    fetchRolesByUser(),
+  ]);
+  const ranking = buildRanking(rows.map((r) => {
     const { fmp, finnhub } = splitByProvider(r.api_call_details);
     return {
       user_id: r.user_id, email: r.email, feature: r.feature,
       functionCalls: r.feature ? 1 : 0, fmpCalls: r.feature ? fmp : 0, finnhubCalls: r.feature ? finnhub : 0,
     };
   }));
+  return attachRoles(ranking, rolesByUser);
+}
+
+// Dashboard sub-tab's per-card day picker (2026-09-12) - a single calendar day's ranking,
+// distinct from both the rolling 3-day window above and the monthly summary below. 0 = today,
+// 1 = yesterday, 2 = day before yesterday. Always safe to read straight from the raw
+// user_evt_usage log: the daily sweep (maybeRunDailyUsageAggregation) only ever deletes rows
+// older than 3 days, and the oldest possible row in "day before yesterday" is at most ~72
+// hours old, never past that cutoff. date_trunc('day', now()) truncates to the DB session's
+// timezone (UTC, same assumption the month-level date_trunc('month', ...) elsewhere relies on).
+export type UsageDayOffset = 0 | 1 | 2;
+
+export async function getUsageRankingForDay(dayOffset: UsageDayOffset): Promise<UsageRankingEntry[]> {
+  const [{ rows }, rolesByUser] = await Promise.all([
+    pool.query<{ user_id: string; email: string; feature: UsageFeature | null; api_call_details: ApiCallDetails | null }>(
+      `SELECT u.id AS user_id, u.email, ue.feature, ue.api_call_details
+       FROM users u
+       LEFT JOIN user_evt_usage ue ON ue.user_id = u.id
+         AND ue.created_at >= date_trunc('day', now()) - ($1 || ' days')::interval
+         AND ue.created_at < date_trunc('day', now()) - ($1 || ' days')::interval + interval '1 day'`,
+      [dayOffset],
+    ),
+    fetchRolesByUser(),
+  ]);
+  const ranking = buildRanking(rows.map((r) => {
+    const { fmp, finnhub } = splitByProvider(r.api_call_details);
+    return {
+      user_id: r.user_id, email: r.email, feature: r.feature,
+      functionCalls: r.feature ? 1 : 0, fmpCalls: r.feature ? fmp : 0, finnhubCalls: r.feature ? finnhub : 0,
+    };
+  }));
+  return attachRoles(ranking, rolesByUser);
 }
 
 export async function getUsageRankingForMonth(month: string): Promise<UsageRankingEntry[]> {
-  const { rows } = await pool.query<{
-    user_id: string; email: string; feature: UsageFeature | null;
-    event_count: number | string | null; api_call_details: ApiCallDetails | null;
-  }>(
-    `SELECT u.id AS user_id, u.email, s.feature, s.event_count, s.api_call_details
-     FROM users u
-     LEFT JOIN user_evt_usage_summary_monthly s ON s.user_id = u.id AND s.month = $1`,
-    [month],
-  );
-  return buildRanking(rows.map((r) => {
+  const [{ rows }, rolesByUser] = await Promise.all([
+    pool.query<{
+      user_id: string; email: string; feature: UsageFeature | null;
+      event_count: number | string | null; api_call_details: ApiCallDetails | null;
+    }>(
+      `SELECT u.id AS user_id, u.email, s.feature, s.event_count, s.api_call_details
+       FROM users u
+       LEFT JOIN user_evt_usage_summary_monthly s ON s.user_id = u.id AND s.month = $1`,
+      [month],
+    ),
+    fetchRolesByUser(),
+  ]);
+  const ranking = buildRanking(rows.map((r) => {
     const { fmp, finnhub } = splitByProvider(r.api_call_details);
     return {
       user_id: r.user_id, email: r.email, feature: r.feature,
       functionCalls: r.feature ? Number(r.event_count ?? 0) : 0, fmpCalls: r.feature ? fmp : 0, finnhubCalls: r.feature ? finnhub : 0,
     };
   }));
+  return attachRoles(ranking, rolesByUser);
 }
 
 // Populates the Monthly sub-tab's month picker - only months with at least one real row (the
 // current month is always selectable client-side regardless, degrading to an all-zero view).
 export async function getAvailableUsageMonths(): Promise<string[]> {
+  // month::text, not a bare SELECT - node-postgres parses a DATE column into a JS Date at the
+  // server's local midnight, and JSON-serializing that Date shifts it to a non-midnight UTC
+  // timestamp (e.g. '2026-09-01T04:00:00.000Z') - which then never string-matches the frontend's
+  // plain 'YYYY-MM-01' currentMonth(), wrongly tricking its "is the current month already in the
+  // list" check into re-adding a duplicate. Casting to text in SQL returns the plain date string
+  // directly, sidestepping the Date round-trip (and its timezone shift) entirely.
   const { rows } = await pool.query<{ month: string }>(
-    'SELECT DISTINCT month FROM user_evt_usage_summary_monthly ORDER BY month DESC',
+    'SELECT DISTINCT month::text AS month FROM user_evt_usage_summary_monthly ORDER BY month DESC',
   );
   return rows.map((r) => r.month);
 }
