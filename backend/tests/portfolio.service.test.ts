@@ -49,7 +49,7 @@ beforeEach(() => {
   mockConnect.mockReset();
   mockGetQuotes.mockReset();
   mockGetHistorical.mockReset();
-  mockGetHistorical.mockResolvedValue([]); // refreshPrices now also fetches history in parallel - most tests here don't care about it
+  mockGetHistorical.mockResolvedValue({ bars: [], realCalls: 1 }); // refreshPrices now also fetches history in parallel - most tests here don't care about it
   mockGetDecryptedKey.mockReset();
   mockGetDecryptedKey.mockResolvedValue('fake-fmp-key'); // refreshPrices tests: real key resolution isn't under test here
   mockGetTemplateParseConfig.mockReset();
@@ -393,7 +393,7 @@ describe('refreshPrices', () => {
       })
       .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] }); // UPDATE for AAPL only
 
-    mockGetQuotes.mockResolvedValue({ AAPL: { price: 150, changeDollar: 50, changePercent: 50, name: 'Apple' } }); // MSFT absent
+    mockGetQuotes.mockResolvedValue({ quotes: { AAPL: { price: 150, changeDollar: 50, changePercent: 50, name: 'Apple' } }, realCalls: 2 }); // MSFT absent
 
     const result = await refreshPrices('user-1', '1');
     const aapl = result.holdings.find((r) => r.symbol === 'AAPL');
@@ -419,7 +419,7 @@ describe('refreshPrices', () => {
           today_change_dollar: '25', today_change_percent: '1.5',
         }],
       });
-    mockGetQuotes.mockResolvedValue({}); // MSFT absent this refresh
+    mockGetQuotes.mockResolvedValue({ quotes: {}, realCalls: 1 }); // MSFT absent this refresh
 
     const result = await refreshPrices('user-1', '1');
     const msft = result.holdings.find((r) => r.symbol === 'MSFT');
@@ -438,7 +438,7 @@ describe('refreshPrices', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
-    mockGetQuotes.mockResolvedValue({ AAPL: { price: 150, changeDollar: 4, changePercent: 2.7, name: 'Apple' } });
+    mockGetQuotes.mockResolvedValue({ quotes: { AAPL: { price: 150, changeDollar: 4, changePercent: 2.7, name: 'Apple' } }, realCalls: 1 });
 
     const result = await refreshPrices('user-1', '1');
     const aapl = result.holdings.find((r) => r.symbol === 'AAPL');
@@ -473,8 +473,8 @@ describe('refreshPrices', () => {
       })
       .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
 
-    mockGetQuotes.mockResolvedValue({ AAPL: { price: 150, changeDollar: 5, changePercent: 3 } });
-    mockGetHistorical.mockResolvedValue([{ date: '2026-07-01', close: 145, low: 140 }]);
+    mockGetQuotes.mockResolvedValue({ quotes: { AAPL: { price: 150, changeDollar: 5, changePercent: 3 } }, realCalls: 1 });
+    mockGetHistorical.mockResolvedValue({ bars: [{ date: '2026-07-01', close: 145, low: 140 }], realCalls: 1 });
 
     const result = await refreshPrices('user-1', '1');
 
@@ -496,7 +496,7 @@ describe('refreshPrices', () => {
       })
       .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
 
-    mockGetQuotes.mockResolvedValue({ BTCUSD: { price: 71393, changeDollar: 1000, changePercent: 1.4, name: 'Bitcoin' } });
+    mockGetQuotes.mockResolvedValue({ quotes: { BTCUSD: { price: 71393, changeDollar: 1000, changePercent: 1.4, name: 'Bitcoin' } }, realCalls: 1 });
 
     const result = await refreshPrices('user-1', '1');
 
@@ -518,7 +518,7 @@ describe('refreshPrices', () => {
       })
       .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
 
-    mockGetQuotes.mockResolvedValue({ BTCUSD: { price: 71393, changeDollar: 1000, changePercent: 1.4, name: 'Bitcoin' } });
+    mockGetQuotes.mockResolvedValue({ quotes: { BTCUSD: { price: 71393, changeDollar: 1000, changePercent: 1.4, name: 'Bitcoin' } }, realCalls: 1 });
 
     await refreshPrices('user-1', '1');
     expect(mockGetQuotes).toHaveBeenCalledWith(['BTCUSD'], 'fake-fmp-key'); // not BTCUSDUSD
@@ -537,6 +537,48 @@ describe('refreshPrices', () => {
     mockGetDecryptedKey.mockRejectedValue(new userSubscription.MissingUserApiKeyError('No fmp API key on file.'));
     await expect(refreshPrices('user-1', '1')).rejects.toBeInstanceOf(userSubscription.MissingUserApiKeyError);
     expect(mockGetQuotes).not.toHaveBeenCalled();
+  });
+
+  // getQuotes()/getHistorical() now route through the shared daily FMP cache (2026-09-12) and
+  // report back how many symbols were real calls vs. served from cache - fmpQuoteCallCount/
+  // fmpHistoricalCallCount must reflect that real count, not a flat "how many symbols" tally,
+  // so the Usage Audit reflects actual cost.
+  test('fmpQuoteCallCount/fmpHistoricalCallCount reflect real (non-cached) calls, not the raw symbol count', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'h1', symbol: 'AAPL', name: 'Apple', quantity: '10', purchase_price: '100', current_price: '100',
+            sector: 'Tech', purchase_date: null, cost_basis: '1000', current_value: '1000', gain_loss: '0',
+            return_pct: '0', allocation_pct: '50', price_updated_at: null,
+          },
+          {
+            id: 'h2', symbol: 'MSFT', name: 'Microsoft', quantity: '5', purchase_price: '200', current_price: '200',
+            sector: 'Tech', purchase_date: null, cost_basis: '1000', current_value: '1000', gain_loss: '0',
+            return_pct: '0', allocation_pct: '50', price_updated_at: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] })
+      .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
+
+    // 2 symbols requested, but only 1 was a real FMP call (the other was a same-day cache hit).
+    mockGetQuotes.mockResolvedValue({
+      quotes: {
+        AAPL: { price: 150, changeDollar: 5, changePercent: 3 },
+        MSFT: { price: 300, changeDollar: 2, changePercent: 1 },
+      },
+      realCalls: 1,
+    });
+    mockGetHistorical
+      .mockResolvedValueOnce({ bars: [{ date: '2026-07-01', close: 145, low: 140 }], realCalls: 1 })
+      .mockResolvedValueOnce({ bars: [{ date: '2026-07-01', close: 295, low: 290 }], realCalls: 0 });
+
+    const result = await refreshPrices('user-1', '1');
+
+    expect(result.fmpQuoteCallCount).toBe(1);
+    expect(result.fmpHistoricalCallCount).toBe(1);
   });
 });
 

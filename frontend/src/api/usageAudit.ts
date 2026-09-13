@@ -5,7 +5,7 @@ import { apiFetch } from './client';
 // data that's been write-only since it was built. UsageFeature mirrors backend/src/services/
 // usageTracking.service.ts's own type exactly.
 export type UsageFeature = 'momentum' | 'contrarian_finder_scan' | 'long_term_analysis'
-  | 'contrarian_comeback' | 'portfolio_refresh' | 'stock_preview';
+  | 'contrarian_comeback' | 'portfolio_refresh' | 'stock_preview' | 'quotes';
 
 export interface FeatureUsage {
   functionCalls: number;

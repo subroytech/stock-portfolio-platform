@@ -804,7 +804,7 @@ export async function refreshPrices(userId: string, portfolioId: string): Promis
   const historySymbols = [...new Set(holdingRows.filter((r) => !isPerfSkipped(r.symbol, r.sector)).map((r) => r.symbol))];
 
   const fmpQuoteSymbols = holdingRows.map((r) => toFmpQuoteSymbol(r.symbol, r.sector));
-  const [rawPriceMap, historyResults] = await Promise.all([
+  const [quotesResult, historyResults] = await Promise.all([
     marketData.getQuotes(fmpQuoteSymbols, apiKey),
     Promise.allSettled(historySymbols.map((symbol) => marketData.getHistorical(symbol, apiKey, 130))),
   ]);
@@ -812,15 +812,19 @@ export async function refreshPrices(userId: string, portfolioId: string): Promis
   // symbol (e.g. BTC) - applyLivePrices looks quotes up by stock.symbol.
   const priceMap: Record<string, Quote> = {};
   holdingRows.forEach((r, i) => {
-    const quote = rawPriceMap[fmpQuoteSymbols[i]];
+    const quote = quotesResult.quotes[fmpQuoteSymbols[i]];
     if (quote) priceMap[r.symbol] = quote;
   });
   applyLivePrices(holdings, priceMap);
 
   const performanceHistory: Record<string, HistoricalBar[]> = {};
   historyResults.forEach((r, i) => {
-    if (r.status === 'fulfilled' && r.value.length > 0) performanceHistory[historySymbols[i]] = r.value;
+    if (r.status === 'fulfilled' && r.value.bars.length > 0) performanceHistory[historySymbols[i]] = r.value.bars;
   });
+  // A cache hit can never reach a rejection (same principle as getQuotes' own realCalls above) -
+  // getHistorical() only reports realCalls on its fulfilled path, so a rejected promise here is
+  // counted as 1 real call itself, not silently dropped from the tally.
+  const historyRealCalls = historyResults.reduce((sum, r) => sum + (r.status === 'fulfilled' ? r.value.realCalls : 1), 0);
 
   const results: RefreshedHolding[] = [];
   for (let i = 0; i < holdingRows.length; i++) {
@@ -869,6 +873,6 @@ export async function refreshPrices(userId: string, portfolioId: string): Promis
   }
   return {
     holdings: results, performanceHistory,
-    fmpQuoteCallCount: fmpQuoteSymbols.length, fmpHistoricalCallCount: historySymbols.length,
+    fmpQuoteCallCount: quotesResult.realCalls, fmpHistoricalCallCount: historyRealCalls,
   };
 }

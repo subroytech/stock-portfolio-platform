@@ -7,7 +7,7 @@
 import { pool } from '../db/pool';
 
 export type UsageFeature = 'momentum' | 'contrarian_finder_scan' | 'long_term_analysis'
-  | 'contrarian_comeback' | 'portfolio_refresh' | 'stock_preview';
+  | 'contrarian_comeback' | 'portfolio_refresh' | 'stock_preview' | 'quotes';
 
 // Usage Audit - API-call detail (Phase 2, 2026-09-05). event_count (below) only ever meant
 // "how many times was this feature invoked" - it badly understates real external API volume

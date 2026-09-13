@@ -35,15 +35,20 @@ const mockLogUsage = usageTracking.logUsage as jest.Mock;
 
 const authCookie = `auth_token=${signToken('user-1')}`;
 
-function makeBars(count: number) {
+function makeBars(count: number, realCalls = 1) {
   // newest-first, strictly increasing oldest->newest, matching the
   // momentum.service.test.ts convention.
-  return Array.from({ length: count }, (_, i) => ({
+  const bars = Array.from({ length: count }, (_, i) => ({
     date: new Date(2026, 0, count - i).toISOString().slice(0, 10),
     close: count - i,
     low: count - i - 1,
     volume: 100,
   }));
+  return { bars, realCalls };
+}
+
+function makeQuotes(quotes: Record<string, unknown>, realCalls = 1) {
+  return { quotes, realCalls };
 }
 
 // A representative fake analysis result - the controller no longer computes
@@ -90,14 +95,14 @@ describe('GET /momentum/:symbol', () => {
 
   test('400 when fewer than 30 trading days are available', async () => {
     mockGetHistorical.mockResolvedValue(makeBars(20));
-    mockGetQuotes.mockResolvedValue({});
+    mockGetQuotes.mockResolvedValue(makeQuotes({}));
     const res = await request(app).get('/momentum/AAPL').set('Cookie', authCookie);
     expect(res.status).toBe(400);
   });
 
   test('200 with the assembled analysis, quote used as a best-effort price', async () => {
     mockGetHistorical.mockResolvedValue(makeBars(60));
-    mockGetQuotes.mockResolvedValue({ AAPL: { price: 999, changeDollar: 1, changePercent: 1, name: 'Apple Inc.' } });
+    mockGetQuotes.mockResolvedValue(makeQuotes({ AAPL: { price: 999, changeDollar: 1, changePercent: 1, name: 'Apple Inc.' } }));
     const res = await request(app).get('/momentum/AAPL').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(res.body.symbol).toBe('AAPL');
@@ -120,7 +125,7 @@ describe('GET /momentum/:symbol', () => {
 
   test('503 when the analysis-service is unavailable', async () => {
     mockGetHistorical.mockResolvedValue(makeBars(60));
-    mockGetQuotes.mockResolvedValue({});
+    mockGetQuotes.mockResolvedValue(makeQuotes({}));
     mockComputeMomentumAnalysis.mockRejectedValue(new analysisService.AnalysisServiceError('Analysis service unavailable.'));
     const res = await request(app).get('/momentum/AAPL').set('Cookie', authCookie);
     expect(res.status).toBe(503);
@@ -129,16 +134,32 @@ describe('GET /momentum/:symbol', () => {
 
   test('symbol is uppercased regardless of request casing', async () => {
     mockGetHistorical.mockResolvedValue(makeBars(60));
-    mockGetQuotes.mockResolvedValue({});
+    mockGetQuotes.mockResolvedValue(makeQuotes({}));
     const res = await request(app).get('/momentum/aapl').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(res.body.symbol).toBe('AAPL');
     expect(mockGetHistorical).toHaveBeenCalledWith('AAPL', 'fake-fmp-key', 130);
   });
 
-  test('logs usage on a successful analysis', async () => {
-    mockGetHistorical.mockResolvedValue(makeBars(60));
-    mockGetQuotes.mockResolvedValue({});
+  test('logs usage on a successful analysis, with the real (non-cached) call counts from getHistorical/getQuotes', async () => {
+    mockGetHistorical.mockResolvedValue(makeBars(60, 1));
+    mockGetQuotes.mockResolvedValue(makeQuotes({}, 1));
+    const res = await request(app).get('/momentum/AAPL').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'momentum', { fmp_historical: 1, fmp_quote: 1 });
+  });
+
+  test('logs a zero historical call when the day-cache served it (realCalls: 0)', async () => {
+    mockGetHistorical.mockResolvedValue(makeBars(60, 0));
+    mockGetQuotes.mockResolvedValue(makeQuotes({}, 1));
+    const res = await request(app).get('/momentum/AAPL').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'momentum', { fmp_historical: 0, fmp_quote: 1 });
+  });
+
+  test('a rejected (best-effort) quote call still logs 1 real quote call - a cache hit can never reach a rejection', async () => {
+    mockGetHistorical.mockResolvedValue(makeBars(60, 1));
+    mockGetQuotes.mockRejectedValue(new Error('Invalid or expired FMP API key.'));
     const res = await request(app).get('/momentum/AAPL').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(mockLogUsage).toHaveBeenCalledWith('user-1', 'momentum', { fmp_historical: 1, fmp_quote: 1 });
@@ -146,7 +167,7 @@ describe('GET /momentum/:symbol', () => {
 
   test('a failed usage log does not turn a successful response into a 500 (fire-and-forget)', async () => {
     mockGetHistorical.mockResolvedValue(makeBars(60));
-    mockGetQuotes.mockResolvedValue({});
+    mockGetQuotes.mockResolvedValue(makeQuotes({}));
     mockLogUsage.mockRejectedValue(new Error('usage log db exploded'));
     const res = await request(app).get('/momentum/AAPL').set('Cookie', authCookie);
     expect(res.status).toBe(200);

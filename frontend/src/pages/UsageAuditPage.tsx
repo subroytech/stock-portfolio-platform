@@ -25,6 +25,7 @@ const FEATURE_LABELS: Record<UsageFeature, string> = {
   contrarian_comeback: 'Contrarian Comeback',
   portfolio_refresh: 'Portfolio Refresh',
   stock_preview: 'Stock Preview',
+  quotes: 'Quotes',
 };
 
 function formatCutoff(iso: string): string {

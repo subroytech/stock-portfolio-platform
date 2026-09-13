@@ -56,7 +56,7 @@ beforeEach(() => {
   mockConnect.mockReset();
   mockGetQuotes.mockReset();
   mockGetHistorical.mockReset();
-  mockGetHistorical.mockResolvedValue([]); // refreshPrices now also fetches history in parallel
+  mockGetHistorical.mockResolvedValue({ bars: [], realCalls: 1 }); // refreshPrices now also fetches history in parallel
   mockGetDecryptedKey.mockReset();
   mockGetDecryptedKey.mockResolvedValue('fake-fmp-key');
   mockLogUsage.mockReset();
@@ -394,8 +394,8 @@ describe('POST /portfolios/:id/refresh-prices', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
-    mockGetQuotes.mockResolvedValue({ AAPL: { price: 150, changeDollar: 50, changePercent: 50, name: 'Apple' } });
-    mockGetHistorical.mockResolvedValue([{ date: '2026-07-01', close: 145, low: 140 }]);
+    mockGetQuotes.mockResolvedValue({ quotes: { AAPL: { price: 150, changeDollar: 50, changePercent: 50, name: 'Apple' } }, realCalls: 1 });
+    mockGetHistorical.mockResolvedValue({ bars: [{ date: '2026-07-01', close: 145, low: 140 }], realCalls: 1 });
 
     const res = await request(app).post('/portfolios/1/refresh-prices').set('Cookie', authCookie);
     expect(res.status).toBe(200);
@@ -418,7 +418,7 @@ describe('POST /portfolios/:id/refresh-prices', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [{ price_updated_at: '2026-07-12T00:00:00Z' }] });
-    mockGetQuotes.mockResolvedValue({ AAPL: { price: 150, changeDollar: 50, changePercent: 50, name: 'Apple' } });
+    mockGetQuotes.mockResolvedValue({ quotes: { AAPL: { price: 150, changeDollar: 50, changePercent: 50, name: 'Apple' } }, realCalls: 1 });
     mockLogUsage.mockRejectedValue(new Error('usage log db exploded'));
 
     const res = await request(app).post('/portfolios/1/refresh-prices').set('Cookie', authCookie);
