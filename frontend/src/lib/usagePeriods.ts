@@ -5,11 +5,15 @@ import type { UsageRankingEntry } from '../api/usageAudit';
 // components - mixing in plain constants/types there trips the react-refresh lint rule.
 export type PeriodOption = 'last3Days' | 'today' | 'yesterday' | 'dayBeforeYesterday';
 
+// today/yesterday/dayBeforeYesterday are labeled "(ET)" - the backend buckets these 3 by
+// America/New_York calendar day (found live 2026-09-14: plain UTC bucketing put evening US
+// activity under "Yesterday" a few hours before local midnight) - last3Days is a rolling
+// 72-hour window with no calendar-day boundary, so it has no timezone to label.
 export const PERIOD_LABELS: Record<PeriodOption, string> = {
   last3Days: 'Last 3 Days',
-  today: 'Today',
-  yesterday: 'Yesterday',
-  dayBeforeYesterday: 'Day Before Yesterday',
+  today: 'Today (ET)',
+  yesterday: 'Yesterday (ET)',
+  dayBeforeYesterday: 'Day Before Yesterday (ET)',
 };
 
 export const PERIOD_OPTIONS = Object.keys(PERIOD_LABELS) as PeriodOption[];

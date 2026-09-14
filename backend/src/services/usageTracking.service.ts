@@ -27,7 +27,11 @@ export async function logUsage(userId: string, feature: UsageFeature, apiCallDet
   );
 }
 
-const AGGREGATION_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// Anchor for every calendar-day/month boundary this service computes - CockroachDB's session
+// timezone is UTC, which doesn't match a US-timezone user's own sense of "today"/"yesterday"/
+// "this month" (found live 2026-09-14). Shared by the sweep's gate and month-bucketing below,
+// and by the Dashboard day-picker further down.
+const USAGE_DASHBOARD_TZ = 'America/New_York';
 
 interface RawUsageRow {
   id: string;
@@ -56,11 +60,25 @@ function mergeCounts(base: ApiCallDetails | null, addition: ApiCallDetails): Api
 // read, regardless of how many users log in during that window (a global sweep, not a per-user
 // one).
 export async function maybeRunDailyUsageAggregation(): Promise<void> {
-  const { rows: watermarkRows } = await pool.query<{ last_aggregated_at: Date | null }>(
-    'SELECT last_aggregated_at FROM sys_usage_aggregation_watermark WHERE id = 1',
+  // Gate is a real ET calendar-day boundary, not a rolling elapsed-time window - found live
+  // 2026-09-14 (user's own question): the old "has 24h elapsed since last run" rule could skip a
+  // genuine ET-date change if the next login happened under 24h later (last run 09/11 11PM ET,
+  // next login 09/12 11AM ET is only ~12 elapsed hours but a real day change), and conversely
+  // could let a second run slip through within the same ET day for two logins >24h apart. The
+  // rule is now purely "does today's ET calendar date differ from the ET calendar date
+  // last_aggregated_at fell on" - irrespective of how many literal hours that took. Casting to
+  // ::text (not a bare ::date) sidesteps the same node-postgres DATE/timezone round-trip gotcha
+  // documented on getAvailableUsageMonths() below - comparing two plain strings needs no Date
+  // parsing at all. No watermark row (shouldn't happen - the row is migration-seeded - but
+  // matches this function's existing defensive "treat as overdue" precedent) also runs.
+  const { rows: watermarkRows } = await pool.query<{ last_aggregated_date: string; today_date: string }>(
+    `SELECT (last_aggregated_at AT TIME ZONE $1)::date::text AS last_aggregated_date,
+            (now() AT TIME ZONE $1)::date::text AS today_date
+     FROM sys_usage_aggregation_watermark WHERE id = 1`,
+    [USAGE_DASHBOARD_TZ],
   );
-  const lastAggregatedAt = watermarkRows[0]?.last_aggregated_at;
-  if (lastAggregatedAt && Date.now() - lastAggregatedAt.getTime() < AGGREGATION_INTERVAL_MS) return;
+  const watermark = watermarkRows[0];
+  if (watermark && watermark.last_aggregated_date === watermark.today_date) return;
 
   const client = await pool.connect();
   try {
@@ -71,10 +89,14 @@ export async function maybeRunDailyUsageAggregation(): Promise<void> {
     // it's more than 3 days old, never while it's still inside that display window. Every row
     // this age is swept, whether or not it carries api_call_details - a plain event_count-only
     // row still represents one real function call that must be counted and cleared, not left to
-    // linger until the 35-day TTL backstop.
+    // linger until the 35-day TTL backstop. Month bucketing is ET-based (same tz as the gate
+    // above) so an event near a UTC month boundary lands in the calendar month it actually
+    // happened in locally - forward-only: a row already swept before this fix keeps whatever
+    // UTC-bucketed month it was already given, since the raw row backing it no longer exists.
     const { rows: rawRows } = await client.query<RawUsageRow>(
-      `SELECT id, user_id, feature, date_trunc('month', created_at)::date AS month, api_call_details
+      `SELECT id, user_id, feature, date_trunc('month', created_at AT TIME ZONE $1)::date AS month, api_call_details
        FROM user_evt_usage WHERE created_at < now() - interval '3 days' FOR UPDATE`,
+      [USAGE_DASHBOARD_TZ],
     );
 
     if (rawRows.length > 0) {
@@ -252,8 +274,19 @@ export async function getUsageRankingLast3Days(): Promise<UsageRankingEntry[]> {
 // 1 = yesterday, 2 = day before yesterday. Always safe to read straight from the raw
 // user_evt_usage log: the daily sweep (maybeRunDailyUsageAggregation) only ever deletes rows
 // older than 3 days, and the oldest possible row in "day before yesterday" is at most ~72
-// hours old, never past that cutoff. date_trunc('day', now()) truncates to the DB session's
-// timezone (UTC, same assumption the month-level date_trunc('month', ...) elsewhere relies on).
+// hours old, never past that cutoff.
+//
+// Day boundaries are computed in America/New_York (USAGE_DASHBOARD_TZ, above), not the DB
+// session's own UTC - found live 2026-09-14: a user working in a US timezone saw real activity
+// from "last night" show up under "Yesterday" instead of "Today", because plain
+// date_trunc('day', now()) truncates in UTC and evening US-timezone activity crosses into the
+// next UTC calendar day hours before midnight locally. `now() AT TIME ZONE tz` converts the
+// instant to that zone's wall-clock time (as a bare timestamp); date_trunc'ing that and
+// converting back with a second `AT TIME ZONE` yields the UTC instant for that zone's midnight -
+// the standard Postgres/CockroachDB idiom for timezone-aware day bucketing, confirmed live
+// against the real dev DB. getUsageRankingForMonth's own month matching below needs no
+// equivalent fix here - it just reads whatever month the sweep already wrote, and the sweep's
+// own month-bucketing is now ET-based too (see maybeRunDailyUsageAggregation above).
 export type UsageDayOffset = 0 | 1 | 2;
 
 export async function getUsageRankingForDay(dayOffset: UsageDayOffset): Promise<UsageRankingEntry[]> {
@@ -262,9 +295,9 @@ export async function getUsageRankingForDay(dayOffset: UsageDayOffset): Promise<
       `SELECT u.id AS user_id, u.email, ue.feature, ue.api_call_details
        FROM users u
        LEFT JOIN user_evt_usage ue ON ue.user_id = u.id
-         AND ue.created_at >= date_trunc('day', now()) - ($1 || ' days')::interval
-         AND ue.created_at < date_trunc('day', now()) - ($1 || ' days')::interval + interval '1 day'`,
-      [dayOffset],
+         AND ue.created_at >= (date_trunc('day', now() AT TIME ZONE $2) AT TIME ZONE $2) - ($1 || ' days')::interval
+         AND ue.created_at < (date_trunc('day', now() AT TIME ZONE $2) AT TIME ZONE $2) - ($1 || ' days')::interval + interval '1 day'`,
+      [dayOffset, USAGE_DASHBOARD_TZ],
     ),
     fetchRolesByUser(),
   ]);

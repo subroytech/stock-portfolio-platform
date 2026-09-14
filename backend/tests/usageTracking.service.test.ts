@@ -47,8 +47,8 @@ describe('maybeRunDailyUsageAggregation', () => {
     return client;
   }
 
-  test('no-ops (does not open a transaction) when the watermark is less than 24h old', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_at: new Date(Date.now() - 1000) }] });
+  test('no-ops (does not open a transaction) when last_aggregated_at already falls on today\'s ET calendar date', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_date: '2026-09-12', today_date: '2026-09-12' }] });
 
     await maybeRunDailyUsageAggregation();
 
@@ -56,8 +56,8 @@ describe('maybeRunDailyUsageAggregation', () => {
     expect(mockConnect).not.toHaveBeenCalled();
   });
 
-  test('runs when overdue: sums multiple raw rows into the summary\'s event_count and cumulative detail, additively on top of existing values, deletes exactly the aggregated rows by id, and advances the watermark', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_at: new Date(Date.now() - 25 * 60 * 60 * 1000) }] });
+  test('runs once the ET calendar date has changed, regardless of how many literal hours elapsed (e.g. last run 09/11 11PM ET, login 09/12 11AM ET - only ~12h)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_date: '2026-09-11', today_date: '2026-09-12' }] });
     const client = mockClient();
     client.query.mockImplementation((sql: string) => {
       if (sql === 'BEGIN' || sql === 'COMMIT') return Promise.resolve();
@@ -90,7 +90,7 @@ describe('maybeRunDailyUsageAggregation', () => {
   });
 
   test('creates a brand-new summary row (event_count from scratch, detail from {}) when none existed before', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_at: new Date(Date.now() - 25 * 60 * 60 * 1000) }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_date: '2026-09-11', today_date: '2026-09-12' }] });
     const client = mockClient();
     client.query.mockImplementation((sql: string) => {
       if (sql === 'BEGIN' || sql === 'COMMIT') return Promise.resolve();
@@ -110,7 +110,7 @@ describe('maybeRunDailyUsageAggregation', () => {
   });
 
   test('counts and deletes rows even when they carry no api_call_details at all - event_count still advances, detail stays null', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_at: new Date(Date.now() - 25 * 60 * 60 * 1000) }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_date: '2026-09-11', today_date: '2026-09-12' }] });
     const client = mockClient();
     client.query.mockImplementation((sql: string) => {
       if (sql === 'BEGIN' || sql === 'COMMIT') return Promise.resolve();
@@ -133,7 +133,7 @@ describe('maybeRunDailyUsageAggregation', () => {
   });
 
   test('when there are no rows older than 3 days, skips the merge/delete steps but still advances the watermark', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_at: new Date(Date.now() - 25 * 60 * 60 * 1000) }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_date: '2026-09-11', today_date: '2026-09-12' }] });
     const client = mockClient();
     client.query.mockImplementation((sql: string) => {
       if (sql === 'BEGIN' || sql === 'COMMIT') return Promise.resolve();
@@ -148,7 +148,7 @@ describe('maybeRunDailyUsageAggregation', () => {
   });
 
   test('rolls back and rethrows on failure, still releasing the client', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_at: new Date(Date.now() - 25 * 60 * 60 * 1000) }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_date: '2026-09-11', today_date: '2026-09-12' }] });
     const client = mockClient();
     client.query.mockImplementation((sql: string) => {
       if (sql === 'BEGIN') return Promise.resolve();
@@ -177,7 +177,7 @@ describe('maybeRunDailyUsageAggregation', () => {
   // row (with or without api_call_details) is only folded into the summary and deleted once
   // it's older than 3 days.
   test('only selects/deletes rows older than 3 days, never rows still inside the display window, regardless of whether they carry detail', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_at: new Date(Date.now() - 25 * 60 * 60 * 1000) }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ last_aggregated_date: '2026-09-11', today_date: '2026-09-12' }] });
     const client = mockClient();
     client.query.mockImplementation((sql: string) => {
       if (sql === 'BEGIN' || sql === 'COMMIT') return Promise.resolve();
@@ -283,8 +283,8 @@ describe('getUsageRankingForDay', () => {
     await getUsageRankingForDay(2);
     const [sql, params] = mockQuery.mock.calls[0];
     expect(sql).toContain('LEFT JOIN user_evt_usage');
-    expect(sql).toContain("date_trunc('day', now())");
-    expect(params).toEqual([2]);
+    expect(sql).toContain("date_trunc('day', now() AT TIME ZONE $2) AT TIME ZONE $2");
+    expect(params).toEqual([2, 'America/New_York']);
   });
 });
 
