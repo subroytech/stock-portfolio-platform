@@ -98,13 +98,15 @@ interface UsageBarCardProps {
   emptyMessage: string;
 }
 
-// Chart-3 per row: a bar chart (by user, x-axis labels hidden - see UsageBarChart.tsx) with a
-// single combined selector offering both the 4 day-based options and any available month,
-// independent per card like the two pie cards above. When a day-based option is picked, this
-// reads straight from the shared PeriodDatasets (no extra fetch); when a month is picked, it
-// fetches that month itself via useUsageForMonth - always called regardless of the current
-// selection (rules of hooks), which is cheap and gets deduped by React Query against any other
-// card already viewing that same month.
+// Chart-3 per row: a bar chart grouped by function/feature, not by user (see
+// UsageBarChart.tsx) - same role-filtered ranking slice as the two pie cards, just summed
+// across users into per-feature totals instead of kept per-user. Single combined selector
+// offering both the 4 day-based options and any available month, independent per card like the
+// two pie cards above. When a day-based option is picked, this reads straight from the shared
+// PeriodDatasets (no extra fetch); when a month is picked, it fetches that month itself via
+// useUsageForMonth - always called regardless of the current selection (rules of hooks), which
+// is cheap and gets deduped by React Query against any other card already viewing that same
+// month.
 export function UsageBarCard({ testId, datasets, monthOptions, roleFilter, emptyMessage }: UsageBarCardProps) {
   const [selection, setSelection] = useState<BarSelection>('last3Days');
   const monthMode = isMonthSelection(selection);

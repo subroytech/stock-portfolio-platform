@@ -2,7 +2,7 @@ import '../lib/chartSetup';
 import { useRef } from 'react';
 import { Bar } from 'react-chartjs-2';
 import type { UsageRankingEntry } from '../api/usageAudit';
-import { usageSharesFromRanking, USAGE_PALETTE } from '../lib/usageShare';
+import { usageSharesByFeature, USAGE_PALETTE } from '../lib/usageShare';
 
 interface TooltipContext {
   label?: string;
@@ -15,12 +15,12 @@ interface UsageBarBodyProps {
   emptyMessage: string;
 }
 
-// User Usage Dashboard sub-tab - one bar per user, same combined FMP+Finnhub call metric and
-// same per-user color as the sibling pie chart. Users are identified by email, which is too
-// long to show as an x-axis tick label without either truncating illegibly or wrapping the
-// axis - so x-axis labels are hidden entirely and identification instead comes from the
-// tooltip (hover) plus the wrapped legend below the chart (same color-dot + email pattern the
-// pie's side legend already uses).
+// User Usage Dashboard sub-tab - one bar per function/feature (Stock Preview, Contrarian
+// Finder, Momentum Analysis, etc.), summed across every user in the role-filtered ranking slice
+// passed in - unlike the sibling pie charts, which stay per-user. Same hidden-x-axis-ticks +
+// wrapped-legend-below pattern as before this was per-feature (kept for consistency, and to
+// avoid showing every label twice on a small card) - x-axis identification comes from the
+// tooltip (hover) plus the legend, not from tick labels.
 export default function UsageBarBody({ ranking, isLoading, emptyMessage }: UsageBarBodyProps) {
   // Same jsdom in-place-update crash workaround as UsagePieChart.tsx/AllocationChart.tsx.
   const rankingRef = useRef(ranking);
@@ -34,13 +34,13 @@ export default function UsageBarBody({ ranking, isLoading, emptyMessage }: Usage
     return <p className="text-sm text-text-secondary">Loading…</p>;
   }
 
-  const shares = usageSharesFromRanking(ranking);
+  const shares = usageSharesByFeature(ranking);
 
   if (shares.length === 0) {
     return <p className="text-sm text-text-secondary">{emptyMessage}</p>;
   }
 
-  const labels = shares.map((entry) => entry.email);
+  const labels = shares.map((entry) => entry.label);
   const data = shares.map((entry) => entry.calls);
   const colors = labels.map((_, i) => USAGE_PALETTE[i % USAGE_PALETTE.length]);
   const total = data.reduce((sum, v) => sum + v, 0);
@@ -79,7 +79,7 @@ export default function UsageBarBody({ ranking, isLoading, emptyMessage }: Usage
         {labels.map((label, i) => (
           <span key={label} className="flex min-w-0 items-center gap-1 text-xs text-text-secondary">
             <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: colors[i] }} />
-            <span className="max-w-[7rem] truncate" title={label}>{label}</span>
+            <span className="max-w-[11rem] truncate" title={label}>{label}</span>
           </span>
         ))}
       </div>

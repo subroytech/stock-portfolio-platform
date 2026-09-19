@@ -5,6 +5,7 @@ import {
 } from '../api/usageAudit';
 import { UsagePieDayCard, UsageMonthlyPieCard, UsageBarCard } from '../components/UsageDashboardCards';
 import { currentMonth, formatMonthLabel } from '../lib/usageDates';
+import { FEATURE_LABELS } from '../lib/usageShare';
 import type { PeriodDatasets } from '../lib/usagePeriods';
 
 // Dashboard sub-tab's role grouping: "Admin/Admin-Master" is any user holding either role
@@ -17,16 +18,6 @@ function isAdminUser(entry: UsageRankingEntry): boolean {
 function isNonAdminUser(entry: UsageRankingEntry): boolean {
   return !isAdminUser(entry);
 }
-
-const FEATURE_LABELS: Record<UsageFeature, string> = {
-  momentum: 'Momentum Analysis',
-  contrarian_finder_scan: 'Contrarian Finder',
-  long_term_analysis: 'Long-Term Analysis',
-  contrarian_comeback: 'Contrarian Comeback',
-  portfolio_refresh: 'Portfolio Refresh',
-  stock_preview: 'Stock Preview',
-  quotes: 'Quotes',
-};
 
 function formatCutoff(iso: string): string {
   return new Date(iso).toLocaleString('en-US', {
@@ -200,7 +191,7 @@ export default function UsageAuditPage() {
       {activeSubTab === 'dashboard' && (
         <div className="flex flex-col gap-4">
           <p className="text-sm text-text-secondary">
-            API call share by user - each chart is that group&apos;s combined FMP + Finnhub call volume. Every chart has its own period/month control.
+            Combined FMP + Finnhub call volume for each group. The two pie charts break it down by user; the bar chart breaks the same period down by function instead. Every chart has its own period/month control.
           </p>
 
           <div>

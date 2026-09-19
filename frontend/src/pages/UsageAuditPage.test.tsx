@@ -72,8 +72,10 @@ describe('UsageAuditPage', () => {
     const adminPieDay = within(screen.getByTestId('dashboard-admin-pie-day'));
     expect(await adminPieDay.findByText('boss@b.com')).toBeInTheDocument();
 
+    // Bar chart groups by function, not by user - heavy@b.com's contrarian_finder_scan calls
+    // are what should surface here, not their email.
     const nonAdminBar = within(screen.getByTestId('dashboard-nonadmin-bar'));
-    expect(await nonAdminBar.findByText('heavy@b.com')).toBeInTheDocument();
+    expect(await nonAdminBar.findByText('Contrarian Finder')).toBeInTheDocument();
 
     // Current month (September) has an empty ranking per the mock, so both monthly pies show
     // their empty-state message.
@@ -119,14 +121,15 @@ describe('UsageAuditPage', () => {
     mockFetch();
     renderPage();
     const adminBar = within(screen.getByTestId('dashboard-admin-bar'));
-    await adminBar.findByText('boss@b.com');
+    // Last 3 Days: boss@b.com's only activity is momentum.
+    await adminBar.findByText('Momentum Analysis');
 
     await userEvent.selectOptions(adminBar.getByLabelText('Select period or month'), 'month:2026-08-01');
 
-    // boss@b.com (admin-master) is in the August ranking too, with a different call count -
-    // just confirm the card is now showing August's data by checking the empty-state is gone
-    // and the user is still present (email legend is the same regardless of the underlying value).
-    await waitFor(() => expect(adminBar.getByText('boss@b.com')).toBeInTheDocument());
+    // August: boss@b.com's activity is long_term_analysis instead - confirm the card switched
+    // to the new period's feature breakdown, not still showing Last 3 Days'.
+    await waitFor(() => expect(adminBar.getByText('Long-Term Analysis')).toBeInTheDocument());
+    expect(adminBar.queryByText('Momentum Analysis')).not.toBeInTheDocument();
   });
 
   test('Last 3 Days sub-tab still ranks by combined FMP+Finnhub call volume', async () => {
