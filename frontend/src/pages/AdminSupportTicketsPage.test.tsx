@@ -6,7 +6,7 @@ import * as client from '../api/client';
 import AdminSupportTicketsPage from './AdminSupportTicketsPage';
 
 const SUMMARY = { counts: { new: 2, open: 1, on_hold: 0, closed: 5 } };
-const NEW_TICKET = { id: 't1', userId: 'u1', subject: 'Login trouble', status: 'new', createdAt: '2026-09-05T00:00:00Z', updatedAt: '2026-09-05T00:00:00Z' };
+const NEW_TICKET = { id: 't1', userId: 'u1', subject: 'Login trouble', status: 'new', createdAt: '2026-09-05T00:00:00Z', updatedAt: '2026-09-05T00:00:00Z', userEmail: 'requester@example.com' };
 const OPEN_TICKET = { ...NEW_TICKET, id: 't1', status: 'open' };
 const THREAD = {
   ticket: OPEN_TICKET,
@@ -51,6 +51,21 @@ describe('AdminSupportTicketsPage', () => {
     renderPage();
     await userEvent.click(await screen.findByTestId('admin-support-summary-tile-new'));
     expect(await screen.findByTestId('admin-support-list-row-t1')).toHaveTextContent('Login trouble');
+  });
+
+  test('the list row shows who the ticket is from', async () => {
+    mockRoutedFetch();
+    renderPage();
+    await userEvent.click(await screen.findByTestId('admin-support-summary-tile-new'));
+    expect(await screen.findByTestId('admin-support-list-row-t1')).toHaveTextContent('requester@example.com');
+  });
+
+  test('the detail header shows who the ticket is from', async () => {
+    mockRoutedFetch();
+    renderPage();
+    await userEvent.click(await screen.findByTestId('admin-support-summary-tile-new'));
+    await userEvent.click(await screen.findByTestId('admin-support-list-row-t1'));
+    expect(await screen.findByTestId('admin-support-detail')).toHaveTextContent('requester@example.com');
   });
 
   test('Back from the list returns to the summary', async () => {

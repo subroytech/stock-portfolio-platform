@@ -97,6 +97,7 @@ function ListView({ status, onBack, onSelectTicket }: { status: TicketStatus; on
               <span className="font-medium text-text-primary">{ticket.subject}</span>
               <span className="text-xs text-text-secondary">Updated {formatAsOf(ticket.updatedAt)}</span>
             </div>
+            <p className="mt-0.5 text-xs text-text-secondary">From {ticket.userEmail}</p>
           </button>
         ))}
       </div>
@@ -128,11 +129,14 @@ function DetailView({ ticketId, onBack }: { ticketId: string; onBack: () => void
 
       {data && (
         <>
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <h1 className="text-lg font-semibold text-text-primary">{data.ticket.subject}</h1>
-            <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${statusColorClass(data.ticket.status)}`}>
-              {STATUS_LABELS[data.ticket.status]}
-            </span>
+          <div className="mb-3">
+            <div className="flex items-center justify-between gap-2">
+              <h1 className="text-lg font-semibold text-text-primary">{data.ticket.subject}</h1>
+              <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${statusColorClass(data.ticket.status)}`}>
+                {STATUS_LABELS[data.ticket.status]}
+              </span>
+            </div>
+            <p className="text-xs text-text-secondary">From {data.ticket.userEmail}</p>
           </div>
 
           <div className="mb-4 space-y-3">

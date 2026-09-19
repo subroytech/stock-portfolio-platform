@@ -2,13 +2,17 @@ jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn(
 import { pool } from '../src/db/pool';
 import {
   createTicket, listTicketsForUser, listAllTickets, getSummaryCounts, getTicketById,
-  getMessagesForTicket, markOpenedByAdmin, addMessage, getNewTicketCount,
+  getMessagesForTicket, markOpenedByAdmin, markOpenedByUser, addMessage, getNewTicketCount,
 } from '../src/services/supportTicket.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockConnect = pool.connect as unknown as jest.Mock;
 
 const TICKET_ROW = { id: 't1', user_id: 'u1', subject: 'Help', status: 'new', created_at: '2026-09-05T00:00:00Z', updated_at: '2026-09-05T00:00:00Z' };
+// The 2 columns only the JOIN-based read queries (listTicketsForUser/listAllTickets/getTicketById)
+// select - createTicket/addMessage's own bare RETURNING never includes them, so their tests keep
+// using TICKET_ROW as-is (toEqual ignores the resulting undefined userEmail/unreadByUser).
+const TICKET_ROW_WITH_JOIN = { ...TICKET_ROW, user_email: 'user@example.com', unread_by_user: true };
 
 describe('createTicket', () => {
   test('transactionally inserts the ticket then its first message, and returns the ticket', async () => {
@@ -62,9 +66,18 @@ describe('listTicketsForUser / listAllTickets', () => {
     const tickets = await listTicketsForUser('u1');
     expect(tickets).toEqual([{ id: 't1', userId: 'u1', subject: 'Help', status: 'new', createdAt: TICKET_ROW.created_at, updatedAt: TICKET_ROW.updated_at }]);
     const [sql, params] = mockQuery.mock.calls[0];
-    expect(sql).toContain('WHERE user_id = $1');
-    expect(sql).toContain('ORDER BY updated_at DESC');
+    expect(sql).toContain('JOIN users u ON u.id = t.user_id');
+    expect(sql).toContain('WHERE t.user_id = $1');
+    expect(sql).toContain('ORDER BY t.updated_at DESC');
     expect(params).toEqual(['u1']);
+  });
+
+  test('listTicketsForUser maps the joined email and derived unread flag through', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [TICKET_ROW_WITH_JOIN] });
+    const [ticket] = await listTicketsForUser('u1');
+    expect(ticket.userEmail).toBe('user@example.com');
+    expect(ticket.unreadByUser).toBe(true);
   });
 
   test('listAllTickets with no status returns every ticket', async () => {
@@ -80,7 +93,7 @@ describe('listTicketsForUser / listAllTickets', () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     await listAllTickets('on_hold');
     const [sql, params] = mockQuery.mock.calls[0];
-    expect(sql).toContain('WHERE status = $1');
+    expect(sql).toContain('WHERE t.status = $1');
     expect(params).toEqual(['on_hold']);
   });
 });
@@ -123,6 +136,18 @@ describe('markOpenedByAdmin', () => {
   });
 });
 
+describe('markOpenedByUser', () => {
+  test('stamps user_last_read_at, scoped to both the ticket id and the owner', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    await markOpenedByUser('t1', 'u1');
+    const [sql, params] = mockQuery.mock.calls[0];
+    expect(sql).toContain('SET user_last_read_at = now()');
+    expect(sql).toContain('WHERE id = $1 AND user_id = $2');
+    expect(params).toEqual(['t1', 'u1']);
+  });
+});
+
 describe('addMessage', () => {
   function mockAddMessageTransaction() {
     const client = {
@@ -138,18 +163,20 @@ describe('addMessage', () => {
     return client;
   }
 
-  test('isOwner: true always reopens the ticket to \'new\', regardless of its prior status', async () => {
+  test('isOwner: true always reopens the ticket to \'new\', regardless of its prior status, and stamps user_last_read_at', async () => {
     const client = mockAddMessageTransaction();
     await addMessage('t1', 'u1', 'more info', { isOwner: true });
     const [updateSql, updateParams] = client.query.mock.calls[2];
     expect(updateSql).toContain('SET status = $2');
+    expect(updateSql).toContain('user_last_read_at = now()');
     expect(updateParams).toEqual(['t1', 'new']);
   });
 
-  test('isOwner: false sets the admin-chosen nextStatus', async () => {
+  test('isOwner: false sets the admin-chosen nextStatus and never touches user_last_read_at', async () => {
     const client = mockAddMessageTransaction();
     await addMessage('t1', 'admin-1', 'reply', { isOwner: false, nextStatus: 'on_hold' });
-    const [, updateParams] = client.query.mock.calls[2];
+    const [updateSql, updateParams] = client.query.mock.calls[2];
+    expect(updateSql).not.toContain('user_last_read_at');
     expect(updateParams).toEqual(['t1', 'on_hold']);
   });
 

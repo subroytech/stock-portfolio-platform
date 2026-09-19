@@ -45,16 +45,21 @@ export async function listMyTickets(req: Request, res: Response, next: NextFunct
 
 // Ownership-checked (404, not 403, if the ticket isn't the caller's - never reveal that a
 // ticket id belonging to someone else even exists). No status side effect - a user viewing
-// their own ticket doesn't mean "read by admin".
+// their own ticket doesn't mean "read by admin" - but it IS the read-receipt for the owner's
+// own unread-reply indicator (markOpenedByUser), mirroring getTicketAdmin's markOpenedByAdmin
+// below: mark read, then re-fetch so the response already reflects unreadByUser: false.
 export async function getMyTicket(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const userId = getUserId(req);
     const ticket = await supportTicketService.getTicketById(String(req.params.id));
-    if (!ticket || ticket.userId !== getUserId(req)) {
+    if (!ticket || ticket.userId !== userId) {
       res.status(404).json({ error: 'No ticket found with that id.' });
       return;
     }
+    await supportTicketService.markOpenedByUser(ticket.id, userId);
+    const refreshed = await supportTicketService.getTicketById(ticket.id);
     const messages = await supportTicketService.getMessagesForTicket(ticket.id);
-    res.json({ ticket, messages });
+    res.json({ ticket: refreshed, messages });
   } catch (err) {
     next(err);
   }

@@ -101,6 +101,26 @@ describe('SupportWidget', () => {
     expect(await screen.findByTestId('support-ticket-list')).toBeInTheDocument();
   });
 
+  test('shows an unread badge on the trigger button when a ticket has an unseen admin reply', async () => {
+    mockRoutedFetch({ mine: { tickets: [{ ...TICKET, unreadByUser: true }] } });
+    renderWidget();
+    expect(await screen.findByTestId('support-widget-unread-count')).toHaveTextContent('1');
+  });
+
+  test('no unread badge when nothing is unread', async () => {
+    mockRoutedFetch({ mine: { tickets: [{ ...TICKET, unreadByUser: false }] } });
+    renderWidget();
+    await screen.findByTestId('support-widget-trigger');
+    expect(screen.queryByTestId('support-widget-unread-count')).not.toBeInTheDocument();
+  });
+
+  test('an unread ticket shows a dot next to its subject in the list', async () => {
+    mockRoutedFetch({ mine: { tickets: [{ ...TICKET, unreadByUser: true }] } });
+    renderWidget();
+    await userEvent.click(screen.getByTestId('support-widget-trigger'));
+    expect(await screen.findByTestId('support-ticket-unread-dot-t1')).toBeInTheDocument();
+  });
+
   test('Close resets the widget back to its initial state', async () => {
     mockRoutedFetch();
     renderWidget();

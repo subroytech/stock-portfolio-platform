@@ -13,6 +13,11 @@ export interface SupportTicket {
   status: TicketStatus;
   createdAt: string;
   updatedAt: string;
+  // Who this ticket is from (admin's list/detail views) and whether the owner has seen the
+  // latest message yet (drives SupportWidget's own unread badge/dot) - both populated by every
+  // list/detail endpoint below.
+  userEmail?: string;
+  unreadByUser?: boolean;
 }
 
 export interface SupportTicketMessage {
@@ -41,10 +46,19 @@ export function useCreateTicket() {
   });
 }
 
+// enabled: only fetched once a ticket is actually selected - opening it is what triggers the
+// server-side markOpenedByUser read-receipt, so this also invalidates the ticket list (the
+// SupportWidget trigger button's unread badge count is derived from it), mirroring
+// useAdminTicketDetail's own invalidation below.
 export function useMyTicketDetail(ticketId: string | null) {
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: ['supportTickets', 'mine', ticketId],
-    queryFn: () => apiFetch<{ ticket: SupportTicket; messages: SupportTicketMessage[] }>(`/support/tickets/mine/${ticketId}`),
+    queryFn: async () => {
+      const result = await apiFetch<{ ticket: SupportTicket; messages: SupportTicketMessage[] }>(`/support/tickets/mine/${ticketId}`);
+      queryClient.invalidateQueries({ queryKey: ['supportTickets', 'mine'], exact: true });
+      return result;
+    },
     enabled: ticketId != null,
   });
 }

@@ -8,6 +8,7 @@ jest.mock('../src/services/supportTicket.service', () => ({
   getTicketById: jest.fn(),
   getMessagesForTicket: jest.fn(),
   markOpenedByAdmin: jest.fn(),
+  markOpenedByUser: jest.fn(),
   addMessage: jest.fn(),
 }));
 // This router's admin routes are real requests against the real /support router (mounted with
@@ -32,6 +33,7 @@ const mockGetSummaryCounts = supportTicketService.getSummaryCounts as jest.Mock;
 const mockGetTicketById = supportTicketService.getTicketById as jest.Mock;
 const mockGetMessagesForTicket = supportTicketService.getMessagesForTicket as jest.Mock;
 const mockMarkOpenedByAdmin = supportTicketService.markOpenedByAdmin as jest.Mock;
+const mockMarkOpenedByUser = supportTicketService.markOpenedByUser as jest.Mock;
 const mockAddMessage = supportTicketService.addMessage as jest.Mock;
 
 const authCookie = `auth_token=${signToken('u1')}`;
@@ -106,6 +108,15 @@ describe('GET /support/tickets/mine/:id', () => {
     expect(res.body.ticket).toEqual(TICKET);
     expect(res.body.messages).toHaveLength(1);
     expect(mockMarkOpenedByAdmin).not.toHaveBeenCalled();
+  });
+
+  test('200 and marks it opened by the owner - the read-receipt side effect for the unread indicator', async () => {
+    mockGetTicketById.mockResolvedValueOnce(TICKET).mockResolvedValueOnce({ ...TICKET, unreadByUser: false });
+    mockGetMessagesForTicket.mockResolvedValue([]);
+    const res = await request(app).get('/support/tickets/mine/t1').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(mockMarkOpenedByUser).toHaveBeenCalledWith('t1', 'u1');
+    expect(res.body.ticket.unreadByUser).toBe(false);
   });
 });
 

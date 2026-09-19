@@ -14,6 +14,13 @@ export interface SupportTicket {
   status: TicketStatus;
   createdAt: string;
   updatedAt: string;
+  // Both populated by the 3 read queries below (a JOIN + a derived comparison) - undefined on
+  // the bare INSERT/UPDATE `RETURNING` values from createTicket()/addMessage(), which never
+  // need either field. userEmail is never sensitive beyond what the ticket's own owner or an
+  // already support:manage-gated admin can already see, so it's cheap to compute unconditionally
+  // rather than splitting into a separate admin-only type.
+  userEmail?: string;
+  unreadByUser?: boolean;
 }
 
 export interface SupportTicketMessage {
@@ -24,8 +31,15 @@ export interface SupportTicketMessage {
   createdAt: string;
 }
 
-function rowToTicket(r: { id: string; user_id: string; subject: string; status: string; created_at: string; updated_at: string }): SupportTicket {
-  return { id: r.id, userId: r.user_id, subject: r.subject, status: r.status as TicketStatus, createdAt: r.created_at, updatedAt: r.updated_at };
+function rowToTicket(r: {
+  id: string; user_id: string; subject: string; status: string; created_at: string; updated_at: string;
+  user_email?: string; unread_by_user?: boolean;
+}): SupportTicket {
+  return {
+    id: r.id, userId: r.user_id, subject: r.subject, status: r.status as TicketStatus,
+    createdAt: r.created_at, updatedAt: r.updated_at,
+    userEmail: r.user_email, unreadByUser: r.unread_by_user,
+  };
 }
 
 function rowToMessage(r: { id: string; ticket_id: string; sender_user_id: string | null; body: string; created_at: string }): SupportTicketMessage {
@@ -59,10 +73,17 @@ export async function createTicket(userId: string, subject: string, body: string
   }
 }
 
+// JOIN, not LEFT JOIN - user_id is NOT NULL REFERENCES users(id) ON DELETE CASCADE, so it can
+// never dangle.
+const TICKET_SELECT = `
+  SELECT t.id, t.user_id, t.subject, t.status, t.created_at, t.updated_at,
+         u.email AS user_email, (t.user_last_read_at < t.updated_at) AS unread_by_user
+  FROM users_support_tickets t
+  JOIN users u ON u.id = t.user_id`;
+
 export async function listTicketsForUser(userId: string): Promise<SupportTicket[]> {
   const { rows } = await pool.query(
-    `SELECT id, user_id, subject, status, created_at, updated_at
-     FROM users_support_tickets WHERE user_id = $1 ORDER BY updated_at DESC`,
+    `${TICKET_SELECT} WHERE t.user_id = $1 ORDER BY t.updated_at DESC`,
     [userId],
   );
   return rows.map(rowToTicket);
@@ -71,13 +92,11 @@ export async function listTicketsForUser(userId: string): Promise<SupportTicket[
 export async function listAllTickets(status?: TicketStatus): Promise<SupportTicket[]> {
   const { rows } = status
     ? await pool.query(
-        `SELECT id, user_id, subject, status, created_at, updated_at
-         FROM users_support_tickets WHERE status = $1 ORDER BY updated_at DESC`,
+        `${TICKET_SELECT} WHERE t.status = $1 ORDER BY t.updated_at DESC`,
         [status],
       )
     : await pool.query(
-        `SELECT id, user_id, subject, status, created_at, updated_at
-         FROM users_support_tickets ORDER BY updated_at DESC`,
+        `${TICKET_SELECT} ORDER BY t.updated_at DESC`,
       );
   return rows.map(rowToTicket);
 }
@@ -95,7 +114,7 @@ export async function getSummaryCounts(): Promise<Record<TicketStatus, number>> 
 
 export async function getTicketById(ticketId: string): Promise<SupportTicket | null> {
   const { rows } = await pool.query(
-    `SELECT id, user_id, subject, status, created_at, updated_at FROM users_support_tickets WHERE id = $1`,
+    `${TICKET_SELECT} WHERE t.id = $1`,
     [ticketId],
   );
   return rows[0] ? rowToTicket(rows[0]) : null;
@@ -121,6 +140,18 @@ export async function markOpenedByAdmin(ticketId: string): Promise<void> {
   );
 }
 
+// The read-receipt side effect for the ticket's owner opening it, mirroring markOpenedByAdmin
+// above - but unlike that one, this never touches status (status is admin-owned workflow state;
+// user_last_read_at is a completely separate "has the owner seen the latest message" flag - see
+// migration 043). WHERE ... AND user_id = $2 is defense in depth; the caller already
+// ownership-checks before calling this.
+export async function markOpenedByUser(ticketId: string, userId: string): Promise<void> {
+  await pool.query(
+    `UPDATE users_support_tickets SET user_last_read_at = now() WHERE id = $1 AND user_id = $2`,
+    [ticketId, userId],
+  );
+}
+
 // isOwner=true (the ticket's own user replying) always reopens to 'new' - this IS the reopen
 // mechanic, not a separate button. isOwner=false (admin replying) sets nextStatus instead.
 export async function addMessage(
@@ -143,8 +174,14 @@ export async function addMessage(
        RETURNING id, ticket_id, sender_user_id, body, created_at`,
       [ticketId, senderUserId, body],
     );
+    // The owner replying means they're caught up on everything up to and including this message
+    // - stamp user_last_read_at in the same UPDATE as updated_at so both land equal (read, not
+    // unread). An admin reply leaves user_last_read_at untouched, so it lags behind updated_at
+    // and reads as unread regardless of which of the 3 admin-settable statuses was chosen.
     await client.query(
-      `UPDATE users_support_tickets SET status = $2, updated_at = now() WHERE id = $1`,
+      options.isOwner
+        ? `UPDATE users_support_tickets SET status = $2, updated_at = now(), user_last_read_at = now() WHERE id = $1`
+        : `UPDATE users_support_tickets SET status = $2, updated_at = now() WHERE id = $1`,
       [ticketId, nextStatus],
     );
     await client.query('COMMIT');

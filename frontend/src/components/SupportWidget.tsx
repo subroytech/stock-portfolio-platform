@@ -27,6 +27,13 @@ export default function SupportWidget() {
   const [isOpen, setIsOpen] = useState(false);
   const [showNewForm, setShowNewForm] = useState(false);
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
+  // Fetched unconditionally (not just while the modal is open) so the trigger button's own
+  // unread badge is visible before it's ever clicked - the mirror of UserPersonaBadge.tsx's
+  // admin-side newSupportTicketCount badge, but living here instead: UserPersonaBadge isn't
+  // rendered on PendingReviewPage.tsx, while this component is the one thing present everywhere
+  // a user can see their own tickets.
+  const { data: myTickets } = useMyTickets();
+  const unreadCount = myTickets?.tickets?.filter((t) => t.unreadByUser).length ?? 0;
 
   function close() {
     setIsOpen(false);
@@ -36,19 +43,30 @@ export default function SupportWidget() {
 
   return (
     <>
-      {/* Styled as a link, not a nav action like "API Keys"/"Admin" (text-text-secondary,
-          color-only-on-hover) - accent-colored at rest with an underline on hover, same
-          treatment as LoginPage.tsx's "Forgot password?"/"Sign up", so it reads as clickable
-          before you even touch it. Still a <button>, not an <a>, since it opens a modal rather
-          than navigating - same button-styled-as-link precedent "API Keys" already uses. */}
-      <button
-        type="button"
-        onClick={() => setIsOpen(true)}
-        data-testid="support-widget-trigger"
-        className="text-sm text-accent hover:underline"
-      >
-        Support
-      </button>
+      <div className="relative inline-block">
+        {/* Styled as a link, not a nav action like "API Keys"/"Admin" (text-text-secondary,
+            color-only-on-hover) - accent-colored at rest with an underline on hover, same
+            treatment as LoginPage.tsx's "Forgot password?"/"Sign up", so it reads as clickable
+            before you even touch it. Still a <button>, not an <a>, since it opens a modal rather
+            than navigating - same button-styled-as-link precedent "API Keys" already uses. */}
+        <button
+          type="button"
+          onClick={() => setIsOpen(true)}
+          data-testid="support-widget-trigger"
+          className="text-sm text-accent hover:underline"
+        >
+          Support
+        </button>
+        {unreadCount > 0 && (
+          <span
+            data-testid="support-widget-unread-count"
+            title={`${unreadCount} ticket${unreadCount === 1 ? '' : 's'} with a new reply`}
+            className="absolute -right-3 -top-2 flex h-[1.125rem] min-w-[1.125rem] items-center justify-center rounded-full bg-danger px-1 text-[.65rem] font-bold leading-none text-white"
+          >
+            {unreadCount}
+          </span>
+        )}
+      </div>
 
       {isOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={close}>
@@ -130,7 +148,16 @@ function TicketList({ onSelect, onNew }: { onSelect: (id: string) => void; onNew
             className="block w-full border-b border-border py-3 text-left hover:bg-bg-primary"
           >
             <div className="flex items-center justify-between gap-2">
-              <span className="font-medium text-text-primary">{ticket.subject}</span>
+              <span className="flex items-center gap-1.5 font-medium text-text-primary">
+                {ticket.unreadByUser && (
+                  <span
+                    data-testid={`support-ticket-unread-dot-${ticket.id}`}
+                    title="New reply"
+                    className="h-2 w-2 shrink-0 rounded-full bg-danger"
+                  />
+                )}
+                {ticket.subject}
+              </span>
               <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${statusColorClass(ticket.status)}`}>
                 {formatStatus(ticket.status)}
               </span>
