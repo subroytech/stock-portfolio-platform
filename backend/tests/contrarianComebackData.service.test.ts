@@ -5,6 +5,12 @@
 // default mode, "every call attempted" still equals "every call counted", so the pre-existing
 // apiCallCounts assertions are untouched. isMarketOpenNow defaults to false (market closed) so
 // quote behaves like every other cacheable call unless a specific test says otherwise.
+//
+// jest.requireActual below still loads the real fmpDailyCache.service.ts, which imports the
+// real ../db/pool - that throws at module-load time when DATABASE_URL isn't set (CI's backend
+// job never sets it, by design - unit tests shouldn't need a real DB). Mocking pool directly
+// here is what makes that load safe.
+jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
 jest.mock('../src/services/fmpDailyCache.service', () => ({
   ...jest.requireActual('../src/services/fmpDailyCache.service'),
   getOrFetch: jest.fn(),

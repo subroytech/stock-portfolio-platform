@@ -1,3 +1,8 @@
+// The auto-mock below still loads the real fmpDailyCache.service.ts to introspect its shape,
+// which imports the real ../db/pool - that throws at module-load time when DATABASE_URL isn't
+// set (CI's backend job never sets it, by design - unit tests shouldn't need a real DB). Mocking
+// pool directly here is what makes that load safe.
+jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
 jest.mock('../src/services/fmpDailyCache.service');
 
 import { fmpGet, getProfiles, getQuotes, getHistorical } from '../src/services/marketData.service';
