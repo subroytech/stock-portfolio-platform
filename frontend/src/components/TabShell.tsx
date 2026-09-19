@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { hasAdminConsoleAccess, useLogout, useSession } from '../api/auth';
 import { ApiKeysModalContext } from '../lib/apiKeysModal';
@@ -46,6 +46,18 @@ export default function TabShell() {
   const [showApiKeys, setShowApiKeys] = useState(false);
   const [handoff, setHandoff] = useState<TickerHandoff | null>(null);
   const requestIdRef = useRef(0);
+
+  // Every tab used to mount unconditionally at all times (only CSS `hidden` toggled which one was
+  // visible) so switching tabs never reset a tool's in-progress state - but that also meant a
+  // tab's queries fired the instant you logged in, before you ever clicked it (real bug found
+  // live: Stock Analysis quadrants holding leftover tickers re-fetched on every login with zero
+  // user action). visitedTabs only ever grows, so once a path is added it stays mounted for the
+  // rest of the session exactly as before - this only defers the *first* mount until the user
+  // actually navigates there.
+  const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set([location.pathname]));
+  useEffect(() => {
+    setVisitedTabs((prev) => (prev.has(location.pathname) ? prev : new Set(prev).add(location.pathname)));
+  }, [location.pathname]);
 
   // Portfolio Upload - Flex (CLAUDE.md's "Portfolio Upload - Flex" section) - the Portfolio
   // tab's Legacy/Flex sub-tabs, each hidden entirely (not disabled) when the caller lacks the
@@ -160,16 +172,24 @@ export default function TabShell() {
             </div>
           )}
         </div>
-        <div data-testid="tab-panel-long-term-analysis" className={location.pathname === '/long-term-analysis' ? '' : 'hidden'}><LongTermAnalysisPage /></div>
-        <div data-testid="tab-panel-contrarian-finder" className={location.pathname === '/contrarian-finder' ? '' : 'hidden'}><ContrarianFinderPage /></div>
-        <div data-testid="tab-panel-contrarian-comeback" className={location.pathname === '/contrarian-comeback' ? '' : 'hidden'}><ContrarianComebackPage /></div>
-        <div data-testid="tab-panel-momentum" className={location.pathname === '/momentum' ? '' : 'hidden'}><MomentumPage /></div>
+        <div data-testid="tab-panel-long-term-analysis" className={location.pathname === '/long-term-analysis' ? '' : 'hidden'}>
+          {visitedTabs.has('/long-term-analysis') && <LongTermAnalysisPage />}
+        </div>
+        <div data-testid="tab-panel-contrarian-finder" className={location.pathname === '/contrarian-finder' ? '' : 'hidden'}>
+          {visitedTabs.has('/contrarian-finder') && <ContrarianFinderPage />}
+        </div>
+        <div data-testid="tab-panel-contrarian-comeback" className={location.pathname === '/contrarian-comeback' ? '' : 'hidden'}>
+          {visitedTabs.has('/contrarian-comeback') && <ContrarianComebackPage />}
+        </div>
+        <div data-testid="tab-panel-momentum" className={location.pathname === '/momentum' ? '' : 'hidden'}>
+          {visitedTabs.has('/momentum') && <MomentumPage />}
+        </div>
         {/* !sessionLoading guard mirrors AdminPage.tsx's own redirect-on-no-access precedent -
             without it, a user who DOES hold stock_analysis:view would get bounced away on
             every direct visit, before the session query has even resolved. */}
         {location.pathname === '/stock-analysis' && !sessionLoading && !canStockAnalysis && <Navigate to="/" replace />}
         <div data-testid="tab-panel-stock-analysis" className={location.pathname === '/stock-analysis' ? '' : 'hidden'}>
-          {canStockAnalysis && <StockAnalysisPage />}
+          {canStockAnalysis && visitedTabs.has('/stock-analysis') && <StockAnalysisPage />}
         </div>
       </div>
 

@@ -50,13 +50,32 @@ describe('TabShell', () => {
     expect(screen.getByRole('button', { name: 'Log out' })).toBeInTheDocument();
   });
 
-  test('every tab panel is mounted from the start, only the active one is visible', () => {
+  test('a tab panel does not mount until visited, then stays mounted (hidden) after switching away', async () => {
     renderShell('/momentum');
+    // The wrapper div (its data-testid, driving the hidden/visible CSS toggle) always renders,
+    // but the page component inside it - and therefore any query it would fire on mount - does
+    // not exist until that tab has actually been visited. Real bug this guards against: a tab's
+    // queries firing before it's ever clicked (Stock Analysis quadrants re-fetching leftover
+    // tickers on every login). Portfolio itself is deliberately never gated (it's the universal
+    // landing route, and its own portfolio-list fetch is legitimate non-FMP data), so it stays
+    // always-mounted-with-content as before.
     expect(screen.getByTestId('tab-panel-portfolio')).toHaveClass('hidden');
+    expect(within(screen.getByTestId('tab-panel-portfolio')).getByText('Select or create a portfolio to get started.')).toBeInTheDocument();
+    expect(screen.getByTestId('tab-panel-contrarian-finder')).toBeEmptyDOMElement();
+    expect(screen.getByTestId('tab-panel-long-term-analysis')).toBeEmptyDOMElement();
+    expect(screen.getByTestId('tab-panel-contrarian-comeback')).toBeEmptyDOMElement();
     expect(screen.getByTestId('tab-panel-momentum')).not.toHaveClass('hidden');
+    expect(screen.getByTestId('tab-panel-momentum')).not.toBeEmptyDOMElement();
+
+    await userEvent.click(screen.getByRole('link', { name: 'Contrarian Finder' }));
+    expect(screen.getByTestId('tab-panel-contrarian-finder')).not.toHaveClass('hidden');
+    expect(screen.getByTestId('tab-panel-contrarian-finder')).not.toBeEmptyDOMElement();
+    expect(screen.getByTestId('tab-panel-momentum')).toHaveClass('hidden');
+
+    await userEvent.click(screen.getByRole('link', { name: 'Momentum Analysis' }));
+    expect(screen.getByTestId('tab-panel-momentum')).not.toHaveClass('hidden');
+    // Once visited, a panel is never un-mounted again - just hidden, same as before this change.
     expect(screen.getByTestId('tab-panel-contrarian-finder')).toHaveClass('hidden');
-    expect(screen.getByTestId('tab-panel-long-term-analysis')).toHaveClass('hidden');
-    expect(screen.getByTestId('tab-panel-contrarian-comeback')).toHaveClass('hidden');
   });
 
   test('switching away from a tab and back preserves its in-progress state', async () => {

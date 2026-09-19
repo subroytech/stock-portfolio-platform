@@ -102,4 +102,41 @@ describe('getOrFetch', () => {
     expect(mockQuery.mock.calls[0][0]).toContain('INSERT INTO m_fmp_daily_cache');
     expect(mockQuery.mock.calls[0][1][3]).toBe(today);
   });
+
+  test('two concurrent calls for the same symbol+api coalesce into a single fetchFn call', async () => {
+    // Both calls' SELECT resolves only after both have already started (simulating requests
+    // arriving before either has written a row) - a manually-controlled promise stands in for
+    // the mocked SELECT so neither call can race ahead of the other.
+    let resolveSelect!: (v: { rows: unknown[] }) => void;
+    mockQuery
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSelect = resolve; }))
+      .mockResolvedValueOnce({ rows: [] }); // INSERT/UPSERT
+    const fetchFn = jest.fn().mockResolvedValue({ price: 150 });
+
+    const call1 = getOrFetch('AAPL', 'quote', 'GET /quote?symbol=AAPL', fetchFn);
+    const call2 = getOrFetch('AAPL', 'quote', 'GET /quote?symbol=AAPL', fetchFn);
+    resolveSelect({ rows: [] });
+
+    const [result1, result2] = await Promise.all([call1, call2]);
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(result1).toEqual({ data: { price: 150 }, wasCached: false });
+    expect(result2).toEqual(result1);
+    // Only one SELECT + one INSERT - the second caller never issued its own query at all.
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+  });
+
+  test('a later call for the same key after the first has settled starts a fresh fetch', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    const fetchFn = jest.fn().mockResolvedValue({ price: 150 });
+
+    await getOrFetch('AAPL', 'quote', 'GET /quote?symbol=AAPL', fetchFn);
+    await getOrFetch('AAPL', 'quote', 'GET /quote?symbol=AAPL', fetchFn);
+
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
 });

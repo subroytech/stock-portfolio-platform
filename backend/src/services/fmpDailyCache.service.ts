@@ -47,6 +47,15 @@ export interface GetOrFetchResult<T> {
   wasCached: boolean;
 }
 
+// Coalesces concurrent callers for the same (symbol, apiName): without this, two requests that
+// both arrive before either one's write lands would both see a cache miss and both make a real,
+// billed FMP call (found live via React StrictMode's dev-only double-mount, but the same race can
+// hit in production too - e.g. two users looking up the same uncached symbol at once). Keyed
+// process-wide, not per-request - `inFlight.get`/`.set` run synchronously with no `await` between
+// them, so on Node's single-threaded event loop whichever call reaches this function first always
+// wins the race deterministically.
+const inFlight = new Map<string, Promise<GetOrFetchResult<unknown>>>();
+
 export async function getOrFetch<T>(
   symbol: string,
   apiName: string,
@@ -54,26 +63,41 @@ export async function getOrFetch<T>(
   fetchFn: () => Promise<T>,
   opts: GetOrFetchOptions = {},
 ): Promise<GetOrFetchResult<T>> {
-  const today = getEasternDateString();
-
-  if (!opts.forceFresh) {
-    const { rows } = await pool.query<{ api_result: T; cache_date: string }>(
-      'SELECT api_result, cache_date::text FROM m_fmp_daily_cache WHERE symbol = $1 AND api_name = $2',
-      [symbol, apiName],
-    );
-    const existing = rows[0];
-    if (existing && existing.cache_date === today) {
-      return { data: existing.api_result, wasCached: true };
-    }
+  const key = `${symbol}:${apiName}`;
+  const existing = inFlight.get(key);
+  if (existing) {
+    return existing as Promise<GetOrFetchResult<T>>;
   }
 
-  const data = await fetchFn();
-  await pool.query(
-    `INSERT INTO m_fmp_daily_cache (symbol, api_name, api_call_description, cache_date, api_result, updated_at)
-     VALUES ($1, $2, $3, $4, $5, now())
-     ON CONFLICT (symbol, api_name)
-     DO UPDATE SET api_call_description = $3, cache_date = $4, api_result = $5, updated_at = now()`,
-    [symbol, apiName, description, today, JSON.stringify(data)],
-  );
-  return { data, wasCached: false };
+  const promise = (async (): Promise<GetOrFetchResult<T>> => {
+    const today = getEasternDateString();
+
+    if (!opts.forceFresh) {
+      const { rows } = await pool.query<{ api_result: T; cache_date: string }>(
+        'SELECT api_result, cache_date::text FROM m_fmp_daily_cache WHERE symbol = $1 AND api_name = $2',
+        [symbol, apiName],
+      );
+      const row = rows[0];
+      if (row && row.cache_date === today) {
+        return { data: row.api_result, wasCached: true };
+      }
+    }
+
+    const data = await fetchFn();
+    await pool.query(
+      `INSERT INTO m_fmp_daily_cache (symbol, api_name, api_call_description, cache_date, api_result, updated_at)
+       VALUES ($1, $2, $3, $4, $5, now())
+       ON CONFLICT (symbol, api_name)
+       DO UPDATE SET api_call_description = $3, cache_date = $4, api_result = $5, updated_at = now()`,
+      [symbol, apiName, description, today, JSON.stringify(data)],
+    );
+    return { data, wasCached: false };
+  })();
+
+  inFlight.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    inFlight.delete(key);
+  }
 }
