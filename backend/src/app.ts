@@ -19,6 +19,7 @@ import configPropertyRoutes from './routes/configProperty.routes';
 import supportTicketRoutes from './routes/supportTicket.routes';
 import usageAuditRoutes from './routes/usageAudit.routes';
 import flexQuotaRoutes from './routes/flexQuota.routes';
+import candlestickRoutes from './routes/candlestick.routes';
 import errorHandler from './middleware/errorHandler';
 import rateLimiters from './middleware/rateLimit';
 import requireAuth from './middleware/requireAuth';
@@ -85,6 +86,11 @@ app.use('/config-properties', requireAuth, rateLimiters, configPropertyRoutes);
 app.use('/support', requireAuth, rateLimiters, supportTicketRoutes);
 app.use('/usage-audit', requireAuth, rateLimiters, usageAuditRoutes);
 app.use('/flex-quota', requireAuth, rateLimiters, flexQuotaRoutes);
+// Stock Analysis - Candlestick Charts - requireAuth only, no dedicated permission, same
+// precedent as /stock-preview and /momentum: the frontend's stock_analysis:view gate is what
+// actually restricts visibility, this route just needs a known caller (for the per-user rate
+// limit on POST .../refresh).
+app.use('/candlestick', requireAuth, rateLimiters, candlestickRoutes);
 
 app.use(errorHandler);
 

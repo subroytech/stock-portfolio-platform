@@ -101,3 +101,23 @@ export async function getOrFetch<T>(
     inFlight.delete(key);
   }
 }
+
+export interface PeekResult<T> {
+  data: T;
+  updatedAt: string;
+  wasCachedToday: boolean;
+}
+
+// Read-only - never calls FMP, unlike getOrFetch above. Added for the Stock Analysis candlestick
+// feature's '1day' path (candlestick.service.ts), which needs the "read without triggering a
+// fetch" half of getOrFetch's logic on its own - a real fetch there only ever happens through an
+// explicit, rate-limit-checked refresh action, never silently from a read.
+export async function peekCached<T>(symbol: string, apiName: string): Promise<PeekResult<T> | null> {
+  const { rows } = await pool.query<{ api_result: T; cache_date: string; updated_at: string }>(
+    'SELECT api_result, cache_date::text, updated_at FROM m_fmp_daily_cache WHERE symbol = $1 AND api_name = $2',
+    [symbol, apiName],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return { data: row.api_result, updatedAt: row.updated_at, wasCachedToday: row.cache_date === getEasternDateString() };
+}
