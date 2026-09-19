@@ -313,3 +313,130 @@ export function computeContrarianComebackGate(payload: ContrarianComebackData): 
 export function computeContrarianComebackSubmit(payload: ContrarianComebackSubmitPayload): Promise<ContrarianComebackSubmitResult> {
   return postToAnalysisService<ContrarianComebackSubmitResult>('/contrarian-comeback', payload);
 }
+
+// Mirrors analysis-service/app/models/momentum.py field-for-field (same
+// hand-maintained-duplicate caveat as the other proxied features above).
+// calcKellySizing has no equivalent here - it stays client-side only
+// (frontend/src/lib/kelly.ts), never round-trips through this gateway.
+export interface MomentumAnalysisPayload {
+  closes: number[];
+  lows: number[];
+  volumes: number[];
+  price: number;
+}
+
+export interface MomentumMacdResult {
+  macd: number;
+  signal: number;
+  hist: number;
+  prevMacd: number;
+  prevSig: number;
+}
+
+export interface MomentumBollingerBands {
+  upper: number;
+  mid: number;
+  lower: number;
+  bw: number;
+}
+
+export interface MomentumScoreBreakdown {
+  rsi: number;
+  macd: number;
+  volume: number;
+  trend: number;
+  riskReward: number;
+  total: number;
+}
+
+export interface MomentumAnalysisResult {
+  price: number;
+  sma20: number;
+  sma50: number;
+  rsi: number;
+  macd: MomentumMacdResult;
+  bb: MomentumBollingerBands;
+  volRatio: number;
+  dayChg: number;
+  score: MomentumScoreBreakdown;
+  signal: 'STRONG BUY' | 'BUY' | 'WATCH' | 'AVOID';
+  entryLow: number;
+  entryHigh: number;
+  entryMid: number;
+  stopLoss: number;
+  target: number;
+  rr: number;
+  flags: string[];
+  extras: string[];
+}
+
+export function computeMomentumAnalysis(payload: MomentumAnalysisPayload): Promise<MomentumAnalysisResult> {
+  return postToAnalysisService<MomentumAnalysisResult>('/momentum-analysis', payload);
+}
+
+// Mirrors analysis-service/app/models/contrarian_finder.py field-for-field.
+// `source` on ContrarianFinderScanResult has no Python equivalent - Node
+// attaches it (from the UniverseEntry the batch was built from) after this
+// call returns, same as the sector-map fallback overlay.
+export interface ContrarianFinderRawQuoteData {
+  price: number | null;
+  marketCap: number | null;
+  name: string | null;
+  sector: string | null;
+  volume: number | null;
+  avgVolume: number | null;
+}
+
+export interface ContrarianFinderRawHistoricalBar {
+  date: string | null;
+  close: number | null;
+  low: number | null;
+}
+
+export interface ContrarianFinderRawStockData {
+  symbol: string;
+  quote: ContrarianFinderRawQuoteData | null;
+  historicalBars: ContrarianFinderRawHistoricalBar[];
+}
+
+export interface ContrarianFinderScanQuality {
+  minPrice: number;
+  minMarketCap: number;
+}
+
+export interface ContrarianFinderScanBatchPayload {
+  stocks: ContrarianFinderRawStockData[];
+  quality: ContrarianFinderScanQuality;
+  scanDays: number;
+}
+
+export interface ContrarianFinderStrengthSignal {
+  rsi: number;
+  sma20: number;
+  sma50: number;
+  rr: number;
+  kF: number;
+  halfKelly: number;
+}
+
+export interface ContrarianFinderScanResult {
+  symbol: string;
+  filterFail: boolean;
+  noData?: boolean;
+  error?: boolean;
+  name?: string;
+  sector?: string;
+  price?: number | null;
+  mktCap?: number | null;
+  volume?: number | null;
+  avgVol?: number | null;
+  changePct?: number;
+  changeSinceDate?: string;
+  mktClosed?: boolean;
+  strength?: ContrarianFinderStrengthSignal | null;
+  source?: string;
+}
+
+export function computeContrarianFinderScanBatch(payload: ContrarianFinderScanBatchPayload): Promise<ContrarianFinderScanResult[]> {
+  return postToAnalysisService<ContrarianFinderScanResult[]>('/contrarian-finder/scan-batch', payload);
+}

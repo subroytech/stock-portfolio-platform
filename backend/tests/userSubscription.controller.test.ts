@@ -13,7 +13,13 @@ const mockQuery = pool.query as unknown as jest.Mock;
 // .controller.ts, not auth.
 const authCookie = `auth_token=${signToken('user-1')}`;
 
-beforeEach(() => mockQuery.mockReset());
+beforeEach(() => {
+  mockQuery.mockReset();
+  // requirePermission('api_keys:manage_own') check on every route (Admin Console Phase 8) -
+  // default the caller to granted so tests below exercise the controller itself, unless a
+  // test overrides it.
+  mockQuery.mockResolvedValue({ rows: [{ '?column?': 1 }] });
+});
 
 describe('auth gating', () => {
   test('401 without a session cookie', async () => {
@@ -22,10 +28,19 @@ describe('auth gating', () => {
   });
 });
 
+describe('permission gating', () => {
+  test("403 when the caller doesn't have api_keys:manage_own", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).get('/subscriptions').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+  });
+});
+
 describe('GET /subscriptions', () => {
   test('200 with masked keys - response never contains the plaintext', async () => {
     const encrypted = encrypt('sk-super-secret-key');
-    mockQuery.mockResolvedValue({
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+    mockQuery.mockResolvedValueOnce({
       rows: [{
         provider: 'fmp', api_key_encrypted: encrypted, plan_tier: 'Basic', status: 'active',
         renewal_date: null, created_at: 't1', updated_at: 't1',
@@ -40,6 +55,7 @@ describe('GET /subscriptions', () => {
 
 describe('PUT /subscriptions/:provider', () => {
   test('200 on success - response never contains the plaintext key', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
     mockQuery.mockImplementation((_sql: string, params: unknown[]) => Promise.resolve({
       rows: [{
         provider: 'fmp', api_key_encrypted: params[2], plan_tier: params[3], status: params[4],
@@ -65,14 +81,16 @@ describe('PUT /subscriptions/:provider', () => {
 
 describe('DELETE /subscriptions/:provider', () => {
   test('200 on success', async () => {
-    mockQuery.mockResolvedValue({ rows: [{ id: '1' }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: '1' }] });
     const res = await request(app).delete('/subscriptions/fmp').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true });
   });
 
   test('404 when nothing matched', async () => {
-    mockQuery.mockResolvedValue({ rows: [] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+    mockQuery.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).delete('/subscriptions/fmp').set('Cookie', authCookie);
     expect(res.status).toBe(404);
   });

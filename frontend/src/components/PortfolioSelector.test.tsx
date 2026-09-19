@@ -7,7 +7,7 @@ import PortfolioSelector from './PortfolioSelector';
 import type { PortfolioSummary } from '../api/portfolios';
 
 const portfolios: PortfolioSummary[] = [
-  { id: '1', name: 'Fidelity', broker: null, createdAt: 't1', updatedAt: 't1' },
+  { id: '1', name: 'Fidelity', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: null, flexTemplateStatus: null },
 ];
 
 function renderSelector() {

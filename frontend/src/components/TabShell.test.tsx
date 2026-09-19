@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -19,34 +19,63 @@ function renderShell(initialPath = '/') {
 
 describe('TabShell', () => {
   beforeEach(() => {
+    // Long-Term Analysis/Contrarian Comeback's sub-tab history persists to
+    // sessionStorage (see lib/tickerHistory.ts) - clear it so one test's
+    // launched ticker can't leak into another as an already-cached sub-tab.
+    sessionStorage.clear();
     // Dashboard's PortfolioSelector fires an unconditional /portfolios list
     // query the moment it mounts - every other tab only fetches on explicit
     // user action (useMutation), so a generic empty fallback covers the rest.
+    // Default session: a regular (non-admin) user who HAS been granted
+    // api_keys:manage_own - the realistic baseline for tests that aren't
+    // specifically about permission gating, so the "API Keys" button they
+    // rely on is actually present.
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['api_keys:manage_own'] });
       if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
       if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
       return Promise.resolve({});
     });
   });
 
-  test('renders all 5 tab links, the API Keys button, and Log out', () => {
+  test('renders all 5 tab links, the API Keys button, and Log out', async () => {
     renderShell();
-    expect(screen.getByRole('link', { name: 'Stock Portfolio' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Portfolio' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Long-Term Analysis' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Contrarian Finder' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Contrarian Comeback' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Momentum Analysis' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'API Keys' })).toBeInTheDocument();
+    // API Keys only renders once the session (and canManageOwnKeys) has loaded.
+    expect(await screen.findByRole('button', { name: 'API Keys' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Log out' })).toBeInTheDocument();
   });
 
-  test('every tab panel is mounted from the start, only the active one is visible', () => {
+  test('a tab panel does not mount until visited, then stays mounted (hidden) after switching away', async () => {
     renderShell('/momentum');
+    // The wrapper div (its data-testid, driving the hidden/visible CSS toggle) always renders,
+    // but the page component inside it - and therefore any query it would fire on mount - does
+    // not exist until that tab has actually been visited. Real bug this guards against: a tab's
+    // queries firing before it's ever clicked (Stock Analysis quadrants re-fetching leftover
+    // tickers on every login). Portfolio itself is deliberately never gated (it's the universal
+    // landing route, and its own portfolio-list fetch is legitimate non-FMP data), so it stays
+    // always-mounted-with-content as before.
     expect(screen.getByTestId('tab-panel-portfolio')).toHaveClass('hidden');
+    expect(within(screen.getByTestId('tab-panel-portfolio')).getByText('Select or create a portfolio to get started.')).toBeInTheDocument();
+    expect(screen.getByTestId('tab-panel-contrarian-finder')).toBeEmptyDOMElement();
+    expect(screen.getByTestId('tab-panel-long-term-analysis')).toBeEmptyDOMElement();
+    expect(screen.getByTestId('tab-panel-contrarian-comeback')).toBeEmptyDOMElement();
     expect(screen.getByTestId('tab-panel-momentum')).not.toHaveClass('hidden');
+    expect(screen.getByTestId('tab-panel-momentum')).not.toBeEmptyDOMElement();
+
+    await userEvent.click(screen.getByRole('link', { name: 'Contrarian Finder' }));
+    expect(screen.getByTestId('tab-panel-contrarian-finder')).not.toHaveClass('hidden');
+    expect(screen.getByTestId('tab-panel-contrarian-finder')).not.toBeEmptyDOMElement();
+    expect(screen.getByTestId('tab-panel-momentum')).toHaveClass('hidden');
+
+    await userEvent.click(screen.getByRole('link', { name: 'Momentum Analysis' }));
+    expect(screen.getByTestId('tab-panel-momentum')).not.toHaveClass('hidden');
+    // Once visited, a panel is never un-mounted again - just hidden, same as before this change.
     expect(screen.getByTestId('tab-panel-contrarian-finder')).toHaveClass('hidden');
-    expect(screen.getByTestId('tab-panel-long-term-analysis')).toHaveClass('hidden');
-    expect(screen.getByTestId('tab-panel-contrarian-comeback')).toHaveClass('hidden');
   });
 
   test('switching away from a tab and back preserves its in-progress state', async () => {
@@ -81,11 +110,62 @@ describe('TabShell', () => {
     expect(screen.getByRole('link', { name: 'Momentum Analysis' })).not.toHaveClass('bg-accent');
   });
 
+  test('a non-admin session with api_keys:manage_own sees plain "API Keys", not an "Admin" link', async () => {
+    renderShell();
+    await screen.findByRole('button', { name: 'API Keys' });
+    expect(screen.queryByRole('link', { name: 'Admin' })).not.toBeInTheDocument();
+  });
+
+  test('a non-admin session WITHOUT api_keys:manage_own sees neither "API Keys" nor "Admin"', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: [] });
+      if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+      return Promise.resolve({});
+    });
+    renderShell();
+    await screen.findByRole('button', { name: 'Log out' }); // wait for session to resolve
+    expect(screen.queryByRole('button', { name: 'API Keys' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Admin' })).not.toBeInTheDocument();
+  });
+
+  test('an admin session sees an "Admin" link (to /admin) instead of a standalone API Keys button', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'admin@b.com', roles: ['admin'], permissions: ['api_keys:manage_own', 'users:manage_roles'] });
+      if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+      if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
+      return Promise.resolve({});
+    });
+    renderShell();
+    expect(await screen.findByRole('link', { name: 'Admin' })).toHaveAttribute('href', '/admin');
+    expect(screen.queryByRole('button', { name: 'API Keys' })).not.toBeInTheDocument();
+  });
+
+  test('a session with a differently-named role (e.g. admin-master) still sees "Admin" if it holds an admin-console permission', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'master@b.com', roles: ['admin-master'], permissions: ['api_keys:manage_own', 'functions:manage'] });
+      if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+      if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
+      return Promise.resolve({});
+    });
+    renderShell();
+    expect(await screen.findByRole('link', { name: 'Admin' })).toHaveAttribute('href', '/admin');
+    expect(screen.queryByRole('button', { name: 'API Keys' })).not.toBeInTheDocument();
+  });
+
+  test('the header shows a persona badge with the session\'s email/role in its tooltip', async () => {
+    renderShell();
+    const badge = await screen.findByTestId('user-persona-badge');
+    expect(badge).toHaveTextContent('A');
+    expect(badge).toHaveAttribute('title', 'a@b.com\nRole: user');
+  });
+
   test('API Keys button opens the modal, and Close dismisses it', async () => {
     renderShell();
     expect(screen.queryByRole('button', { name: 'Close' })).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    // The button only renders once the session (and canManageOwnKeys) has loaded - findBy
+    // waits for that, unlike getBy which would run before the async /auth/me fetch resolves.
+    await userEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     expect(await screen.findByText('FMP (Financial Modeling Prep)')).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -101,6 +181,7 @@ describe('TabShell', () => {
 
   test("a Contrarian Finder candidate row's LT button launches Long-Term Analysis with that ticker", async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['admin'], permissions: ['contrarian_finder:scan'] }); // scan-batch requires this permission
       if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
       if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
       if (url === '/contrarian-finder/scan-batch') return mockScanBatch();
@@ -109,7 +190,9 @@ describe('TabShell', () => {
     });
 
     renderShell('/contrarian-finder');
-    await userEvent.click(screen.getByRole('button', { name: /run scan/i }));
+    // The scan form only renders once the session (and its permissions) has loaded - findBy
+    // waits for that, unlike getBy which would run before the async /auth/me fetch resolves.
+    await userEvent.click(await screen.findByRole('button', { name: 'Run scan' }));
     await screen.findAllByTitle('Long-Term Analysis');
 
     await userEvent.click(screen.getAllByTitle('Long-Term Analysis')[0]);
@@ -119,8 +202,104 @@ describe('TabShell', () => {
     expect(client.apiFetch).toHaveBeenCalledWith('/analysis/long-term/AAA');
   });
 
+  describe('Portfolio tab - Legacy/Flex sub-tabs (Portfolio Upload - Flex, Phase 4)', () => {
+    test('with both permissions, a Legacy/Flex nav appears and toggles between the two sub-panels', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['admin'], permissions: ['portfolio_upload:legacy', 'portfolio_upload:flex'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      expect(await screen.findByRole('button', { name: 'Legacy' })).toBeInTheDocument();
+      expect(screen.getByTestId('portfolio-subtab-legacy')).not.toHaveClass('hidden');
+      expect(screen.getByTestId('portfolio-subtab-flex')).toHaveClass('hidden');
+
+      await userEvent.click(screen.getByRole('button', { name: 'Flex' }));
+      expect(screen.getByTestId('portfolio-subtab-legacy')).toHaveClass('hidden');
+      expect(screen.getByTestId('portfolio-subtab-flex')).not.toHaveClass('hidden');
+    });
+
+    test('a Flex-created portfolio never appears in the Legacy sub-tab\'s selector', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['admin'], permissions: ['portfolio_upload:legacy', 'portfolio_upload:flex'] });
+        if (url === '/portfolios') {
+          return Promise.resolve({
+            portfolios: [
+              { id: '1', name: 'Legacy Portfolio', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: null, flexTemplateStatus: null },
+              { id: '2', name: 'Flex Portfolio', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: 't1', flexTemplateStatus: 'Flex' },
+            ],
+          });
+        }
+        if (url === '/portfolio-templates') return Promise.resolve({ templates: [] });
+        if (url === '/portfolio-templates/mine/pending') return Promise.resolve({ templates: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await screen.findByRole('button', { name: 'Legacy Portfolio' });
+      const legacyPanel = screen.getByTestId('portfolio-subtab-legacy');
+      expect(within(legacyPanel).queryByRole('button', { name: 'Flex Portfolio' })).not.toBeInTheDocument();
+      // Sanity check it does exist, just on the Flex sub-panel instead.
+      expect(within(screen.getByTestId('portfolio-subtab-flex')).getByTestId('flex-portfolio-pill-2')).toHaveTextContent('Flex Portfolio');
+    });
+
+    test('with only portfolio_upload:legacy, no nav renders and only the Legacy sub-panel is mounted', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['portfolio_upload:legacy'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await screen.findByTestId('portfolio-subtab-legacy');
+      expect(screen.queryByRole('button', { name: 'Legacy' })).not.toBeInTheDocument();
+      expect(screen.queryByTestId('portfolio-subtab-flex')).not.toBeInTheDocument();
+    });
+
+    test('with only portfolio_upload:flex, no nav renders and only the Flex sub-panel is mounted', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['portfolio_upload:flex'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        if (url === '/portfolio-templates') return Promise.resolve({ templates: [] });
+        if (url === '/portfolio-templates/mine/pending') return Promise.resolve({ templates: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await screen.findByTestId('portfolio-subtab-flex');
+      expect(screen.queryByRole('button', { name: 'Legacy' })).not.toBeInTheDocument();
+      expect(screen.queryByTestId('portfolio-subtab-legacy')).not.toBeInTheDocument();
+    });
+
+    test('with neither permission, falls back to a read-only Legacy view (no upload control)', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: [] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [{ id: '1', name: 'Fidelity', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: null, flexTemplateStatus: null }] });
+        if (url === '/portfolios/1') {
+          return Promise.resolve({
+            portfolio: {
+              id: '1', name: 'Fidelity', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: null, flexTemplateStatus: null,
+              cashAmount: 0, totalHoldingsValue: 0, totalCostBasis: 0, totalGainLoss: 0, totalPortfolioValue: 0, holdings: [],
+            },
+          });
+        }
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await screen.findByTestId('portfolio-subtab-legacy');
+      expect(screen.queryByTestId('portfolio-subtab-flex')).not.toBeInTheDocument();
+
+      await userEvent.click(await screen.findByRole('button', { name: 'Fidelity' }));
+      await screen.findByText('Holdings');
+      expect(screen.queryByTestId('import-file-input')).not.toBeInTheDocument();
+    });
+  });
+
   test("a Contrarian Finder candidate row's CC button launches Contrarian Comeback and auto-runs Check Eligibility", async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['admin'], permissions: ['contrarian_finder:scan'] }); // scan-batch requires this permission
       if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
       if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
       if (url === '/contrarian-finder/scan-batch') return mockScanBatch();
@@ -129,7 +308,9 @@ describe('TabShell', () => {
     });
 
     renderShell('/contrarian-finder');
-    await userEvent.click(screen.getByRole('button', { name: /run scan/i }));
+    // The scan form only renders once the session (and its permissions) has loaded - findBy
+    // waits for that, unlike getBy which would run before the async /auth/me fetch resolves.
+    await userEvent.click(await screen.findByRole('button', { name: 'Run scan' }));
     await screen.findAllByTitle('Contrarian Comeback');
 
     await userEvent.click(screen.getAllByTitle('Contrarian Comeback')[0]);
@@ -137,5 +318,76 @@ describe('TabShell', () => {
     expect(screen.getByTestId('tab-panel-contrarian-comeback')).not.toHaveClass('hidden');
     expect(within(screen.getByTestId('tab-panel-contrarian-comeback')).getByLabelText('Ticker')).toHaveValue('AAA');
     expect(client.apiFetch).toHaveBeenCalledWith('/analysis/contrarian-comeback/AAA/gate');
+  });
+
+  describe('Stock Analysis tab (gated by stock_analysis:view, migration 041)', () => {
+    test('without the permission, no nav link renders and a direct URL visit redirects to Portfolio', async () => {
+      renderShell('/stock-analysis');
+      // "Log out" renders unconditionally from the very first paint, so it can't prove the
+      // session has resolved - "API Keys" depends on the (default-mocked) session's
+      // permissions, so waiting for it is what actually proves canStockAnalysis is settled.
+      await screen.findByRole('button', { name: 'API Keys' });
+      expect(screen.queryByRole('link', { name: 'Stock Analysis' })).not.toBeInTheDocument();
+      // Navigate's own redirect fires from a useEffect, one tick after the render that first
+      // computes canStockAnalysis === false - waitFor gives it room to actually land instead of
+      // asserting synchronously right after the (already-resolved) API Keys button appears.
+      await waitFor(() => {
+        expect(screen.getByTestId('tab-panel-portfolio')).not.toHaveClass('hidden');
+      });
+      expect(screen.getByTestId('tab-panel-stock-analysis')).toHaveClass('hidden');
+    });
+
+    test('with the permission, the nav link appears and is navigable to the 4-quadrant panel', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['stock_analysis:view'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await userEvent.click(await screen.findByRole('link', { name: 'Stock Analysis' }));
+      expect(screen.getByTestId('tab-panel-stock-analysis')).not.toHaveClass('hidden');
+      expect(screen.getAllByTestId('stock-analysis-quadrant-input')).toHaveLength(4);
+    });
+
+    test('with the permission, a direct URL visit renders the panel without redirecting', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['stock_analysis:view'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        return Promise.resolve({});
+      });
+      renderShell('/stock-analysis');
+
+      // tab-panel-stock-analysis is mounted unconditionally from the very first paint (like
+      // every other tab panel), so findByTestId alone would resolve before the session (and
+      // canStockAnalysis) has settled - the nav link only appears once permission is confirmed.
+      await screen.findByRole('link', { name: 'Stock Analysis' });
+      expect(screen.getByTestId('tab-panel-stock-analysis')).not.toHaveClass('hidden');
+      expect(screen.getAllByTestId('stock-analysis-quadrant-input')).toHaveLength(4);
+    });
+
+    test("a quadrant's LT/CC buttons launch Long-Term Analysis/Contrarian Comeback with that ticker", async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['stock_analysis:view'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        if (url === '/stock-preview/AAPL') return Promise.resolve({ symbol: 'AAPL', quote: null, historical: [] });
+        if (url.startsWith('/analysis/long-term/')) return new Promise(() => {}); // left pending - only firing/handoff matters here
+        if (url.endsWith('/gate')) return new Promise(() => {}); // left pending - only firing/handoff matters here
+        return Promise.resolve({});
+      });
+      renderShell('/stock-analysis');
+
+      await userEvent.type((await screen.findAllByTestId('stock-analysis-quadrant-input'))[0], 'aapl');
+      await userEvent.click(screen.getAllByTestId('stock-analysis-quadrant-go')[0]);
+
+      await userEvent.click(await screen.findByTestId('stock-analysis-quadrant-lt'));
+      expect(screen.getByTestId('tab-panel-long-term-analysis')).not.toHaveClass('hidden');
+      expect(within(screen.getByTestId('tab-panel-long-term-analysis')).getByLabelText('Ticker')).toHaveValue('AAPL');
+
+      await userEvent.click(await screen.findByRole('link', { name: 'Stock Analysis' }));
+      await userEvent.click(screen.getByTestId('stock-analysis-quadrant-cc'));
+      expect(screen.getByTestId('tab-panel-contrarian-comeback')).not.toHaveClass('hidden');
+      expect(within(screen.getByTestId('tab-panel-contrarian-comeback')).getByLabelText('Ticker')).toHaveValue('AAPL');
+    });
   });
 });

@@ -61,7 +61,7 @@ jobs:
         run: pipx install poetry
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14'
           cache: 'poetry'
           cache-dependency-path: analysis-service/poetry.lock
       - run: poetry install

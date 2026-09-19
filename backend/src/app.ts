@@ -11,6 +11,15 @@ import userSubscriptionRoutes from './routes/userSubscription.routes';
 import momentumRoutes from './routes/momentum.routes';
 import stockPreviewRoutes from './routes/stockPreview.routes';
 import analysisRoutes from './routes/analysis.routes';
+import usersRoutes from './routes/users.routes';
+import rolesRoutes from './routes/roles.routes';
+import functionMasterRoutes from './routes/functionMaster.routes';
+import portfolioTemplateRoutes from './routes/portfolioTemplate.routes';
+import configPropertyRoutes from './routes/configProperty.routes';
+import supportTicketRoutes from './routes/supportTicket.routes';
+import usageAuditRoutes from './routes/usageAudit.routes';
+import flexQuotaRoutes from './routes/flexQuota.routes';
+import candlestickRoutes from './routes/candlestick.routes';
 import errorHandler from './middleware/errorHandler';
 import rateLimiters from './middleware/rateLimit';
 import requireAuth from './middleware/requireAuth';
@@ -52,6 +61,36 @@ app.use('/stock-preview', requireAuth, rateLimiters, stockPreviewRoutes);
 // like every other route here since it'll eventually sit in front of real
 // paid analysis logic (Section 3 items 2-3), not just the health check it is today.
 app.use('/analysis', requireAuth, rateLimiters, analysisRoutes);
+// Admin-promotion (PUT /users/:id/role), Architecture.md Section 3 item 6 -
+// requireAuth here just confirms a session exists; requirePermission on the
+// route itself (users.routes.ts) is what actually restricts this to admins.
+app.use('/users', requireAuth, rateLimiters, usersRoutes);
+// View/Create Role + View/Edit Permission (Admin Console Phase 1 backend) - requireAuth just
+// confirms a session; requirePermission on each route (roles.routes.ts) restricts to admins.
+app.use('/roles', requireAuth, rateLimiters, rolesRoutes);
+// View/Manage Functions (Admin Console Phase 1 backend) - same pattern as /roles above.
+app.use('/functions', requireAuth, rateLimiters, functionMasterRoutes);
+// Portfolio Upload - Flex - requireAuth just confirms a session; requirePermission on each
+// route (portfolioTemplate.routes.ts) restricts to portfolio_upload:flex/manage_status holders.
+app.use('/portfolio-templates', requireAuth, rateLimiters, portfolioTemplateRoutes);
+// Config Properties (admin-configurable settings) - requireAuth just confirms a session;
+// requirePermission('config_properties:manage') on every route restricts this entirely to
+// admin-master (see roles.service.ts's ADMIN_MASTER_ONLY_PERMISSIONS guard).
+app.use('/config-properties', requireAuth, rateLimiters, configPropertyRoutes);
+
+// Helpdesk / Support Tickets (2026-09-05) - requireAuth only at this mount level (not gated
+// further here) since the create/list-mine/reply-mine routes must be reachable by a
+// status: 'pending' session, the one population with no other way to reach an admin at all;
+// the admin-only routes are individually gated by requirePermission('support:manage') inside
+// supportTicket.routes.ts itself.
+app.use('/support', requireAuth, rateLimiters, supportTicketRoutes);
+app.use('/usage-audit', requireAuth, rateLimiters, usageAuditRoutes);
+app.use('/flex-quota', requireAuth, rateLimiters, flexQuotaRoutes);
+// Stock Analysis - Candlestick Charts - requireAuth only, no dedicated permission, same
+// precedent as /stock-preview and /momentum: the frontend's stock_analysis:view gate is what
+// actually restricts visibility, this route just needs a known caller (for the per-user rate
+// limit on POST .../refresh).
+app.use('/candlestick', requireAuth, rateLimiters, candlestickRoutes);
 
 app.use(errorHandler);
 
