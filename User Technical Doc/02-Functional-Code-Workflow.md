@@ -238,6 +238,108 @@ not a one-off fix — new tunable values can be added the same way going forward
 
 ---
 
+## 2.7a Four features shipped 2026-09-07
+
+**Stock Analysis tab** — a new gated top-level tab (`stock_analysis:view`, migration 041,
+same zero-default-grant pattern as Config Properties/Login-as — hidden entirely without the
+permission). Shows 4 independent, simultaneous stock-preview quadrants, each an on-demand
+ticker lookup with its own session-persisted slot. `StockPreviewChart.tsx`'s body was
+extracted into a reusable `StockPreviewBody.tsx` so the existing standalone preview modal and
+the 4 new quadrants share one implementation instead of duplicating it.
+
+**Shared daily FMP cache** — Long-Term Analysis and Contrarian Comeback both make a lot of
+FMP calls per run (financials, ratings, peer data, price history) that don't actually change
+within a trading day. `fmpDailyCache.service.ts` gives both features one shared table,
+`m_fmp_daily_cache` (one row per symbol + endpoint, refreshed once per US-Eastern calendar
+day, **shared across every user** — market data is the same no matter who asks for it). Only
+each feature's own live quote for its subject stock stays realtime during market hours;
+everything else is served from the cache once someone's looked it up that day. A second,
+smaller cache (`contrarianComebackCache.ts`, 30-minute, per-user, in-memory — not the same
+mechanism) separately stops Contrarian Comeback's own two-step Gate→Submit flow from
+re-fetching the same data twice within one user's own round trip.
+
+**Flex Portfolio quota status indicator** — Flex Portfolio template/portfolio creation has
+had admin-configurable caps for a while, but the only feedback a user got was a failed
+request (`409`) after already trying. A new `GET /flex-quota/status` endpoint now backs a
+small `QuotaIndicator` shown right on the Save Template and Create Flex Portfolio screens, so
+the relevant button disables itself once the user is at their limit, instead of only finding
+out from an error.
+
+**Usage Audit rework** — the admin-facing Usage Audit dashboard tracks how much each user
+uses each feature. It used to update its monthly summary table in real time on every single
+action; this was changed so the summary only gets updated once a day by a batch job (matching
+how a 3-day-retention raw log was always meant to work), and the dashboard now shows three
+separate numbers per user — how many times they used a feature ("Function Calls"), and how
+many real FMP calls vs. Finnhub calls that cost — instead of one blended number that mixed
+the two together in a way that could look backwards.
+
+---
+
+## 2.7b Usage Dashboard redesign + shared FMP cache extended, 2026-09-09 through 2026-09-12
+
+**Login-as live verification closed.** The impersonation feature (Section 2.7's predecessor
+work) had been built and unit-tested but never walked through live with two real accounts.
+That's now done: an `admin-master` account impersonated a plain user, confirmed the banner and
+Dashboard genuinely reflected the target's own data, "Return to my account" restored the
+admin-master session cleanly, and the `user_evt_impersonation_log` audit row was confirmed to
+get a non-null `ended_at` after returning (checked via a direct DB query).
+
+**Usage Audit's Dashboard sub-tab redesigned — every chart is now independently controlled.**
+The Dashboard sub-tab (2026-09-09) originally showed 2 pie charts per row (Non-Admin Users /
+Admin+Admin-Master, split by role) sharing one page-level month picker. That became 3 charts
+per row at ~33% width each, and — per explicit direction — **every one of the 6 cards (3
+charts × 2 rows) got its own independent embedded control**, so any card can show a different
+period or month at the same time as any other:
+- Chart 1 (pie): a period picker — Last 3 Days / Today / Yesterday / Day Before Yesterday,
+  backed by a new `GET /usage-audit/day?offset=0|1|2` reading straight from the raw event log
+  (safe, since raw rows are never swept until they're 3+ days old).
+- Chart 2 (pie): a month picker, moved inside the card from the old page-level control.
+- Chart 3 (new): a **bar chart** by user, same combined FMP+Finnhub metric as the pies — since
+  users are identified by email (too long for x-axis tick labels), identification is via
+  tooltip-on-hover plus a color-coded legend below the chart instead. Its own control combines
+  both the 4 day-based options and any available month in one dropdown.
+
+A real bug surfaced by these new independent dropdowns: `getAvailableUsageMonths()` returned
+its `DATE` column as a raw value that `node-postgres` parses into a JS `Date`, which
+JSON-serializes with a timezone shift — so it never matched the frontend's plain-string
+"is the current month already listed" check, silently duplicating the current month in every
+picker. Fixed by casting to `month::text` in SQL.
+
+**`GET /quotes` — the last Usage Audit gap — now tracked.** This standalone batch-quote
+endpoint (Phase 1, predating almost everything else in this app) had zero usage tracking. It
+now logs a `'quotes'` feature event with the real (non-cached) FMP call count.
+
+**The shared daily FMP cache extended into `marketData.service.ts` — real call reduction for
+Refresh Prices, Momentum, and Stock Preview.** A direct question about reducing FMP call
+volume on Refresh Prices led to two findings: (1) real overlap exists — the same popular
+symbols (e.g. MSFT, TSLA, PCG) are held across many different portfolios, so multiple
+Refresh Prices clicks were independently re-fetching identical data with zero sharing; and
+(2) `getQuotes()`/`getHistorical()` in `marketData.service.ts` are shared by **four** features
+— Refresh Prices (Legacy and Flex both use the same route), Momentum, Stock Preview, and
+`GET /quotes` — not just Refresh Prices. Both functions were extended to route through the
+shared daily FMP cache (`fmpDailyCache.service.ts`, built for Long-Term Analysis/Contrarian
+Comeback in 2.7a above) so all four benefit at once:
+- `getQuotes()` stays live during market hours and folds into the day-cache after close, same
+  policy as Long-Term Analysis/Contrarian Comeback's own quote calls — and now sharing those
+  exact same cache rows.
+- `getHistorical()` always fetches the shared `limit=1000` internally, regardless of the
+  caller's own smaller limit (130 for Refresh Prices/Momentum, 96 for Stock Preview), then
+  slices the most recent N bars locally. This avoids a cache-collision bug already found once
+  for `grades`'s limit param, this time applied preemptively.
+
+Both functions now report back how many of their calls were genuinely real vs. served from
+cache, so every caller's usage-tracking numbers reflect actual cost. Live-verified: a
+`GET /momentum/AAPL` call populated the cache, and an immediate `GET /stock-preview/AAPL` call
+(a different feature, requesting a different amount of history) was served entirely from that
+same cache entry with zero additional real FMP calls — confirmed by direct DB query.
+
+**Separately, the backend now survives a transient DB connection blip.** `pool.ts` gained a
+`pool.on('error', ...)` handler — without one, an idle client hitting a network error crashes
+the whole Node process (this had actually happened once). The pool now logs and discards the
+broken client instead, opening a fresh one on the next query.
+
+---
+
 ## 2.8 Feature map — where to look for each screen
 
 | Screen | Frontend page | Backend routes/controller | Backend service(s) |
@@ -252,6 +354,8 @@ not a one-off fix — new tunable values can be added the same way going forward
 | Momentum | `MomentumPage.tsx` | `momentum.routes.ts` | `momentum.service.ts` (+ Python `momentum.py`) |
 | Long-Term Analysis | `LongTermAnalysisPage.tsx` | `analysis.routes.ts` | `longTermAnalysisData.service.ts` (+ Python `long_term.py`) |
 | Contrarian Comeback | `ContrarianComebackPage.tsx` | `analysis.routes.ts` | `contrarianComebackData.service.ts` (+ Python) |
+| Stock Analysis (4 quadrants) | `StockAnalysisPage.tsx`, `StockAnalysisQuadrant.tsx`, `StockPreviewBody.tsx` | `stockPreview.routes.ts` | `marketData.service.ts` |
+| Usage Audit (admin) | `UsageAuditPage.tsx` (an Admin Console tab), `UsageDashboardCards.tsx`/`UsagePieChart.tsx`/`UsageBarChart.tsx` (Dashboard sub-tab's 6 independently-controlled charts) | `usageAudit.routes.ts` (incl. `GET /usage-audit/day`) | `usageTracking.service.ts` |
 | Admin Console | `AdminPage.tsx` and its sub-pages (`RolesPage`, `RolePermissionsPage`, `UserRolesPage`, `FunctionsPage`, `MasterDataPage`, `PortfolioTemplateApprovalPage`, `ConfigPropertiesPage`) | `roles.routes.ts`, `functionMaster.routes.ts`, `users.routes.ts`, `portfolioTemplate.routes.ts`, `configProperty.routes.ts` | `roles.service.ts`, `functionMaster.service.ts`, `users.service.ts`, `configProperty.service.ts` |
 | Config Properties (admin-master only) | `ConfigPropertiesPage.tsx` (an Admin Console tab, not its own route) | `configProperty.routes.ts` | `configProperty.service.ts` |
 | "Login-as" (admin-master only) | `LoginAsModal.tsx` + `ImpersonationBanner.tsx` (in `TabShell.tsx`/`AdminPage.tsx`, not their own route) | `auth.routes.ts` (`/auth/impersonate`, `/auth/stop-impersonating`) | `impersonation.service.ts`, `auth.service.ts` |

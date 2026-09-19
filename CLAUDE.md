@@ -46,7 +46,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 09-06)
+# Current Build State (as of 09-12)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -833,10 +833,15 @@ New `impersonation.service.test.ts` (4 tests), extended `auth.controller.test.ts
 /impersonate`/`/auth/stop-impersonating` blocks, updated `/auth/me` test), new `LoginAsModal
 .test.tsx` (4 tests), new `ImpersonationBanner.test.tsx` (3 tests), extended `AdminPage.test.tsx`
 (2 new tests for the header trigger's permission gating), `UserPersonaBadge.test.tsx` fixed for the
-new `impersonating` field on the test `User` fixture. `tsc`/lint clean both sides. **Known gap,
-not yet closed**: full live verification with two real accounts (banner correctness against a real
-target's real data, clean return-to-admin, blocked same-admin impersonation, and the audit row's
-`ended_at` populating on return) is still pending — see Next Up.
+new `impersonating` field on the test `User` fixture. `tsc`/lint clean both sides.
+
+**Live-verified 2026-09-12**: ran the full two-real-account walkthrough from the actual app —
+admin-master `subrataroygcp@gmail.com` impersonating plain user `Joinbb@gmail.com`, confirming the
+banner/Dashboard reflect the target's real data and "Return to my account" restores admin-master
+cleanly. Separately confirmed directly against the DB that `user_evt_impersonation_log` recorded a
+non-null `ended_at` (~14 seconds after `started_at`) for that session — the one sub-check that
+needed DB access rather than just the browser. Closes the live-verification gap noted at build
+time; no longer listed in Next Up.
 
 ## Flex Wizard — Progress-Bar Stepper Redesign ✅ Done
 
@@ -1135,21 +1140,222 @@ right (a 2-day-old detail row survived a sweep untouched, a 4-day-old one was me
 directly observed Monthly temporarily under-reporting very recent activity via the event-count
 fallback until the sweep catches up — confirmed as the designed tradeoff, not a bug.
 
+## Stock Analysis Tab — 4 Simultaneous Preview Quadrants ✅ Done
+
+Built 2026-09-07. New top-level "Stock Analysis" tab (`stock_analysis:view`, migration `041`,
+gated Function, zero default grants — hidden entirely from the nav without it, same pattern as
+Admin/API Keys, plus a direct-URL guard since every other tab here has always been open to any
+signed-in session). Four independent, always-visible quadrants, each an on-demand ticker lookup
+— deliberately not built on `tickerHistory.ts`'s `useTickerHistory()` (that hook models "one
+active symbol + a switchable history list," the wrong shape when all 4 slots are simultaneously
+live). New `useStockAnalysisTickers()` (`stockAnalysisTickers.ts`) persists the 4 slots to
+`sessionStorage`, same session-only/survives-reload/clears-on-close precedent as Contrarian
+Finder's scan results.
+
+`StockPreviewChart.tsx`'s body was extracted into a new, reusable `StockPreviewBody.tsx` so the
+existing standalone modal and the 4 new quadrants share one implementation — `StockPreviewChart`
+itself is now just a thin modal wrapper around it. `stockPreview.controller.ts` gained its first
+usage-tracking call (`logUsage(userId, 'stock_preview', { fmp_historical: 1, fmp_quote: 1 })` —
+2 real FMP calls per lookup, quote + historical, same as every other price-lookup feature).
+
+**Real bug found and fixed during the build**: `useStockPreview`'s query function never threaded
+React Query's cancellation `AbortSignal` through to the underlying `fetch()`, so React
+StrictMode's dev-mode double-mount caused two real, duplicate HTTP calls to both complete and
+both get logged — confirmed live via 4 duplicate `user_evt_usage` rows created within 153ms of
+each other. Fixed by passing `{ signal }` from `queryFn` into `apiFetch()`.
+
+## Long-Term Analysis / Contrarian Comeback — Shared Daily FMP Cache ✅ Done
+
+Built 2026-09-07 across several phases in one session (Contrarian Comeback's own short-lived
+Gate→Submit cache, Long-Term Analysis's day-level cache, a 3-part refinement pass, then
+extending the same day-cache to Contrarian Comeback). New `m_fmp_daily_cache` (migration `042`)
+— one row per `(symbol, api_name)`, refreshed once per US-Eastern calendar day, **shared across
+all users** (market data is identical regardless of who fetches it, unlike per-user data).
+`fmpDailyCache.service.ts`'s `getOrFetch<T>(symbol, apiName, description, fetchFn, opts?)` is
+the single reusable function both `longTermAnalysisData.service.ts` and
+`contrarianComebackData.service.ts` now route every FMP call through, confirmed live to actually
+cross-benefit (a symbol looked up via one feature costs the other ~0 calls the same day).
+
+**Market-hours-aware hybrid**: exactly one call per feature (`quote`, the subject's own live
+price) stays realtime during market hours (weekday, 9:30am–4:00pm America/New_York, deliberately
+no holiday calendar), folding into the day-cache after close. Every other call — `profile`,
+`income-statement`, `price-target-consensus`, `grades`, `insider-trading`, historical price bars,
+balance-sheet/cash-flow statements, peer quotes — is always day-cached. Standardized a real
+inconsistency found while cross-checking the two features: `grades` was fetched with different
+`limit` params by each (unbounded vs. `limit=50`) — since the cache doesn't key on query params,
+whichever feature ran first for a symbol would silently decide the other's dataset too. Both now
+use the more-inclusive `limit=50`.
+
+Separately, a **short-lived, per-`(userId, symbol)` in-memory cache** (`contrarianComebackCache
+.ts`, 30-minute TTL — a different mechanism from the day-cache above, not DB-backed, not shared
+across users) stops Contrarian Comeback's Gate and Submit steps from independently re-fetching
+the same ~10 FMP calls within one user's own round trip.
+
+`apiCallCounts` for both features became a real, live count of calls that weren't served from
+cache (`!wasCached`), replacing fixed formulas — Usage Audit numbers now reflect actual FMP cost,
+not a theoretical maximum. Momentum's `logUsage()` call also gained a real
+`{ fmp_historical: 1, fmp_quote: 1 }` breakdown (previously an unqualified event with no detail
+at all). `financial-estimates` was removed entirely from Long-Term Analysis after confirming
+live, across multiple symbols including a mega-cap (NVDA), that it returns empty on this
+account's FMP plan tier universally, not per-symbol.
+
+**Two real bugs found and fixed during the build**: `fetchPeerData`/`fetchEvToEbitda`'s catch
+blocks reported `realCalls: 0` on a failed fetch, undercounting a real (failed) attempt as free
+— fixed to `1`, under the principle "a cache hit can never reach a catch block" (a cache hit
+never makes a network call, so any exception there is necessarily a real one). The one
+previously-silent `catch` on Contrarian Comeback's conditional sector-ETF historical fetch now
+logs via `console.error` instead of swallowing the failure.
+
+817 backend tests (up from 778), `tsc`/lint clean. Verified live: a Contrarian Comeback run for
+CIEN cost only 4 real FMP calls because Long-Term Analysis had already cached 5 of its 9 calls
+for that symbol earlier the same day.
+
+## Flex Portfolio Quota Status Indicator + Pre-Submission Guard ✅ Done
+
+Built 2026-09-07, closing the "known gap" flagged when Flex Portfolio Quota Limits first
+shipped: a `409` was the only signal a user ever got, after the fact, with zero visibility into
+their usage beforehand. New `GET /flex-quota/status` (`flexQuota.controller.ts`/`.routes.ts`,
+mirrors `flexQuota.service.ts`'s existing resolution logic) backs a new `QuotaIndicator`
+component shown in two places: Save Template (pending/approved template counts) and the Flex
+Portfolio creation flow (portfolio count). Each now disables its own action once at or over the
+effective limit, instead of only finding out via a failed request, and turns amber approaching
+the cap. `useCreatePortfolioFlex()`/`useSaveFlexTemplate()` both invalidate the new quota-status
+query on success so the indicator stays live across actions.
+
+## Usage Audit — Batch-Only Monthly Summary + Function/FMP/Finnhub Split ✅ Done
+
+Built 2026-09-07, closing a real gap between the Usage Audit's original stated design and its
+actual implementation, surfaced by direct user review of the aggregation logic. `logUsage()` was
+doing two writes on every single call — an `INSERT` into the raw `user_evt_usage` log, **and** a
+real-time `UPSERT` incrementing `event_count` on `user_evt_usage_summary_monthly` — while only
+`api_call_details` was deferred to the existing 3-day-gated daily sweep. Confirmed with the user
+this diverged from the original intent (3 days of raw detail, one batch rollup a day, not a
+real-time double-write) and that real-time-updating Monthly was overkill for an audit feature.
+
+`logUsage()` is now insert-only. `maybeRunDailyUsageAggregation()`'s sweep now rolls up **both**
+`event_count` and `api_call_details` together for every raw row older than 3 days (previously
+the sweep skipped rows without detail entirely, leaving them to the raw table's 35-day TTL
+backstop) — since a summary row may not exist at all until the sweep first runs for a given
+`(user, feature, month)`, the write changed from `UPDATE` to `INSERT ... ON CONFLICT`. New
+`getUsageAggregationCutoff()` exposes the sweep's own watermark (minus 3 days) so the Monthly
+tab can show a "this tab's data reflects cumulative call details until `<cutoff>`" banner —
+Monthly is now genuinely a few days behind by design, and this makes that visible rather than
+confusing.
+
+Separately, replaced the single blended "score" per user (API-call sum falling back to a flat
+event count) with **three distinct numbers** — Function Calls, FMP Calls, and Finnhub Calls —
+surfaced after the user asked to see FMP/Finnhub volume "separately" rather than combined. A
+`key.startsWith('fmp'|'finnhub')` split covers every existing `logUsage()` call site's
+provider-prefixed detail keys with zero controller changes needed. Both Last 3 Days and Monthly
+rank by combined FMP+Finnhub volume (the real-cost metric), not Function Calls.
+
+**Fresh start, by explicit user request**: `event_count` had been accurate since the table's
+inception, but `api_call_details` was schema-only/`NULL` from migration `038` until each feature
+was individually wired to populate it — `momentum`/`long_term_analysis`/`contrarian_comeback`
+only got wired the same day as part of the daily-cache work above. Mixing pre/post-wiring rows
+would have kept understating FMP/Finnhub volume for those three features, so
+`user_evt_usage`/`user_evt_usage_summary_monthly` were truncated and the watermark reset to its
+`'2000-01-01'` sentinel on the dev DB as a one-time step alongside this change.
+
+817 backend tests, 483 frontend tests, `tsc`/lint clean both sides. **Verified live against the
+real dev DB**: confirmed zero summary-row writes immediately after `logUsage()` calls (previously
+would have been an instant increment), backdated real rows past 3 days and force-ran the sweep —
+raw rows deleted, summary `event_count`/`api_call_details` both correct, cutoff ~3 days behind
+now, Monthly and Last 3 Days both reflecting the split correctly, Last 3 Days correctly dropping
+back to zero once the activity aged out of its window. Cleaned up all test data afterward.
+
+## User Usage Dashboard — Independent Per-Chart Controls + `GET /quotes` Tracking ✅ Done
+
+Built 2026-09-12 across two rounds. **Round 1**: the Dashboard sub-tab's original 2-chart-per-row
+layout (Last 3 Days pie + Monthly pie, `/plan`-approved 2026-09-09) became 3 charts at ~33% width
+each per explicit follow-on request — a new by-user **bar chart** (same combined FMP+Finnhub
+metric as the pies; x-axis labels hidden since users are identified by email, tooltip + a color
+legend below identify bars instead), plus a new **day picker** (Last 3 Days / Today / Yesterday /
+Day Before Yesterday) on the first pie card, backed by a new `GET /usage-audit/day?offset=0|1|2`
+reading straight from the raw event log (always safe — raw rows are never swept until 3+ days
+old). Per explicit direction, **every one of the 6 cards (3 charts × 2 rows) got its own
+independent embedded control** rather than a page-level shared picker — any card can show a
+different period/month/role-group at once. `UsageRankingEntry` gained a `roles` field (a separate
+query, not joined into the existing ranking query, to avoid multiplying rows and corrupting the
+FMP/Finnhub sums). **Real bug found+fixed, surfaced by the new independent dropdowns**:
+`getAvailableUsageMonths()` returned its `DATE` column as a raw value that `node-postgres` parses
+into a JS `Date` and JSON-serializes with a timezone shift (e.g. `2026-09-01T04:00:00.000Z`), so it
+never string-matched the frontend's plain `'YYYY-MM-01'` current-month check — silently
+duplicating the current month in every month picker. Invisible before (only one shared picker ever
+rendered), fixed by casting to `month::text` in SQL.
+
+**Round 2**: closed the last remaining Usage Audit gap — `GET /quotes` (a standalone batch-quote
+endpoint from Phase 1, 2026-07-08, predating almost everything else in this app) had zero usage
+tracking at all. Added `'quotes'` to the `UsageFeature` union and a `logUsage(userId, 'quotes',
+{ fmp_quote: symbols.length })` call in `quotes.controller.ts` — one real FMP call is attempted
+per requested symbol (`marketData.service.ts`'s `getQuotes()` fires one unbatched call per symbol),
+counted regardless of per-symbol success, same "an attempt is a real cost" principle already
+established for Long-Term Analysis. New `quotes.controller.test.ts` (this controller had zero
+direct tests before this — 6 new tests: 401/400/503-logs-nothing/200/usage-log-count). **Confirmed
+this route currently has zero frontend callers** — closing the gap is about correctness (anyone
+calling it directly, or a future feature wiring it up, is now tracked) rather than fixing a live
+under-reporting problem.
+
+828 backend tests (up from 817), 488 frontend tests (up from 483), `tsc`/lint clean both sides.
+**Verified live against the real dev DB**: the duplicate-month fix confirmed via direct API call
+(`available-months` now returns a plain `2026-09-01`, not a timezone-shifted timestamp) and in the
+browser (dropdown shows "September 2026" once, not twice); the independent-per-card controls
+confirmed by switching one row's bar chart to "Today" via direct DOM manipulation (native
+`<select>` dropdowns aren't reliably clickable through CDP automation) while every other card
+stayed on its own separate selection. `GET /quotes` tested against the real FMP account
+`subrataroygcp@gmail.com` (which does hold a live FMP key) — a real 2-symbol request returned
+genuine live quotes and wrote a `user_evt_usage` row with `api_call_details: { fmp_quote: 2 }`,
+confirmed by direct query.
+
+## Refresh Prices FMP Call Reduction — Shared Cache Extended to marketData.service.ts ✅ Done
+
+Built 2026-09-12, prompted by a direct question about reducing FMP call volume on Refresh Prices
+(Legacy + Flex — confirmed both share the exact same `POST /:id/refresh-prices` route). Real data
+found before proposing anything: 241 total `tx_holdings` rows across only 83 distinct symbols in
+the dev DB (MSFT/TSLA/META/NFLX/BA held by 7 portfolios each, PCG/ITB by 8) — massive cross-
+portfolio symbol overlap with zero cache-sharing between them. Also found `getQuotes()`/
+`getHistorical()` in `marketData.service.ts` are shared by **four** features, not just Refresh
+Prices: Momentum and Stock Preview call them too, plus `GET /quotes`. Given that, extended the
+shared daily FMP cache (`fmpDailyCache.service.ts`, built for Long-Term Analysis/Contrarian
+Comeback) into these two shared functions directly, rather than duplicating cache-wiring inside
+`refreshPrices()` alone — confirmed with the user as the preferred scope before starting.
+
+`getQuotes()` now routes each symbol through `fmpDailyCache.getOrFetch(symbol, 'quote', ...,
+{ forceFresh: isMarketOpenNow() })` — live during market hours, day-cached after close, the same
+policy Long-Term Analysis/Contrarian Comeback's own `quote` calls already use, and now sharing
+those exact same cache rows. `getHistorical()` always fetches the shared `limit=1000` internally
+(matching Contrarian Comeback's own subject-symbol history call under the identical
+`(symbol, 'historical-price-eod')` cache key) regardless of the caller's own smaller `limit`
+(Refresh Prices/Momentum use 130, Stock Preview uses 96), then slices the most recent N bars
+locally — FMP returns bars newest-first, so this is the exact same "standardize on the more
+inclusive value, slice per-consumer" fix already used once for `grades`'s limit param, this time
+applied preemptively rather than after finding a live collision.
+
+Both functions now return `{ quotes, realCalls }` / `{ bars, realCalls }` instead of a bare
+value, so every caller's `logUsage()` reports genuine non-cached call counts — `momentum
+.controller.ts`, `stockPreview.controller.ts`, `portfolio.service.ts`'s `refreshPrices()`, and
+`quotes.controller.ts` (built minutes earlier the same day) all updated to read `realCalls`
+instead of a flat per-symbol count, same "an attempt is a real cost" principle used throughout
+the shared-cache work (a rejected promise still counts as 1 real call, since a cache hit can
+never reach a rejection).
+
+New direct unit tests for `getQuotes`/`getHistorical` in `marketData.service.test.ts` — these two
+functions had **zero** direct test coverage before this (only tested transitively through each
+controller's own mocks, which mock `marketData.service` entirely and would never have caught a
+caching bug inside it). 845 backend tests (up from 828), `tsc`/lint clean. Zero frontend changes -
+every caller's HTTP response shape to its own client is unchanged, only the internal real-call
+accounting changed.
+
+**Live-verified against the real dev DB**: called `GET /momentum/AAPL` (cache stale from
+2026-09-07) — logged a real `{ fmp_historical: 1, fmp_quote: 1 }` and refreshed the
+`historical-price-eod` cache row's description to confirm it requested `limit=1000` even though
+Momentum only asked for 130. Immediately called `GET /stock-preview/AAPL` (a different feature,
+requesting `limit=96`) — logged `{ fmp_historical: 0, fmp_quote: 0 }`, confirming both the
+historical and quote legs were served entirely from the cache Momentum had just populated, with
+zero additional real FMP calls, less than a second later.
+
 ## Next Up
 
-- **Login-as live verification** — impersonate a plain user with two real accounts and confirm the
-  banner/Dashboard reflect the target's real data, "Return to my account" restores admin-master
-  cleanly, impersonating another admin/admin-master is blocked, and the audit row in
-  `user_evt_impersonation_log` gets a non-null `ended_at` after returning.
-
-- **Quota-exceeded error UX polish** (Flex Portfolio Quota Limits' known gap) — today's `409`
-  messages render via existing generic error-display scaffolding (real backend message, plain
-  red text, no special styling/CTA). Needs: a clearer call-to-action, a pre-submission guard
-  (warn/disable before the user hits the cap, not just after), and client-side visibility into
-  a user's current effective limit.
-- **Usage Audit follow-ons**: `GET /quotes` still has zero usage tracking at all; Momentum/
-  Long-Term Analysis/Contrarian Comeback still only log a plain event count, not call-level
-  detail (both deliberately deferred, not forgotten — see the Usage Audit section above).
 - Two small known-leftover cleanups (harmless, not yet decided): an orphaned
   `apiKeys:bringMyOwn` permission naming inconsistency (`User Manual.md`); `momentum
   .service.ts`'s dead-but-undeleted functions, kept as the Python extraction's rollback path.

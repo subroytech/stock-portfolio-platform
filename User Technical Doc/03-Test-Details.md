@@ -126,7 +126,41 @@ and neither substitutes for the other.
 
 ---
 
-## 3.6 Current state (as of 2026-08-31)
+## 3.6 Current state (as of 2026-09-12)
+
+- **845 backend / 488 frontend tests passing** (up from 817/483 as of 2026-09-07), `tsc`/lint
+  clean both sides. New/rewritten backend test files from the 2026-09-09 through 2026-09-12
+  work: `usageTracking.service.test.ts` extended for the new `roles` field and the
+  `getUsageRankingForDay()` day endpoint; `quotes.controller.test.ts` (new file — this
+  controller had zero direct tests before); `marketData.service.test.ts` gained its first-ever
+  direct coverage for `getQuotes()`/`getHistorical()` (previously only tested transitively
+  through each caller's own full-module mocks, which could never have caught a caching bug
+  inside `marketData.service.ts` itself); `momentum.controller.test.ts`,
+  `stockPreview.controller.test.ts`, `portfolio.service.test.ts`, and
+  `portfolio.controller.test.ts` all updated for the new `{ data, realCalls }` return shape.
+  Frontend gained `UsageDashboardCards.tsx`'s own test coverage plus a substantially rewritten
+  `UsageAuditPage.test.tsx` for the Dashboard sub-tab's independently-controlled charts.
+- **A real, live-caught bug worth noting for future test design**: `getAvailableUsageMonths()`'s
+  timezone-shift bug (see `02-Functional-Code-Workflow.md`'s §2.7b) passed every existing test,
+  because the mocked `pool.query` in `usageTracking.service.test.ts` never exercised the real
+  `node-postgres` `DATE`-to-JS-`Date` parsing path that only shows up against a real Cockroach
+  connection — a reminder that some classes of bugs are only visible via live verification
+  against the real DB, not unit tests with a mocked pool, however thorough.
+
+## 3.6a Previous state (as of 2026-09-07)
+
+- **817 backend / 483 frontend tests passing** (up from 689/413 as of 2026-08-31), `tsc`/lint
+  clean both sides. New test files added for the four features shipped 2026-09-07: backend's
+  `fmpDailyCache.service.test.ts` and `contrarianComebackCache.test.ts` (the two new FMP-call
+  caches), `flexQuota.controller.test.ts` (the quota status endpoint); frontend's
+  `StockAnalysisQuadrant.test.tsx`, `stockAnalysisTickers.test.ts`, `StockAnalysisPage.test.tsx`,
+  and `stockPreview.test.tsx` (the new Stock Analysis tab).
+- Usage Audit's `usageTracking.service.test.ts` was substantially rewritten the same day to
+  match its new batch-only aggregation behavior (see `CLAUDE.md`'s "Usage Audit — Batch-Only
+  Monthly Summary + Function/FMP/Finnhub Split" entry) — a good example of a test file needing
+  a real rewrite, not just new cases added, when the underlying design itself changes.
+
+## 3.6b Previous state (as of 2026-08-31)
 
 - All four CI jobs (backend, frontend, analysis-service, e2e) have been green together
   multiple times (see `CLAUDE.md`'s "Contrarian Finder Stock Universe" entry onward).

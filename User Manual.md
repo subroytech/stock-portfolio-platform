@@ -8,10 +8,13 @@ troubleshooting tool, and to registration/password/account-recovery. **Status: i
 live-verified (2026-08-02 for the API key sections; 2026-08-05 for Contrarian Finder retention;
 2026-08-07 for Portfolio Upload — Flex; 2026-08-24 for Config Properties; 2026-08-27 for the Flex
 guided stepper, footer/cash row markers, and template-governance admin tools; 2026-08-28 for
-Login-as, built and test-covered but still pending its own live two-account walkthrough — see
-that section below; 2026-08-30 for Registration, Password Policy & Security Questions, including
+Login-as, with its own live two-account walkthrough closed out on 2026-09-12 — see that section
+below; 2026-08-30 for Registration, Password Policy & Security Questions, including
 the selectable-questions and post-login Manage Security Questions follow-ons; 2026-08-31 for
-Contrarian Finder Run History).** Role names below
+Contrarian Finder Run History; 2026-09-06 for the User Usage Dashboard, retroactively documented
+here on 2026-09-07 alongside its Monthly-tab aggregation rework; 2026-09-07 for the Stock
+Analysis tab; 2026-09-12 for the Dashboard sub-tab's independently-controlled charts).** Role
+names below
 use the exact casing as created in the database: `user-contra-withKey` (capital K),
 `user-contra-wokey` (lowercase), `admin-master`.
 
@@ -250,8 +253,11 @@ effect on a service's very next read, not after a restart.
 
 ## Login-as (admin-master troubleshooting tool)
 
-**Status: implemented and test-covered, 2026-08-28 — not yet walked through live with two real
-accounts. Treat this section as accurate-but-unverified until that walkthrough happens.**
+**Status: implemented and test-covered 2026-08-28; live-verified end-to-end 2026-09-12** with
+two real accounts — confirmed the banner and Dashboard genuinely reflect the target's own data
+(not a cached admin view), "Return to my account" restores the admin-master session cleanly,
+and the audit row described below gets a non-null `ended_at` after returning (checked directly
+against the database).
 
 `admin-master` can view the app exactly as a specific user sees it, without needing their
 password — a fast way to reproduce a role-specific issue someone reports, without having to ask
@@ -364,6 +370,58 @@ them up for the first time — without doing this, Forgot Password won't work fo
 - Forgot Password will tell you outright if an email has no account (rather than staying vague
   about it) — a deliberate simplicity choice, consistent with how the app already behaves
   elsewhere (e.g. registering with an email that's already taken).
+
+## User Usage Dashboard (Admin Console — "User Usage")
+
+**Status: implemented and live-verified, 2026-09-06; the Monthly tab's aggregation reworked and
+re-verified 2026-09-07; the Dashboard sub-tab added and redesigned with independently-controlled
+charts, 2026-09-09 through 2026-09-12.** Like Contrarian Finder Run History above, browsing usage
+data is a genuinely gated feature — invisible and unusable for a role until an `admin` or
+`admin-master` explicitly grants it `usage_audit:view` via the Admin Console's Manage Permission
+screen. Nothing is pre-granted, and it is **not** admin-master-restricted — any role holding
+`permissions:manage` can grant it to any other role, the same "Admin or Admin-Master" precedent as
+`contrarian_finder:view_history`.
+
+A role with the permission sees a "User Usage" tab with three sub-tabs:
+
+- **Dashboard** (the landing sub-tab) — two rows, Non-Admin Users and Admin/Admin-Master, split by
+  each user's actual roles. Each row has 3 charts, and **every one of the 6 charts has its own
+  independent control** — one card can show Today's activity while another shows last month's,
+  with no shared picker between them:
+  - A pie chart with a period picker (Last 3 Days / Today / Yesterday / Day Before Yesterday).
+  - A pie chart with a month picker.
+  - A bar chart (one bar per user) with a single control combining both the day-based options and
+    any available month. Since users are identified by email — too long to fit as axis labels —
+    bars are identified by hovering for a tooltip or reading the color-coded legend below the
+    chart, not by reading the axis directly.
+
+  Every chart's slices/bars are sized by that user's combined FMP + Finnhub call volume for
+  whatever period is selected.
+- **Last 3 Days** — always live: every user ranked by real API-call volume (FMP/Finnhub calls
+  actually made) over the last rolling 3 days, split out separately by provider, alongside a
+  separate Function Calls count (how many times a feature was invoked, regardless of how many
+  real API calls each invocation cost). A zero-usage user still appears, at the bottom, rather
+  than being hidden.
+- **Monthly** — a month picker plus the same ranking, but only ever reflecting activity through a
+  stated cutoff shown at the top of the tab ("this tab's data reflects cumulative call details
+  until `<date/time>`"), always a few days behind the current moment by design: a daily
+  background job rolls the last 3 days' worth of raw activity into the Monthly totals once a day,
+  rather than updating them the instant each action happens — deliberately, since updating a
+  reporting/audit view in real time on every single feature call was judged unnecessary overhead.
+  (This sub-tab's own month picker is separate from the Dashboard sub-tab's per-chart pickers —
+  changing one does not affect the other.)
+
+## Stock Analysis Tab
+
+**Status: implemented and live-verified, 2026-09-07.** A new top-level "Stock Analysis" tab —
+four independent, always-visible ticker lookups side by side, each showing the same price
+chart/period-return view as the existing standalone Stock Preview popup elsewhere in the app.
+Gated by `stock_analysis:view`, zero default grants, same "Admin or Admin-Master can grant to any
+role" pattern as `usage_audit:view` and `contrarian_finder:view_history` above — hidden entirely
+from the nav for a role without it (not merely disabled), with a direct-URL guard as well, the
+same treatment already given to Admin/API Keys. Each of the 4 lookups is independent and
+remembered for the rest of your browser session (picking a ticker in one slot doesn't affect the
+other three, and reloading the page keeps all 4 where you left them).
 
 ## Known leftover, not cleaned up yet
 

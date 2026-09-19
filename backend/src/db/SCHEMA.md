@@ -730,16 +730,52 @@ creates `sys_schema_migrations` directly from the start.
 
 ### `sys_usage_aggregation_watermark`
 Added by migration `038`, 2026-09-05 (Usage Audit Phase 1). Single-row table (`id` fixed to
-`1` via a `CHECK` constraint) tracking how far the not-yet-built daily aggregation job (a
-later phase) has progressed merging `user_evt_usage.api_call_details` into
-`user_evt_usage_summary_monthly.api_call_details`. `sys_` bucket — internal bookkeeping, same
-category as `sys_schema_migrations`, not app/business data. Seeded with one row
-(`last_aggregated_at = '2000-01-01'`) so the first real run always finds itself "overdue."
+`1` via a `CHECK` constraint) tracking how far `usageTracking.service.ts`'s daily sweep
+(`maybeRunDailyUsageAggregation()`) has progressed. As of the 2026-09-07 batch-only rework, the
+sweep rolls up **both** `event_count` and `api_call_details` from `user_evt_usage` into
+`user_evt_usage_summary_monthly` for every raw row older than 3 days (originally, at migration
+`038`, this job didn't exist yet and only `api_call_details` was ever planned to be batched —
+`event_count` was real-time-incremented until the later rework). `sys_` bucket — internal
+bookkeeping, same category as `sys_schema_migrations`, not app/business data. Seeded with one
+row (`last_aggregated_at = '2000-01-01'`) so the first real run always finds itself "overdue" —
+`getUsageAggregationCutoff()` also treats this exact sentinel value as "the sweep has never run"
+(returns `null`) rather than computing a nonsense cutoff 3 days before the year 2000.
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `INT2` | PK, `DEFAULT 1`, `CHECK (id = 1)` — enforces exactly one row |
 | `last_aggregated_at` | `TIMESTAMPTZ` | `NOT NULL`, default `'2000-01-01'` |
+
+### `m_fmp_daily_cache`
+Added by migration `042`, 2026-09-07 (shared daily FMP cache). One row per `(symbol, api_name)`
+— a new day's fetch `UPSERT`s over the prior day's row rather than keeping history. Symbol-keyed,
+not per-user: this is pure market data, identical no matter who fetched it, so the first user to
+look up a symbol on a given day pays the real FMP cost for its cacheable calls and every other
+user looking up that same symbol the same day pays nothing for them. Read/written exclusively
+through `fmpDailyCache.service.ts`'s `getOrFetch()`. Originally consumed by `longTermAnalysisData
+.service.ts`/`contrarianComebackData.service.ts` alone; **extended 2026-09-12** into
+`marketData.service.ts`'s `getQuotes()`/`getHistorical()` — the two shared functions behind
+Refresh Prices (Legacy and Flex both use the same route), Momentum, Stock Preview, and
+`GET /quotes` — so all six features now read/write the same cache rows for a given symbol.
+`getHistorical()` always fetches the largest limit any caller needs (matching Contrarian
+Comeback's own `historical-price-eod` request) and slices locally per-caller, so a smaller
+request never overwrites the fuller dataset a larger one needs. `m_` bucket despite being far
+more volatile than other `m_` tables (daily churn, not stable reference data) — grouped there
+anyway since it's shared/global rather than portfolio- or user-scoped, matching this table's own
+precedent for what `m_` means (master/shared data) over a stricter "rarely changes" reading.
+
+| Column | Type | Notes |
+|---|---|---|
+| `symbol` | `VARCHAR(20)` | part of PK |
+| `api_name` | `VARCHAR(50)` | part of PK — e.g. `profile`, `quote`, `income-statement`, `grades`, `historical-price-eod` |
+| `api_call_description` | `VARCHAR(255)` | nullable, human-readable (e.g. the actual FMP URL called, including the limit requested) |
+| `cache_date` | `DATE` | `NOT NULL` — a row is treated as a cache hit only if this equals today's US-Eastern date; any older date is a miss and gets overwritten |
+| `api_result` | `JSONB` | `NOT NULL` — the raw FMP response for this symbol+endpoint |
+| `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_fmp_daily_cache_pkey` (PK, `symbol, api_name`). No TTL — rows are overwritten in
+place on the next day's fetch rather than expired/deleted, so the table's size is bounded by
+`(distinct symbols ever looked up) × (distinct api_name values)`, not by time.
 
 ## CockroachDB-specific notes
 
