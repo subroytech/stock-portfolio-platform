@@ -340,6 +340,145 @@ broken client instead, opening a fresh one on the next query.
 
 ---
 
+## 2.7c Stock Analysis Candlestick Charts + Support Module improvements, 2026-09-18–19
+
+**Candlestick Charts** — a new panel on the Stock Analysis tab, alongside the existing 4 preview
+quadrants, for viewing a symbol's real candlestick chart across 6 timeframes (5 minute through
+1 day) with 9 toggleable indicators (Moving Averages, Bollinger Bands, VWAP, Pivot Points,
+Fibonacci, RSI, MACD, and — added in a third round — Volume MA and OBV). Built across three
+rounds in one day:
+
+- **Round 1** built the core feature: a new shared cache table for the 5 sub-daily timeframes
+  (the existing daily cache is reused as-is for the 1-day timeframe), a per-interval bound on how
+  much history is fetched/shown so a 5-minute chart doesn't show 10+ days of noise, and a per-user
+  rate limit on the only action that ever makes a real, billed API call (fetching fresh data —
+  just opening the chart, or switching to an already-cached timeframe, is always free).
+- **Round 2** fixed two follow-on visual problems: a real elapsed-time x-axis was drawing weekend/
+  overnight gaps to scale, squashing each trading session into a narrow sliver and making moving-
+  average overlays look like a flat staircase — fixed by positioning bars by their plain sequence
+  number instead, recovering the real date only for tick labels and tooltips. A real pairing bug
+  was also found and fixed here: an indicator line was being matched up with the wrong candlestick
+  bar for every point except the exact middle of the chart.
+- **Round 3** added Volume MA (a smoothed trend line over the Volume panel's bars) and OBV (a
+  cumulative up/down-day running total, shown on its own axis) — the first two indicators in this
+  feature that actually correlate with trading volume rather than price.
+
+A real bug was found and fixed during this work: a chart that had been looked up *before* one of
+these rounds shipped could crash when reopened, because its cached data was still in an older
+internal shape the newer code didn't expect. Fixed so the app quietly recomputes that data fresh
+from what's already cached (at no extra cost) instead of crashing — meaning an old, previously-
+looked-up chart just works again the next time it's opened, with nothing for anyone to manually
+fix.
+
+**Support Module improvements** — the existing Support Tickets feature (any user can message an
+admin; only a permission-holding role can see/manage everyone's tickets) gained two things: the
+admin's ticket list and detail view now show who each ticket is from, and a user now sees a small
+red count badge on their own "Support" link the moment an admin replies — the same kind of badge
+an admin already saw for brand-new incoming tickets, just mirrored for the other side of the
+conversation.
+
+---
+
+## 2.7d Candlestick Pattern Detection + Pattern Q&A, 2026-09-20 through 2026-10-03
+
+Built across many short rounds (new patterns were added one or two pairs at a time, same build →
+test → seed → live-verify cycle every time) — worth walking through as one unit since the end
+result is a genuinely layered system: pure detection math, a display layer that's intentionally
+decoupled from it, and a separate LLM-backed Q&A feature sharing the same content.
+
+**Pattern detection is pure geometry on `{open, high, low, close}`, nothing else.** Two files do
+all of it, both in `frontend/src/lib/`:
+
+- `candlestickPatternDetection.ts` — single-bar patterns (Doji, Hammer, Marubozu, ...) via
+  `detectSingleBarPattern()`, a fixed if/else-if chain checked in a specific order so a candle
+  never matches more than one shape, plus `CandlestickPatternKey` (the master list of every
+  pattern's internal identifier), `PATTERN_LABELS` (the one place each key's real display name
+  lives — always identical to that pattern's name in the database, for Q&A consistency), and four
+  arrays grouping keys by tier: `PATTERN_KEYS` (Simple), `COMPLEX_PATTERN_KEYS` (Composite — the
+  name is a leftover from before that tier was renamed "Composite," kept to avoid a
+  rename-for-its-own-sake), `ADVANCED_PATTERN_KEYS`, `FIVE_CANDLE_PATTERN_KEYS` (Complex).
+- `candlestickComplexPatternDetection.ts` — every multi-candle pattern, via one function,
+  `detectComplexPatterns(chronologicalBars)`, that runs **three independent sliding windows**
+  (2-bar, 3-bar, 5-bar) over the same bar array in a single pass. Each window has its own
+  if/else-if chain of detector functions (e.g. `detectBullishEngulfing`, `detectMorningStar`,
+  `detectRisingThreeMethods`), and — a real design choice worth calling out — **a match from one
+  window never suppresses a match from another window at the same bar index**: a 2-bar Harami and
+  a 5-bar Three Methods pattern can both legitimately complete on the very same candle, and both
+  get reported. Newer detectors frequently **reuse** an existing, already-tested detector as a
+  base requirement and layer a stricter condition on top, rather than re-deriving the geometry from
+  scratch — e.g. `detectBullishAbandonedBaby` calls `detectMorningStar` internally and additionally
+  requires a genuine (not just body-level) gap on both sides of the middle candle; because the
+  added condition is strictly *more* restrictive, a true Abandoned Baby is mathematically
+  guaranteed to also satisfy the weaker Morning Star check, so checking the stricter one first in
+  the chain makes it win without the two ever actually conflicting.
+
+**The chart display layer never runs detection itself** — `CandlestickPopup.tsx` calls
+`detectComplexPatterns()` once per open chart and then just decides which of the returned matches
+to actually draw, based on which checkboxes are currently ticked in that tier's own picker
+(`visiblePatterns`/`visibleComplexPatterns`/`visibleAdvancedPatterns`/`visibleComplex5Patterns` —
+four parallel `Set<CandlestickPatternKey>` state values, one per tier, each defaulting to "all" for
+Simple and "none" for the other three). Each tier renders as its own horizontal strip below the
+price chart via a shared `MultiCandlePatternPanel` component — badges are positioned using the
+*price chart's own* Chart.js pixel-for-value function, which only stays accurate because every
+strip (including the price chart itself) is wrapped in an identical `TierLine` component that
+reserves the same fixed-width label column on the left — without that, a strip's own label would
+shift its content rightward relative to the chart above it and silently misalign every badge from
+its candle.
+
+**Pattern Q&A has two independent paths that both read from the exact same database rows**
+(`m_candlestick_pattern` + `m_candlestick_question_answer_entry`), but answer questions completely
+differently:
+
+- **Browse** (`GET /candlestick-question-answer/entries`) is a plain, ungated SQL search/filter —
+  instant, zero LLM cost, and it's also what seeds every pattern's content in the first place
+  (`backend/src/db/seedCandlestickQuestionAnswer.ts`'s `SEED_PATTERNS` array, one entry per
+  pattern with exactly 5 Q&A pairs — Definition/Interpretation/Reliability/How to Use/Common
+  Mistakes — written once and pushed live via `npm run seed:candlestick-question-answer`, which
+  can be scoped to just the new patterns in a given round via CLI args).
+- **Ask** (`POST /candlestick-question-answer/ask`) is a genuine agentic loop against Claude
+  (`candlestickQuestionAnswerAsk.service.ts`) — the model gets exactly 3 tools: a non-terminal
+  `search_question_answer_entries` (which calls the *same* search function Browse uses, scoped to
+  the caller's chosen trading horizon), and two mutually-exclusive terminal tools, `provide_answer`
+  and `unable_to_answer`. The model's own choice of which terminal tool to call **is** the
+  sufficiency judgment — there's no separate confidence score computed anywhere. A plain-text reply
+  with no tool call at all is treated as a failure, not a real answer, since `provide_answer` is
+  the only way this design considers an answer legitimately given. This path is rate-limited
+  per-user (`candlestickQuestionAnswerRateLimit.service.ts` — counts rows in
+  `user_evt_candlestick_question_answer_log` within a rolling, admin-configurable window, currently
+  10 questions per 10 minutes, `admin`/`admin-master` exempt) since every call is a real, billed
+  Anthropic request resolved through the same bring-your-own-key + admin-master-fallback machinery
+  every other FMP/Finnhub-consuming feature already uses (`getDecryptedKey(userId, 'anthropic')`).
+
+**Diagrams are a third, completely separate system** — `candlestickPatternDiagrams.ts` hand-
+describes each pattern's shape as plain geometry (a small array of `{high, bodyTop, bodyBottom,
+low, direction}` objects, one per candle, on a fixed 0–100 scale), rendered as inline SVG by
+`CandlestickPatternDiagram.tsx`. It's keyed by the pattern's display name (the same string that's
+in the database), not by its detection key, and it fails open — a pattern with no diagram entry
+just renders without one, never an error. This is why a brand-new pattern needs its own small
+diagram-authoring step even after its detection and Q&A content both already exist.
+
+**Adding a whole new tier needed almost no schema work.** When the 4th tier ("Complex," 5 candles)
+was added, `complexity_tier` turned out to need no database migration at all — it's a plain
+`VARCHAR(10)` with no `CHECK` constraint, validated entirely in application code
+(`COMPLEXITY_TIERS` in the backend service, mirrored by hand in the frontend's own copy of the same
+array, same "two hand-maintained copies, no shared-types pipeline" convention this whole app
+already follows everywhere else) — and `'Complex'` already fit the column width the exact same way
+`'Composite'` (the renamed 2-candle tier) already did. The two existing Pattern Q&A page surfaces
+that list tiers (the Browse table's Complexity filter, the Admin Console's create-pattern dropdown)
+needed zero code changes either, since both were already generated by mapping over that same array
+rather than hardcoding the 3 values that existed before.
+
+**The in-popup Symbol Switcher** (`CandlestickPopup.tsx`) replaced the chart header's static ticker
+text with a small dropdown that calls the same `useCachedSymbolsList()` hook the left-hand panel
+already uses (react-query shares the one underlying request, so this costs nothing extra). The
+popup tracks which symbol it's showing as its own internal state, seeded once from the `symbol`
+prop it was originally opened with — switching symbols from inside the dropdown never needs to
+notify the parent list component at all, and deliberately leaves the current interval/indicators/
+pattern-picker selections untouched rather than resetting them the way opening a brand-new chart
+from the left-hand panel does.
+
+---
+
 ## 2.8 Feature map — where to look for each screen
 
 | Screen | Frontend page | Backend routes/controller | Backend service(s) |
@@ -355,6 +494,9 @@ broken client instead, opening a fresh one on the next query.
 | Long-Term Analysis | `LongTermAnalysisPage.tsx` | `analysis.routes.ts` | `longTermAnalysisData.service.ts` (+ Python `long_term.py`) |
 | Contrarian Comeback | `ContrarianComebackPage.tsx` | `analysis.routes.ts` | `contrarianComebackData.service.ts` (+ Python) |
 | Stock Analysis (4 quadrants) | `StockAnalysisPage.tsx`, `StockAnalysisQuadrant.tsx`, `StockPreviewBody.tsx` | `stockPreview.routes.ts` | `marketData.service.ts` |
+| Stock Analysis (Candlestick Charts + Pattern Detection) | `CandlestickSymbolList.tsx`, `CandlestickPopup.tsx` (symbol switcher, 4-tier pattern pickers/badges) | `candlestick.routes.ts` | `candlestick.service.ts`, `candlestickIndicators.service.ts`, `candlestickRateLimit.service.ts`, `fmpIntradayCache.service.ts` — detection itself is frontend-only, pure functions in `frontend/src/lib/candlestickPatternDetection.ts`/`candlestickComplexPatternDetection.ts`/`candlestickPatternDiagrams.ts` |
+| Candlestick Pattern Q&A (Browse + Ask) | `CandlestickQuestionAnswerPage.tsx` (user), `AdminCandlestickQuestionAnswerPage.tsx` (admin, gated by `candlestick_question_answer:manage_content`) | `candlestickQuestionAnswer.routes.ts` (gated by `candlestick_question_answer:ask`) | `candlestickQuestionAnswer.service.ts` (Browse/content CRUD), `candlestickQuestionAnswerAsk.service.ts` (the agentic Ask loop), `candlestickQuestionAnswerRateLimit.service.ts`, `anthropicClient.service.ts` |
+| Support Tickets | `SupportWidget.tsx` (every user), `AdminSupportTicketsPage.tsx` (admin, gated by `support:manage`) | `supportTicket.routes.ts` | `supportTicket.service.ts` |
 | Usage Audit (admin) | `UsageAuditPage.tsx` (an Admin Console tab), `UsageDashboardCards.tsx`/`UsagePieChart.tsx`/`UsageBarChart.tsx` (Dashboard sub-tab's 6 independently-controlled charts) | `usageAudit.routes.ts` (incl. `GET /usage-audit/day`) | `usageTracking.service.ts` |
 | Admin Console | `AdminPage.tsx` and its sub-pages (`RolesPage`, `RolePermissionsPage`, `UserRolesPage`, `FunctionsPage`, `MasterDataPage`, `PortfolioTemplateApprovalPage`, `ConfigPropertiesPage`) | `roles.routes.ts`, `functionMaster.routes.ts`, `users.routes.ts`, `portfolioTemplate.routes.ts`, `configProperty.routes.ts` | `roles.service.ts`, `functionMaster.service.ts`, `users.service.ts`, `configProperty.service.ts` |
 | Config Properties (admin-master only) | `ConfigPropertiesPage.tsx` (an Admin Console tab, not its own route) | `configProperty.routes.ts` | `configProperty.service.ts` |

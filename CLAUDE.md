@@ -11,6 +11,10 @@ Before editing, creating, or deleting any file:
 
 # What This Repo Is
 
+**Platform Objective**: a self-directed stock investing platform for retail investors — see
+`Architecture.md`'s own "Platform Objective" section for the full statement. Everything below
+(the rebuild, the architecture) is in service of that product mission, not an end in itself.
+
 This is the **rebuild** of the stock portfolio dashboard — a ground-up rewrite turning a
 single-user, client-side-only app into a scalable multi-user platform with a real backend,
 database, and auth.
@@ -46,7 +50,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 09-12)
+# Current Build State (as of 10-05)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -1296,16 +1300,183 @@ this route currently has zero frontend callers** — closing the gap is about co
 calling it directly, or a future feature wiring it up, is now tracked) rather than fixing a live
 under-reporting problem.
 
-828 backend tests (up from 817), 488 frontend tests (up from 483), `tsc`/lint clean both sides.
-**Verified live against the real dev DB**: the duplicate-month fix confirmed via direct API call
-(`available-months` now returns a plain `2026-09-01`, not a timezone-shifted timestamp) and in the
-browser (dropdown shows "September 2026" once, not twice); the independent-per-card controls
-confirmed by switching one row's bar chart to "Today" via direct DOM manipulation (native
-`<select>` dropdowns aren't reliably clickable through CDP automation) while every other card
-stayed on its own separate selection. `GET /quotes` tested against the real FMP account
-`subrataroygcp@gmail.com` (which does hold a live FMP key) — a real 2-symbol request returned
-genuine live quotes and wrote a `user_evt_usage` row with `api_call_details: { fmp_quote: 2 }`,
-confirmed by direct query.
+**Round 3, built 2026-09-18–19**: the Dashboard sub-tab's Chart-3 bar chart was regrouped from
+by-user to **by-function/feature** — same combined FMP+Finnhub metric, but now summed per feature
+(Stock Preview, Contrarian Finder, Momentum Analysis, etc.) across every user in the role-filtered
+slice, rather than one bar per user. New `usageSharesByFeature()`/`UsageFeatureShare` in
+`usageShare.ts`, reusing the same `FEATURE_LABELS` map `UsageAuditPage.tsx`'s per-user breakdown
+rows already relied on (moved there from a page-local constant so both need only one copy).
+`UsageBarChart.tsx` is otherwise unchanged — same hidden-x-axis-ticks + tooltip/legend
+identification pattern as its by-user predecessor.
+
+Separately fixed the same day: `'stock_analysis_candlestick'` (added to the backend's
+`UsageFeature` union when the Candlestick Charts feature below shipped) was never added to the
+frontend's own hand-maintained mirror of that type (`frontend/src/api/usageAudit.ts` — this
+codebase's established "two hand-maintained copies" pattern) or to `FEATURE_LABELS`. Real
+candlestick usage numbers were showing up correctly in both the Dashboard bar chart and the Last
+3 Days breakdown rows, but with a blank label next to them (`FEATURE_LABELS[feature]` evaluating
+to `undefined`) — the data was always right, only the label lookup was missing. Since
+`FEATURE_LABELS` is typed as `Record<UsageFeature, string>`, correctly updating the union is what
+would have made TypeScript force the missing label entry to exist in the first place. Fixed both
+files; `tsc -b --noEmit` now genuinely requires the label whenever a new feature key is added.
+
+904 backend tests, 516 frontend tests, `tsc`/lint clean both sides (Round 3's own count, after the
+Candlestick Charts work below). Round 1/2's own counts (828/488) are as they were verified at the
+time.
+
+## Dev-Mode Double-Billing Fix — Lazy Tab Mounts + In-Flight FMP Request Coalescing ✅ Done
+
+Built 2026-09-18, prompted by a direct report: a session that had just logged in and made no
+explicit request of its own still showed 16 real API calls under "Today's calls." Root-caused to
+two independent, compounding issues.
+
+**`TabShell.tsx` mounted every tab unconditionally** (only toggling CSS `hidden` to control which
+one was visible), so a tab's own data-fetching hooks fired the instant a session logged in, before
+the user ever clicked that tab — confirmed live via Stock Analysis's 4 quadrants, which persist
+their last-looked-up tickers to `sessionStorage`, re-fetching those leftover tickers on every
+single login with zero user action. Fixed with a `visitedTabs` `Set<string>` that only ever grows
+— a tab's content now renders only once its path has actually been visited at least once in the
+session, and stays mounted (preserving in-progress state exactly as before) for the rest of the
+session once it has. This only defers the *first* mount, so tab-switching still never resets a
+tool's state.
+
+**`fmpDailyCache.service.ts`'s `getOrFetch()` had a real concurrent-fetch race**: two requests for
+the same `(symbol, apiName)` arriving before either one's cache write had landed both saw a cache
+miss and both made a real, billed FMP call — reproduced live via React StrictMode's dev-only
+double-mount, but the same race can occur in production too (e.g. two users looking up the same
+previously-uncached symbol at the same moment). Fixed by coalescing concurrent callers for the
+same key through an in-flight `Promise` map — whichever call reaches the function first "wins,"
+and every other concurrent caller for that same key awaits and shares its single result instead
+of starting a second real fetch. New regression tests cover both the coalescing case and that a
+later, non-concurrent call for the same key still starts a fresh fetch as normal.
+
+## Stock Analysis — Candlestick Charts ✅ Done
+
+Built across three rounds, 2026-09-18. A new "Candlestick Charts" section on the Stock Analysis
+tab (reuses the existing `stock_analysis:view` gate — see below for a known, still-open RBAC gap
+this shares with the 4-quadrant preview), independent of the 4 existing preview quadrants: a
+left-side panel listing every symbol already cached (shared across every user — the cache is
+symbol+interval-keyed, not per-user; green rows are fresh within the last 10 minutes, grey rows
+are viewable but not live-fresh) plus a lookup field for a brand-new symbol, opening a full-screen
+pop-up chart. Six timeframes — `5min`/`15min`/`30min`/`1hour`/`4hour`/`1day` (`1min` was
+considered and dropped: live-verified against a real FMP account as a genuine HTTP 402 plan-tier
+restriction, not a market-hours artifact).
+
+**Shared cache, split by freshness rule**: `1day` deliberately reuses the *existing* shared daily
+cache (`m_fmp_daily_cache`/`marketData.service.ts`, the same one Momentum/Refresh Prices/Stock
+Preview/Contrarian Comeback/`GET /quotes` all already share) rather than a new mechanism — its
+`getHistorical(symbol, apiKey, limit)` already slices whatever's cached down to a caller-supplied
+`limit`, so the interval just computes and passes one, exactly like every other caller. The five
+new sub-daily intervals get their own new table, `m_stock_ticker_candlestick_cache` (migration
+`044`) — one row per `(symbol, time_interval)`, storing both the raw OHLCV bars and their
+precomputed indicators as JSONB, with a **time-based** (10-minute) freshness rule instead of
+`m_fmp_daily_cache`'s calendar-day one, since intraday bars turn over far faster. Read/write are
+deliberately split into an always-free, never-fetching `getCached()`/`getSnapshot()` path and an
+explicit, rate-limited `fetchAndStore()`/`refresh()` path (`fmpIntradayCache.service.ts`/
+`candlestick.service.ts`) — mirrors `fmpDailyCache.service.ts`'s own in-flight-coalescing pattern
+so two near-simultaneous refreshes for the same symbol+interval share one real fetch.
+
+**Indicators**: reuses this codebase's existing SMA/EMA/RSI/MACD/Bollinger Bands math
+(`momentum.service.ts`) rather than reimplementing it, wrapped by new rolling-window/continuous-
+state series functions in `candlestickIndicators.service.ts` — `mwSMA`/`mwBB` are pure rolling-
+window reuse (each reading only depends on its own trailing closes), while RSI/MACD get their own
+real continuous-state series implementations, since naively reseeding `mwRSI`/`mwMACD` at every
+window position would silently diverge from a textbook-correct reading. Three genuinely new
+indicators with no prior precedent in this codebase: **VWAP**, **Pivot Points** (Classic, derived
+from the most recently closed prior bar), and **Fibonacci Retracement** (auto-detected swing
+high/low across the returned window). A per-interval display/buffer day-range table
+(`INTERVAL_RANGES`) bounds how much history is fetched/shown per timeframe (sized to target
+~150-170 displayed bars per interval, using real bars-per-trading-day ratios confirmed live, not a
+naive session-hours estimate) — split into **history-dependent** indicators (SMA/EMA/RSI/MACD/BB/
+Volume MA, computed over the full buffered range so they're accurate from the very first
+*displayed* bar, not just the newest one) vs. **window-relative** ones (VWAP/Pivot Points/
+Fibonacci/Volume/OBV, recomputed fresh over just the displayed bars, never the hidden buffer —
+conventionally session/view-relative measures where accumulating across invisible history would
+produce a number that doesn't mean what a viewer expects).
+
+**Chart x-axis positions bars by sequence index, not real elapsed time** — drawing weekend/
+overnight gaps to scale on a real time axis was visually flattening each trading session's price
+action into a narrow sliver, making moving-average overlays look like a flat staircase instead of
+a smooth trend line (live-verified the underlying indicator *data* was correct throughout; this
+was a rendering/scale characteristic). Tick/tooltip callbacks recover the real date from the index
+via the same chronological bar array already in scope.
+
+**Volume Moving Average + On-Balance Volume (OBV)**, added as the third round: two volume-
+correlated overlays on the existing Volume panel (not a new stacked panel), since none of the
+other indicators actually correlate with volume itself. Volume MA is a trivial reuse of the same
+rolling-window SMA logic fed `bar.volume` instead of `bar.close`; OBV (a cumulative running total
+— adds volume on an up day, subtracts on a down day, unchanged on a flat day) is genuinely new
+and needs its own secondary y-axis, since its cumulative scale is unrelated to Volume's per-bar
+magnitude and can go negative, unlike raw volume.
+
+**Per-user rate limit** on the only action that ever makes a real FMP call (`POST .../refresh`) —
+one combined budget across every symbol/timeframe for that user, admin-configurable via Config
+Properties (default 10 requests/10 minutes at launch; **currently set to 50/5 in the live dev
+environment**). The two Config Property display names were renamed 2026-09-19 (migration `045`,
+from "Candlestick Max New Requests"/"Candlestick Rate Limit Window (Minutes)" to **"User's Max New
+Requests"**/**"User's API Rate Limit Window (Minutes)"**) ahead of the still-backlogged
+all-encompassing rate limit (see Backlog below) — `property_key` is unchanged/immutable, only the
+admin-facing label was generalized so it doesn't need a second rename later. Reads are always
+free, even while a user is fully rate-limited.
+
+**A real bug found and fixed live 2026-09-18, worth calling out same as this project's other
+"real bug found+fixed" entries**: a cache row written under an earlier code version — before the
+full-per-bar-series shape existed for `sma20`/`sma50`/`ema20`/`rsi14`/`macd`/`bb20` — still held
+the OLD single-value/single-object shape (the same shape `momentum.service.ts`'s own single-
+snapshot functions return). `getSnapshot()` never recomputed on read, so an un-refreshed row was
+passed straight through to the frontend, which crashed trying to spread a non-array
+(`TypeError: series is not iterable`, surfacing wherever `seriesToPoints()` happened to run first
+— reported as "an error in the `<MacdChart>` component" in one real session, but not specific to
+that chart). Fixed with a self-healing check (`isValidHistorySeries()`): if a cached row's
+history-dependent fields aren't array-shaped, `getSnapshot()` recomputes them fresh from the
+already-cached raw bars (zero FMP cost) instead of passing the stale shape through — this also
+means adding `volumeSma20` for the Volume MA work above automatically self-healed every existing
+cache row on next read, with no migration needed. A second, separate bug found while building the
+index-based x-axis: `seriesToPoints()` reversed an indicator series to chronological order but
+zipped it against the *original* (still newest-first) `bars` array by the same index, silently
+mismatching every point except the exact midpoint — fixed by using the series' own reversed
+length for indices on both sides, removing the second array entirely.
+
+**Known, still-open RBAC gap**: Candlestick Charts is not separately identified/gated from the
+base `stock_analysis:view` permission that already gates the 4 preview quadrants — both share the
+one permission, with no dedicated sub-permission of their own. Raised and discussed, but
+superseded by the rate-limit-naming work above; not yet resolved either way.
+
+904 backend tests (up from 828), 516 frontend tests (up from 488), `tsc`/lint clean both sides
+throughout all three rounds. Live-verified against the real dev DB and a real FMP account
+(throwaway `user-premium` test account, deleted after each round's verification): real candlestick
+rendering, indicator overlays, timeframe switching, freshness badge/Time-of-Pull, rate limiting
+(confirmed the limit-plus-one request 429s with a clear message, confirmed reads stay free even
+while rate-limited), the `1day` daily-reuse path, the gap-free x-axis, and — for the Volume MA/OBV
+round specifically — opening a symbol cached *before* that round shipped and confirming it
+self-heals and renders correctly with no console error.
+
+## Support Module — Requester Identity + Unread-Reply Indicator ✅ Done
+
+Built 2026-09-18, closing two gaps in the existing Support Tickets feature (2026-09-05): the admin
+Support Tickets UI showed a ticket's subject/status but never who it was from, and — unlike
+admin's own existing unread-ticket badge — a user had no way to tell a new admin reply had
+arrived without opening every ticket to check.
+
+New nullable-free `user_last_read_at TIMESTAMPTZ NOT NULL DEFAULT now()` column on
+`users_support_tickets` (migration `043`) — mirrors `status = 'new'` already doubling as the
+*admin*-side unread flag, but a ticket's status can't do double duty for the *owner* too (it can
+land on any of the 3 admin-owned resting states — open/on_hold/closed — regardless of whether the
+owner has seen the latest reply), so this needed its own orthogonal column. Unread-by-owner is
+**derived, not stored**, as `user_last_read_at < updated_at`: replying as the owner stamps both
+columns with the same `now()` in one write (read); an admin reply only moves `updated_at` forward
+(unread); opening the ticket as its owner stamps `user_last_read_at = now()` (cleared) — the exact
+mirror of `markOpenedByAdmin()`'s existing status-based read-receipt for the admin side.
+
+`supportTicket.service.ts`'s ticket queries now `JOIN users` to surface `userEmail` alongside
+every ticket, and select the derived `unread_by_user` boolean — both populated on every ticket
+list/detail read. `AdminSupportTicketsPage.tsx` shows "From `{ticket.userEmail}`" on both the list
+and detail views. `SupportWidget.tsx` gets a numeric red badge on its "Support" trigger link,
+counting tickets with `unreadByUser: true` — mirroring `UserPersonaBadge.tsx`'s existing admin-
+side unread-ticket-count badge, but living on the widget itself (fetched unconditionally, not only
+while the modal is open, so the badge is visible before ever clicking it) since `UserPersonaBadge`
+isn't rendered on `PendingReviewPage.tsx`, while the Support widget is present everywhere a user
+can see their own tickets.
 
 ## Refresh Prices FMP Call Reduction — Shared Cache Extended to marketData.service.ts ✅ Done
 
@@ -1354,8 +1525,486 @@ requesting `limit=96`) — logged `{ fmp_historical: 0, fmp_quote: 0 }`, confirm
 historical and quote legs were served entirely from the cache Momentum had just populated, with
 zero additional real FMP calls, less than a second later.
 
+## Anthropic API Key — Bring-Your-Own + Admin-Master Fallback ✅ Done
+
+Built 2026-09-20 — Candlestick Pattern Q&A's free-text Ask had been hard-503ing for everyone
+("not configured yet") since a single global `ANTHROPIC_API_KEY` env var was never set. Rather
+than just filling in that one env var, wired Anthropic into the exact same bring-your-own +
+Admin-Master Fallback machinery FMP/Finnhub already use — no new tables, no new Config
+Property, no new fallback logic.
+
+`'anthropic'` added to `userSubscription.controller.ts`'s `ALLOWED_PROVIDERS` (the actual gate
+that would otherwise 400-reject a key) and to `SubscriptionsPage.tsx`'s `PROVIDERS` list (My
+API(s) tab) — `users_subscriptions`/`getDecryptedKey()` were already fully provider-agnostic, so
+no schema or service change was needed there. `anthropicClient.service.ts`'s `createMessage`
+now takes the resolved key as an explicit per-call argument instead of a module-level singleton
+built once from `env.anthropicApiKey` — different callers can now have different keys, and
+constructing the SDK wrapper per call is cheap (same reasoning `marketData.service.ts`'s
+`getQuotes(symbols, apiKey)` already relies on for FMP). `candlestickQuestionAnswerAsk.service
+.ts`'s `ask()` gained an `apiKey` parameter threaded through; `candlestickQuestionAnswer
+.controller.ts`'s `askQuestion()` resolves `getDecryptedKey(userId, 'anthropic')` after the
+existing rate-limit check and before calling `ask()`, replacing the old
+`MissingAnthropicApiKeyError` → generic-503 catch with the same `MissingUserApiKeyError` →
+real-message-503 pattern every other provider-consuming controller already uses.
+
+`ANTHROPIC_API_KEY`/`env.anthropicApiKey` were deleted outright (`env.ts`, `.env.example`,
+`.env`) rather than left as a third inert vestige alongside `fmpApiKey`/`finnhubApiKey` (which
+stayed declared-but-unused after their own 2026-07-12 switch, since real users had been relying
+on them in production up to that point) — this field never had a single working real-user path
+to preserve compatibility with, so there was nothing worth keeping.
+
+966 backend tests (up from 965), 555 frontend tests (up from 554), `tsc`/lint clean both sides.
+Documentation updated in `User Manual.md` (role table's key-provider list, the API key
+resolution section). Still to be confirmed live: admin-master adding a real Anthropic key via
+My API(s) and a fallback-eligible role successfully borrowing it end-to-end (needs a real,
+billed Anthropic key on the account first).
+
+**Spend-control research, same day**: before loading a real (small, ~$10) balance onto the
+Anthropic account, confirmed directly against Anthropic's current API docs that **no
+balance-query endpoint exists** — the Console's Plans & Billing page is the only place a
+remaining-$ figure is shown; the Usage & Cost Admin API only reports historical spend already
+incurred, and requires a different, org-level Admin API key (`sk-ant-admin01-...`) that doesn't
+fit this platform's per-provider key model at all. Recommended approach instead: a self-tracked
+$ ledger computed from the token counts already logged in `user_evt_candlestick_question_answer_log`
+against Anthropic's published per-model pricing, gated by a new Config Property budget cap, with
+a hard-stop once estimated spend crosses it — no Anthropic API call needed. **Not yet built** —
+documented in `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md` Section 9.4/11.9 as
+an open item pending a build-now-vs-fast-follow decision.
+
+## Candlestick Patterns — Tweezer Bottom/Top ✅ Done
+
+Built 2026-09-28, the first item picked off the Section 13 backlog (`Requirements/Candlestick-
+Pattern-Q&A-Module-Requirements.md`) — chosen because its Q&A content was already drafted.
+`detectTweezerBottom`/`detectTweezerTop` added to `candlestickComplexPatternDetection.ts` as pure
+2-bar geometric checks (matching lows/highs within a 10% tolerance of the larger candle's own
+range) — deliberately does NOT require the two candles to be opposite colors, since the curated
+content frames that as a reliability enhancer, not part of the pattern's own definition. Checked
+as the weakest `else if` fallback after Harami in `detectComplexPatterns()`'s 2-bar chain, per the
+curated content's own "a comparatively weaker signal... don't treat it with the same weight as an
+Engulfing pattern" framing. `COMPLEX_PATTERN_KEYS` grew 6→8; badges `Tb`/`Tt` (green/red, matching
+the Iu/Id/Ou/Od "name already encodes direction" convention rather than +/-); 2 new diagram
+entries in `candlestickPatternDiagrams.ts` (two candles sharing the exact same low/high). 4 test
+files updated (detection, badge, popup fixture/count assertions, diagrams) — one pre-existing
+`detectComplexPatterns` test fixture needed a tweak after its own "neutral" bar coincidentally
+also satisfied the new Tweezer Top check (same class of fixture-collision issue found during the
+Three Outside Up round). 733 frontend tests, `tsc`/lint clean both sides. DB seeded scoped to just
+these 2 patterns (`npm run seed:candlestick-question-answer -- "Tweezer Bottom" "Tweezer Top"`) —
+verified live via direct query (both `Composite` tier, 5 Q&A entries each, Composite total 6→8).
+**Live-verified end-to-end** against the real dev server: real Tweezer Bottom/Top matches found on
+BA's 1-hour chart, badges/connectors render and align correctly with real candles, and both
+patterns' curated Q&A + diagrams render correctly on the Pattern Q&A page.
+
+**Bullish/Bearish Kicking ✅ Done, built 2026-09-28-29** — content drafted first (10 Q&A entries,
+`complexityTier: 'Composite'`, mirroring Tweezer's own content-first precedent), then seeded, then
+diagrams added, then full chart detection in a final round. `detectBullishKicking`/
+`detectBearishKicking` reuse the exact 0.05×range wick threshold `detectSingleBarPattern()`'s own
+`marubozu` check already uses (so "Marubozu" can never mean two different things in this codebase),
+plus a zero-overlap gap requirement between the two candles' ranges - naturally mutually exclusive
+with every other 2-bar pattern, so order in `detectComplexPatterns()`'s chain doesn't matter for
+correctness. `COMPLEX_PATTERN_KEYS` grew 8→10; badges `K+`/`K-` (back to the +/- convention, since
+"Kicking" itself carries no bullish/bearish direction the way Tweezer's Bottom/Top does); 2 diagram
+entries (both Marubozu shapes, second candle's range gapping past the first's). 749 frontend tests,
+`tsc`/lint clean. DB seeded scoped to just these 2 patterns, verified live (`Composite` tier, 5 Q&A
+entries each, Composite total 8→10). **Live-verified**: picker/badges/labels all correct in the
+real chart UI; scanned every currently-cached symbol/timeframe's real market data for an actual
+Kicking match and found none (expected - the curated content itself frames this as "a rare but
+distinct pattern," requiring a genuine gap between two wickless candles) - no false positives
+either, a useful negative-side confirmation the detector isn't over-firing.
+
+## Candlestick Popup — In-Place Symbol Switcher ✅ Done
+
+Built 2026-09-29, `/plan`-approved. Replaces the popup header's static ticker `<h1>` with a
+dropdown (`SymbolSwitcher`, defined inline alongside `PatternPicker`) so a user can switch which
+symbol the same open chart shows without closing it - reuses `CandlestickSymbolList.tsx`'s own
+new-symbol-lookup form and cached-symbol row styling exactly, and calls `useCachedSymbolsList()`
+itself (react-query dedupes against the landing page's own subscription, no extra network cost).
+Per explicit pre-planning answers: the popup owns "current symbol" as its own internal
+`activeSymbol` state (seeded once from the `symbol` prop, `CandlestickSymbolList.tsx` needed zero
+changes), switching preserves the current interval/indicators/pattern-picker selections rather
+than resetting to defaults, and the dropdown includes the new-symbol lookup input too (full parity
+with the landing page). One deliberate exception to "preserve everything": `autoRefreshedRef`
+(the once-per-session 1-Day auto-refresh guard) resets on every real symbol change, since it's
+per-symbol bookkeeping, not a user preference. 5 new tests, plus 2 pre-existing
+`CandlestickSymbolList.test.tsx` tests fixed for the new markup (they asserted the old plain `<h1>`
+text). 754 frontend tests, `tsc`/lint clean. **Live-verified**: switching BA→PLTR kept the interval
+on 4 Hour and the Composite pick at "1 of 10 shown" (not reset); typing a brand-new symbol (MSFT)
+in the switcher's own input correctly hit the existing "no cached data" → Fetch flow, which then
+loaded real data while still preserving interval/pattern picks.
+
+**Real MSFT Tweezer occurrences confirmed correct the same day**: a user-reported Tweezer Bottom
+on Mar 2, 2026 and Tweezer Top on Mar 5, 2026 were both verified genuine, not false positives -
+Feb 27's low ($389.88) vs. Mar 2's low ($390.63) differ by $0.75, well inside the 10%-of-range
+tolerance; Mar 4's high ($411.03) vs. Mar 5's high ($411.61) differ by $0.58, same tolerance check.
+Confirmed both via direct API/bar-data recomputation and by reading the live badges' own `title`
+tooltips in the browser - both matched exactly.
+
+## Candlestick Patterns — Content Drafted for Every Remaining Backlog Item ✅ Done
+
+Built 2026-09-29, per explicit direction ("do the content creation for all of them in next Phase
+and then implement them as per convenience and lift") - rather than pick one pattern at a time,
+drafted Q&A content for every pattern still in the Section 13 backlog in one pass, so future
+rounds can implement whichever is most convenient without a content-authoring step first.
+**Bullish/Bearish Abandoned Baby** and **Upside/Downside Tasuki Gap** (both Advanced tier, 10 Q&A
+entries each) added directly to `backend/src/db/seedCandlestickQuestionAnswer.ts`'s `SEED_PATTERNS`
+— fit the existing tier system with zero schema changes, so either can be built next without any
+type/schema work first. **Rising/Falling Three Methods** (the Complex 5-candle tier's own concrete
+example) drafted as plain text in `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md`
+Section 13 instead of the seed file - `ComplexityTier` has no `'Complex'` value yet, and widening
+that type before the tier itself is scoped would let an unbuilt option leak into the Admin
+Console's/Pattern Q&A page's own tier dropdowns with nothing behind it. `tsc -b --noEmit` clean on
+the backend after the seed-file additions (content-only, no detection/badge/chart-picker wiring
+for any of the 3 pattern pairs yet).
+
+**Diagrams added for all 6 patterns the same day**, per a direct follow-up question ("Have you
+got the Diagrams in for all the cases?") - Bullish/Bearish Abandoned Baby (reuses Morning/Evening
+Star's own long-candle shapes exactly, redrawing only the middle candle with a real gap on both
+sides instead of Morning/Evening Star's one-sided, touchable gap), Upside/Downside Tasuki Gap
+(candle 3 drawn opening inside candle 2's body and pulling back into the gap without reaching
+candle 1's own close), and Rising/Falling Three Methods (three small contained candles between
+two long ones) all added to `candlestickPatternDiagrams.ts`. The first two pairs' diagrams are
+live (seeded + reachable from the Q&A page); Rising/Falling Three Methods' diagrams are dormant
+(no live pattern row references them yet) until the Complex tier itself exists. 16 new tests, 772
+frontend tests, `tsc`/lint clean. **Live-verified**: seeded Abandoned Baby/Tasuki Gap temporarily
+to confirm both diagrams render correctly on the Pattern Q&A page (island-reversal gap and
+partial-gap-fill shapes both visually correct).
+
+## Bullish/Bearish Abandoned Baby ✅ Done
+
+Built 2026-09-29, the first item picked off the now-fully-content-drafted backlog. `detectBullish
+AbandonedBaby`/`detectBearishAbandonedBaby` reuse `detectMorningStar`/`detectEveningStar` as a base
+requirement (same reuse-the-existing-detector precedent as Three Inside/Outside reusing Harami/
+Engulfing) plus a strictly stronger double-gap check (`b.high < a.low && c.low > b.high` for the
+bullish case) - proven to always imply the base Morning/Evening Star check already holds, so
+checking Abandoned Baby's stricter branch BEFORE Morning/Evening Star in `detectComplexPatterns()`'s
+3-bar chain correctly makes it the more specific classification, falling back to plain Morning/
+Evening Star for the far more common partially-gapped case. `ADVANCED_PATTERN_KEYS` grew 8→10;
+badges `A+`/`A-` (back to the +/- convention, since "Abandoned Baby" carries no inherent
+direction). 783 frontend tests, `tsc`/lint clean. **Live-verified against real market data**: found
+3 genuine occurrences by scanning every cached symbol/timeframe (GEV bearish on 2026-03-26, XLC
+bearish on 2026-08-17, REMX bullish on 2026-08-14) - opened GEV's real chart and confirmed the
+badge, its tooltip OHLC, and the underlying 3-day bar sequence all agree: a long bullish candle
+(Mar 24), a small candle gapping cleanly above it (Mar 25, low $920.90 vs. Mar 24's high $913.58),
+then a long bearish candle gapping cleanly back below (Mar 26, high $917.26 vs. Mar 25's low
+$920.90) - a genuine island reversal, unlike Kicking which found zero real matches.
+
+## Upside/Downside Tasuki Gap ✅ Done
+
+Built 2026-10-03 - the last Advanced-tier item ready to build without schema work (Rising/Falling
+Three Methods is all that's left, and it needs the new Complex tier first). `detectUpsideTasukiGap`/
+`detectDownsideTasukiGap` are the only CONTINUATION patterns in this file's 3-bar tier (every other
+Advanced pattern is a reversal): two same-direction candles with a genuine gap between them (no
+overlap), then a third candle opening inside the second candle's body and pulling back into the gap
+without fully filling it (its close must stay short of the first candle's own close). Structurally
+incompatible with Engulfing-based Three Outside Up/Down (which require a/b to OVERLAP, the opposite
+of this pattern's no-overlap gap), so no priority-ordering conflict. `ADVANCED_PATTERN_KEYS` grew
+10→12; badges `Gu`/`Gd` (non-+/- convention like Three Inside/Outside, since "Upside"/"Downside"
+already encode direction; "G" for "Gap" since "T" was already Tweezer's). 795 frontend tests,
+`tsc`/lint clean. Content was already seeded from the earlier diagram-verification pass, so no new
+seed run was needed this round. **Live-verified against real market data**: found 3 genuine
+occurrences scanning every cached symbol (XLB upside on 2026-08-06, SATS upside on 2026-03-26,
+FBTC upside on 2026-03-05) - opened XLB's real chart and confirmed the badge, its tooltip OHLC, and
+the underlying 3-day bar sequence all agree: two bullish candles with a clean $0.38 gap (Aug 5's
+low $52.45 vs. Aug 4's high $52.07), then Aug 6 opening inside Aug 5's body and closing at $52.17 -
+into the gap zone, but still above Aug 4's own close ($52), so the gap holds exactly as the
+pattern's own definition requires.
+
+## Complex (5-candle) Tier + Rising/Falling Three Methods ✅ Done
+
+Built 2026-10-03, `/plan`-approved after two parallel Explore passes (backend schema/types,
+frontend UI surfaces) confirmed the real scope before writing any code. Adds the 4th and final
+complexity tier, "Complex" (5 candles) - reusing the name vacated by the 2026-09-28
+Composite rename - and wires up its one concrete example, Rising/Falling Three Methods, closing
+out the entire Section 13 backlog.
+
+**No DB migration needed**: `complexity_tier` is `VARCHAR(10)` with no CHECK constraint -
+validation is entirely application-side (`COMPLEXITY_TIERS` in the backend service,
+`VALID_COMPLEXITY_TIERS` in the controller, both hand-mirrored in the frontend `api/
+candlestickQuestionAnswer.ts`), and `'Complex'` (7 chars) already fit the existing column width -
+confirmed by the exact same column already holding `'Composite'` (9 chars). Every frontend surface
+listing tiers (`CandlestickQuestionAnswerPage.tsx`'s filter, `AdminCandlestickQuestionAnswerPage
+.tsx`'s create-pattern select) was already generated from `COMPLEXITY_TIERS`, not hardcoded - zero
+code changes needed in either file, confirmed by the full existing test suite (251 tests across
+both pages) passing completely unmodified.
+
+**Detection**: `detectRisingThreeMethods`/`detectFallingThreeMethods(a,b,c,d,e)` - a new, genuinely
+5-bar window in `detectComplexPatterns()` (parallel to the existing 2-bar/3-bar windows) - a long
+trend candle, three candles fully contained within its own high/low range (no strict body-size
+threshold on the middle three - the curated content frames smaller bodies as a reliability
+enhancer, not part of the core definition, same precedent as Tweezer's own color check), then a
+long candle closing past the first candle's own close.
+
+**New types/arrays**: `FIVE_CANDLE_PATTERN_KEYS` - deliberately NOT named `COMPLEX_PATTERN_KEYS`,
+since that identifier already means the 2-candle/Composite tier internally (a legacy mismatch kept
+from the 2026-09-28 rename, to avoid a churn-only internal rename). Badges `Rm`/`Fm` (non-+/-
+convention like Three Inside/Outside, since "Rising"/"Falling" already encode direction).
+
+**`CandlestickPopup.tsx`**: a 4th on-demand picker/badge-strip (`Complex5PatternPanel`), replicating
+the exact Composite/Advanced precedent (own state, handlers, `TierLine` row, picker-group row).
+Since Complex is the new last tier by candle-count ordering, `AdvancedPatternPanel`'s own
+`marginBottomClass` changed from `mb-3` to `mb-px` (no longer last, needs the uniform 1px gap) and
+the new panel took over `mb-3`; its `connectorHeightClass` (`478px`) computed the same way the
+existing two were (gap + every strip's height above it, reaching into the price chart).
+
+807 frontend tests (up from 795), `tsc`/lint clean both sides. Content for Rising/Falling Three
+Methods (drafted 2026-09-29 as plain text, pending exactly this tier) copied into `SEED_PATTERNS`
+and seeded live. **Live-verified against real market data**: scanning every cached symbol/timeframe
+found 9 genuine occurrences (not rare at all, unlike Kicking/Abandoned Baby) - opened MSFT's real
+4-hour chart and confirmed a Rising Three Methods on Aug 4→6, 2026: a long bullish candle
+(bodyRatio 0.72, range $479.35–$499.33), three candles fully contained within that range, then a
+long bullish candle closing at $496.43, past the first candle's own $495.29 close. Pattern Q&A page
+confirmed showing "Complex" as a real filter value with both patterns' curated content and diagrams
+rendering correctly.
+
+## Candlestick Pattern Metadata + Ask ReAct Upgrade (Phase 1) ✅ Done
+
+Built 2026-10-04/05, `/plan`-approved, closing a real gap in Candlestick Pattern Q&A's existing
+agentic Ask loop: the model already ran a genuine ReAct-shaped loop (search tool → sufficiency
+judgment → terminal tool), but its only tool was a plain `ILIKE` substring match over
+`question_text`/`pattern_name` — silently returning nothing for structural questions ("which
+patterns are continuation signals?") or synonym phrasing ("pin bar") that never appears verbatim
+in curated text. Confirmed live before building anything: the model's own
+`search_question_answer_entries` tool call really does hit nothing but that one `ILIKE` clause.
+
+**Schema (migrations `054`/`055`)**: six new deterministic metadata columns on
+`m_candlestick_pattern` — `signal_type` (reversal/continuation/indecision), `directional_bias`
+(bullish/bearish/neutral/context-dependent), `requires_gap`, `trend_context`
+(prior-downtrend/prior-uptrend/either/none), `synonyms` (JSONB array), `mirror_pattern_id`
+(self-referencing FK to the true directional-opposite pattern, e.g. Hammer ↔ Shooting Star —
+deliberately **not** used for same-shape-different-context pairs like Hammer/Hanging Man, which
+share identical geometry but aren't mirrors of each other). Backfilled for all 34 patterns,
+grouped by identical value-tuples (10 `UPDATE ... WHERE pattern_name IN (...)` statements instead
+of 34 near-duplicate rows) to keep the migration auditable. `requires_gap` in particular is not a
+judgment call — derived directly from reading the real detector functions
+(`detectPiercingLine`/`detectDarkCloudCover` check a genuine wick-to-wick gap;
+`detectBullishAbandonedBaby`/`detectBearishAbandonedBaby` check gaps on both sides of the middle
+candle; Morning/Evening Star's own weaker body-level gap check is deliberately `false`). Two
+flagged, genuinely debatable judgment calls: Marubozu/Belt Hold's `signal_type` is set to
+`'continuation'` (the dominant textbook framing) despite being the most context-flexible patterns
+in the set. Synonyms deliberately sparse — included `"Inside Bar"` (Harami), `"Island Reversal"`
+(Abandoned Baby); deliberately excluded `"Pin Bar"` (genuinely ambiguous between
+Hammer/Shooting Star/Hanging Man without trend context) and `"Inverted Hammer"`/`"Mat Hold"`
+(these name real, different, unimplemented patterns). Applied and live-verified against the real
+dev DB: 34/34 rows populated, signal-type split (3 indecision/25 reversal/6 continuation) and
+gap count (8 true) match the design exactly, 28 patterns correctly mirrored.
+
+**New tool, `filter_patterns_by_metadata`**: added alongside the existing
+`search_question_answer_entries` in `candlestickQuestionAnswerAsk.service.ts`'s tool-calling
+loop — a second non-terminal tool backed by a new `filterPatternsByMetadata()` query function
+(`candlestickQuestionAnswer.service.ts`), returning compact structural facts (never prose) and
+throwing `NoFilterCriteriaError` if zero filters are given. That error is caught as a *recoverable*
+tool-result error (`is_error: true`, fed back to the model) rather than crashing the loop — the
+model can retry with a real filter instead of failing outright. `provide_answer`'s schema gained
+an optional `matched_pattern_names` field so a purely-structural answer (zero curated entries
+involved) still surfaces pattern diagrams on the frontend; the controller's `matchedPatterns`
+response field now unions pattern names resolved via matched entries with ones resolved directly
+via the new tool. System prompt updated with one sentence establishing the two-tool decision as
+the model's own Thought step: metadata tool for structural/factual questions, search tool for
+interpretive ones about reliability/usage/common mistakes — either or both as needed before a
+terminal tool.
+
+**Explicitly not changed**: no REST route/request-shape change (still `POST
+/candlestick-question-answer/ask` with `question`+`horizon`); no change to rate limiting or the
+billing/usage-tracking model — every `ask()` call still goes through the LLM exactly as before,
+the new tool makes that call's reasoning cheaper and more accurate, it doesn't bypass the LLM.
+Browse untouched.
+
+986 backend tests (up from 976), `tsc --noEmit` clean. Found and fixed 2 real issues while writing
+the new tests: a wrong expected SQL-parameter order in my own new test, and a **pre-existing gap**
+in `candlestickQuestionAnswer.controller.test.ts`'s `beforeEach` — `mockGetEntryById` was never
+reset, letting one test's call count leak into the next; fixed alongside. **Live end-to-end
+verification deliberately deferred** — checked the real dev DB directly and confirmed zero
+accounts currently have an Anthropic key on file at all (a pre-existing gap from before this
+phase, not introduced by it), so a real billed-LLM check isn't possible yet; automated coverage
+(57 tests across the 3 touched files, including the filter-tool-only path, the chained
+filter→search path, and the recoverable-error path) was judged sufficient for now, by explicit
+user direction.
+
+**Not yet built — the next phase, if pursued**: the "related/confusable patterns" field (Tier 2
+from the original metadata design discussion, e.g. Hammer/Hanging Man's own real relationship);
+and any decision on whether structurally-answerable questions should eventually skip the LLM
+call entirely for a cheaper deterministic-only path (explicitly scoped out of this phase, per the
+user's own architecture — every `ask()` call should still go through the LLM's own judgment).
+
+## Candlestick Ask — Deterministic-First Cascade, Asked-Question Cache, LLM-Gating Permission (Phase 2) ✅ Done
+
+Built 2026-10-05, `/plan`-approved, directly answering Phase 1's own "not yet built" question
+above: the user asked to call the LLM only when a cheaper deterministic path can't answer, rather
+than on every `ask()`. Requirements worked out via conversation first (role-scoped LLM gating as
+a Function/permission rather than a Config Property, since Config Properties has no role-scoping
+today; confirmed "Question_Asked_Count" should back a future Top-100 list; a real conflict between
+"drop the per-call log" and rate limiting's own need for per-user/per-timestamp rows, resolved by
+slimming the log instead of dropping it), published as a bullet-list requirements doc (Section 14
+of `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md`), then formally planned.
+
+**The cascade** (`askQuestion()` in `candlestickQuestionAnswer.controller.ts`): cache check first
+(free, no permission/rate-limit check at all) → if the caller's role holds the new
+`candlestick_question_answer:llm_calling` permission, the existing LLM ReAct loop (Phase 1,
+rate-limited as before) → otherwise, a small set of DB-stored question templates
+(`m_question_template`, regex-matched, admin-editable without a deploy) → no match on either path
+→ an honest `unable_to_answer`, never a silent guess. Every resolution (including a template miss)
+is recorded in the new cache table either way.
+
+**`m_candlestick_asked_question`** (migration `056`) — unique on `(normalized_question_text,
+horizon)`, "first answer wins" on a repeat hit (never regenerates `answer_text`, only increments
+`question_asked_count`/`last_asked_at`) — the data this session's own earlier "Question_Asked_Count"
+idea wanted, and the direct backing store for the new Popular Questions list (`GET
+/candlestick-question-answer/top-questions`, `WHERE question_status = 'Answered' ORDER BY
+question_asked_count DESC LIMIT 100`).
+
+**`m_question_template`** (migration `057`) — a small declarative DSL (`fixedFilters`/
+`groupFilters` mapping regex capture groups to `filterPatternsByMetadata()`'s own filter fields,
+reusing Phase 1's tool with zero new query logic), seeded with 3 conservative templates
+(`bias_lookup`, `mirror_lookup`, `signal_type_list`). **Real regex bug caught live, not by unit
+tests**: a lazy `(.+?)` capture group with nothing mandatory after it (just an optional `\??`)
+never expands past 1 character — fixed by anchoring every template to `$`, documented in the
+migration's own header as a bug class to avoid in any future admin-authored template too.
+
+**`candlestick_question_answer:llm_calling`** (migration `058`) — a child permission of `:ask` via
+the existing generic `PERMISSION_REQUIRES` mechanism (`roles.service.ts`, already proven by
+`contrarian_finder:scan_history` → `contrarian_finder:scan`), granted by the migration to every
+role that already held `:ask` so nobody's behavior silently downgraded on rollout — verified live
+by diffing the role list before/after.
+
+**Log table slimmed, not dropped** (migration `059`) — `user_evt_candlestick_question_answer_log`
+drops every column except `id`/`user_id`/`created_at` (its only remaining job is the rolling
+rate-limit window, which only ever needed those) and gets this repo's **first** `ALTER TABLE ...
+SET (ttl_expire_after = ...)` (every prior TTL was set at `CREATE TABLE` time). Rate limiting is
+now narrower in scope too — only the LLM branch calls `recordRateLimitedCall()`; cache hits and
+template resolutions are free, consistent with "reads/cheap paths stay free" elsewhere in this app.
+
+**Frontend**: `RolePermissionsPage.tsx`'s display-only `PERMISSION_PARENT` map gained the new pair;
+new Admin Console "Question Templates" section (create form + activate/deactivate list) on
+`AdminCandlestickQuestionAnswerPage.tsx`; new "Popular Questions" section on
+`CandlestickQuestionAnswerPage.tsx` — each row expands its already-fetched `answerText`/
+`matchedPatternNames` inline, no second request on click, same precedent as Browse Curated
+Questions' own inline expand.
+
+1033 backend tests (up from 966), 815 frontend tests (up from 807), `tsc`/lint clean both sides.
+**Live-verified end-to-end against the real dev DB and running server** with a throwaway
+admin-master account plus a second throwaway role deliberately holding `:ask` without
+`:llm_calling`: the template path resolved "Is Hammer bullish or bearish?" to "Hammer is bullish."
+with zero LLM/Anthropic-key dependency; asking the identical question again was a genuine cache
+hit (`question_asked_count` confirmed incremented 1→2 via direct query, same answer returned, no
+rate-limit or template re-evaluation); an unmatchable question correctly returned
+`unable_to_answer` with a role-aware reason ("This role cannot use the free-text LLM assistant,
+and no matching question template was found."); the Popular Questions list and its inline expand,
+and the Admin Console's Question Templates section (all 3 seeded templates, correct regex/mode/
+status), both confirmed rendering real data in the browser. Throwaway account/role and the test
+cache row cleaned up afterward.
+
+## Candlestick Pattern Q&A — Reachable Without Stock Analysis Access ✅ Done
+
+Built 2026-10-07 — a real bug surfaced the moment `candlestick_question_answer:ask` was granted
+to the base `user` role (without `stock_analysis:view`): the backend route already correctly
+gated Pattern Q&A on `candlestick_question_answer:ask` alone, but its only two UI entry points
+(the contextual link inside `CandlestickSymbolList`, and `CandlestickPopup`'s own shortcut) both
+live *inside* the Stock Analysis panel, which stays hidden entirely without `stock_analysis:view`
+— a `user`-role session had a fully working page with no way to click into it.
+
+Considered three fixes: requiring `stock_analysis:view` as a `PERMISSION_REQUIRES` parent of
+`:ask` (rejected — forces a Q&A-only role into the full 4-quadrant/candlestick-charts surface
+just to read curated content); granting `user` role `stock_analysis:view` directly (rejected —
+same over-exposure problem, and doesn't fix the *next* narrow-scope role either); or restoring a
+nav entry point scoped to `:ask` alone. Went with the third, but per explicit direction, folded
+it into the existing "Stock Analysis" top-level tab as a 2-entry sub-tab bar rather than
+re-adding a second top-level tab (reusing the same sub-tab-bar pattern Portfolio's Legacy/Flex
+split already established, rather than introducing a true popover dropdown).
+
+`TabShell.tsx`'s combined "Stock Analysis" nav link is now visible with **either**
+`stock_analysis:view` or `candlestick_question_answer:ask` (previously `stock_analysis:view`
+only) — its target route depends on which one the session actually holds, so an ask-only session
+lands directly on `/candlestick-question-answer` instead of hitting the stock-analysis route's
+own guard and bouncing home. A new "Candlestick Charts" / "Candlestick Tutorial" sub-tab bar
+(Candlestick Tutorial = the existing Pattern Q&A page, deliberately relabeled here per explicit
+direction — the page's own heading/branding elsewhere is untouched) renders only when **both**
+permissions are held, since a single-permission session has nothing to switch between. Both
+routes' existing direct-URL guards (`Navigate to="/"` when the specific route's own permission is
+missing) are unchanged — the real enforcement never moved, only the nav's visibility/target logic.
+
+8 updated/new tests in `TabShell.test.tsx` (ask-only session sees the combined link land directly
+on Pattern Q&A with no sub-tab bar; a session with both permissions sees the sub-tab bar and can
+switch between the two routes), 817 frontend tests total, `tsc`/lint clean. **Live-verified**
+against the real dev DB and running server with a throwaway `user`-role account (the exact
+real-world grant combination that surfaced this — `candlestick_question_answer:ask` +
+`portfolio_upload:legacy`, no `stock_analysis:view`): the "Stock Analysis" nav link appeared and
+clicking it landed directly on `/candlestick-question-answer` with the Pattern Q&A page rendering
+correctly and no sub-tab bar shown. Throwaway account cleaned up afterward.
+
+**Round 2, built 2026-10-07 same day — sub-tab bar replaced with a popover, per live feedback**:
+the sub-tab bar's real cost became apparent immediately after shipping — it adds a full extra
+row of vertical space to every page, all the time, for a 2-item menu that's only relevant on two
+of the app's routes. Replaced with a click-to-open popover reusing this codebase's own existing
+pattern (`UserPersonaBadge.tsx`'s account menu and `CandlestickQuestionAnswerPage.tsx`'s column-
+filter dropdowns both already use a `position: relative` trigger + `absolute` panel + `fixed
+inset-0` click-outside-to-close backdrop) — zero persistent layout cost, since the panel only
+exists in the DOM while open. The trigger is a `<button>` ("Stock Analysis ▾") only when **both**
+permissions are held (there's a real choice to present); a single-permission session still gets
+the plain `<Link>` from Round 1 unchanged, since there's nothing to choose between. Clicking a
+menu item navigates and closes the popover in the same action; the trigger itself stays
+highlighted (`bg-accent`) while on either sub-page, matching the old sub-tab bar's own active-
+state behavior.
+
+9 updated/new tests in `TabShell.test.tsx` (popover closed by default with no persistent
+menu/row; opening reveals both items; clicking one navigates and auto-closes; clicking the
+backdrop closes without navigating; the single-permission cases confirm a plain link renders,
+never a button), 818 frontend tests total, `tsc`/lint clean. **Live-verified** against the real
+dev DB and running server with a throwaway `user-premium` account (holds both permissions by
+default): the nav renders as a single "Stock Analysis ▾" row with no second line anywhere on the
+page; clicking it opens the popover overlaying the page content with zero layout shift; clicking
+"Candlestick Tutorial" navigates to the Pattern Q&A page, closes the popover, and leaves the
+trigger highlighted. Throwaway account cleaned up afterward.
+
+**Round 3, built 2026-10-07 same day — wording/navigation polish on both ends of the Charts ↔
+Tutorial relationship**: `CandlestickSymbolList.tsx`'s own contextual button (inside the
+Candlestick Charts panel) relabeled "Pattern Q&A →" → "Tutorial →", matching the popover menu's
+own naming instead of an older, inconsistent label. `CandlestickQuestionAnswerPage.tsx`'s "←
+Back" link now reads "← Charts" and navigates directly to `/stock-analysis` for any session that
+actually holds `stock_analysis:view` — a predictable destination instead of whatever happened to
+be in browser history — but falls back to the original generic "← Back" (`navigate(-1)`) for an
+ask-only session with no Charts page to go back to, the exact role shape Round 1 was built for.
+
+Also reworked the page's own section layout per explicit, twice-refined direction: initially
+tried as a single stacked column (Popular Questions → Browse Curated Questions → Ask Your Own
+Question), then corrected back to a 2-column layout — **column 1: Browse Curated Questions;
+column 2: Ask Your Own Question stacked above Popular Questions** (moved out of its own
+full-width row from Phase 2's original build). No data/logic changes, pure JSX reordering within
+the same component.
+
+2 updated + 3 new tests across `CandlestickSymbolList.test.tsx`/`CandlestickQuestionAnswerPage
+.test.tsx` (the relabeled Tutorial link's text; "← Back" vs. "← Charts" for both permission
+cases, including a `waitFor` since the session's own permissions resolve on a separate async
+query from the page's own data and can render the pre-session default label first; a heading-
+order check for the new 2-column structure), 820 frontend tests total, `tsc`/lint clean.
+**Live-verified** against the real dev DB and running server with a throwaway `user-premium`
+account: "← Charts" rendered and correctly navigated to `/stock-analysis`; the Candlestick Charts
+panel's button read "Tutorial →"; the page rendered as Browse Curated Questions (column 1) next
+to Ask Your Own Question above Popular Questions (column 2). Throwaway account cleaned up
+afterward.
+
 ## Next Up
 
+- **Candlestick pattern backlog — fully closed, 2026-10-03.** Every item identified in
+  `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md` Section 13 (Tweezer Bottom/Top,
+  Bullish/Bearish Kicking, Bullish/Bearish Abandoned Baby, Upside/Downside Tasuki Gap, and finally
+  the Complex tier + Rising/Falling Three Methods) has been built, seeded, and live-verified. No
+  further candlestick pattern work is currently queued.
+- **Two documentation gaps identified 2026-09-26 — both now closed.**
+  1. **Candlestick Pattern Q&A module coverage — closed 2026-10-03** (Documentation Phase 1).
+     `User Manual.md` and `User Technical Doc/02-Functional-Code-Workflow.md` now cover the
+     Browse-curated vs. Ask-your-own-question split, the Ask rate limit, the Category taxonomy
+     (Definition → Interpretation → Reliability → How to Use → Common Mistakes) and pattern-level
+     relevant-horizons model, the curated-question table's Pattern/Category filters, and the
+     in-popup Symbol Switcher — plus both the "📘 Platform Field Guide" and "🔑 Access & Roles
+     Reference" Artifacts were regenerated/redeployed to match (same links, reused via `url`).
+  2. **Consolidated REST API reference — closed 2026-10-04** (Documentation Phase 2). New
+     `User Technical Doc/04-REST-API-Reference.md` documents all **97** routes across the 19
+     `backend/src/routes/*.ts` files — method, path, auth/permission gate, request shape,
+     response shape, and the distinctive non-200 status codes each route can actually return
+     (confirmed directly against route + controller source, not inferred). Deliberately distinct
+     from the published "API Call Ledger" artifact, which only covers the 7 outbound-FMP/Finnhub-
+     calling features' external call cost/caching — near-zero content overlap between the two.
+     Not yet published as its own Artifact (not requested); cross-linkable from
+     `00-Published-Artifacts.md` later if wanted.
 - Two small known-leftover cleanups (harmless, not yet decided): an orphaned
   `apiKeys:bringMyOwn` permission naming inconsistency (`User Manual.md`); `momentum
   .service.ts`'s dead-but-undeleted functions, kept as the Python extraction's rollback path.

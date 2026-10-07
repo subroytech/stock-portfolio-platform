@@ -6,6 +6,7 @@ jest.mock('../src/services/contrarianFinder.service', () => ({
   getUniverseTable: jest.fn(),
   refreshTickerDataBatch: jest.fn(),
   saveLastScan: jest.fn(),
+  appendRunProgress: jest.fn(),
   getLastScan: jest.fn(),
   listRunHistory: jest.fn(),
   getRunById: jest.fn(),
@@ -39,6 +40,7 @@ const mockAssembleScanBatch = cf.assembleScanBatch as jest.Mock;
 const mockGetUniverseTable = cf.getUniverseTable as jest.Mock;
 const mockRefreshTickerDataBatch = cf.refreshTickerDataBatch as jest.Mock;
 const mockSaveLastScan = cf.saveLastScan as jest.Mock;
+const mockAppendRunProgress = cf.appendRunProgress as jest.Mock;
 const mockGetLastScan = cf.getLastScan as jest.Mock;
 const mockListRunHistory = cf.listRunHistory as jest.Mock;
 const mockGetRunById = cf.getRunById as jest.Mock;
@@ -73,7 +75,9 @@ beforeEach(() => {
   mockRefreshTickerDataBatch.mockReset();
   mockRefreshTickerDataBatch.mockResolvedValue({ updated: 5, skipped: 1 });
   mockSaveLastScan.mockReset();
-  mockSaveLastScan.mockResolvedValue(undefined);
+  mockSaveLastScan.mockResolvedValue('run-1');
+  mockAppendRunProgress.mockReset();
+  mockAppendRunProgress.mockResolvedValue(undefined);
   mockGetLastScan.mockReset();
   mockGetLastScan.mockResolvedValue(null);
   mockListRunHistory.mockReset();
@@ -209,6 +213,54 @@ describe('POST /contrarian-finder/scan-batch', () => {
     expect(batchStocks).toHaveLength(125); // same batch assembleScanBatch got
     expect(key).toBe('fake-fmp-key');
     expect(mode).toBe('all');
+  });
+
+  // Resilient incremental persistence (2026-09-19) - closes a real gap found live: the old
+  // end-of-loop-only save meant an interrupted scan left real FMP cost with zero trace anywhere.
+  describe('incremental scan persistence', () => {
+    test('batch 0 starts a new shared run row and returns its id as runRowId', async () => {
+      const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie)
+        .send({ batchIndex: 0, threshold: 25 });
+      expect(res.status).toBe(200);
+      expect(res.body.runRowId).toBe('run-1');
+      expect(mockSaveLastScan).toHaveBeenCalledTimes(1);
+      const [, , data] = mockSaveLastScan.mock.calls[0];
+      expect(data.universeSize).toBe(250);
+      expect(data.scanned).toBe(125);
+      expect(data.params).toEqual(expect.objectContaining({ threshold: 25, batchSize: cf.CF_BATCH, maxBatches: cf.CF_MAX_BATCHES }));
+      expect(mockAppendRunProgress).not.toHaveBeenCalled();
+    });
+
+    test('a later batch with runRowId appends to that same row instead of starting a new one', async () => {
+      const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie)
+        .send({ batchIndex: 1, batchSize: 125, maxBatches: 3, runRowId: 'run-1' });
+      expect(res.status).toBe(200);
+      expect(res.body.runRowId).toBe('run-1');
+      expect(mockAppendRunProgress).toHaveBeenCalledWith('run-1', { scanned: 125, results: expect.any(Array) });
+      expect(mockSaveLastScan).not.toHaveBeenCalled();
+    });
+
+    test('a later batch with no runRowId in the request touches neither persistence path', async () => {
+      const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie)
+        .send({ batchIndex: 1, batchSize: 125, maxBatches: 3 });
+      expect(res.status).toBe(200);
+      expect(res.body.runRowId).toBeUndefined();
+      expect(mockSaveLastScan).not.toHaveBeenCalled();
+      expect(mockAppendRunProgress).not.toHaveBeenCalled();
+    });
+
+    test('a persistence failure is logged and swallowed - the batch\'s real results still return 200', async () => {
+      mockSaveLastScan.mockRejectedValueOnce(new Error('db exploded'));
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
+        expect(res.status).toBe(200);
+        expect(res.body.results).toHaveLength(125);
+        expect(res.body.runRowId).toBeUndefined();
+      } finally {
+        consoleSpy.mockRestore();
+      }
+    });
   });
 });
 

@@ -27,6 +27,8 @@ export const FEATURE_LABELS: Record<UsageFeature, string> = {
   portfolio_refresh: 'Portfolio Refresh',
   stock_preview: 'Stock Preview',
   quotes: 'Quotes',
+  stock_analysis_candlestick: 'Candlestick Charts',
+  candlestick_question_answer: 'Candlestick Pattern Q&A',
 };
 
 // UsageBarChart.tsx (Dashboard sub-tab, Chart-3 per row) - unlike the pie charts, the bar chart

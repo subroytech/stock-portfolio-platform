@@ -1,10 +1,11 @@
-# User Manual — Roles, API Key Access, Contrarian Finder Retention, Portfolio Upload, Config Properties, Login-as & Account Security
+# User Manual — Roles, API Key Access, Contrarian Finder Retention, Portfolio Upload, Config Properties, Login-as, Account Security & Candlestick Pattern Q&A
 
-This document describes the platform's role/permission model — as it relates to FMP/Finnhub API
-keys (who manages their own key, who doesn't, and how the app still works for the people who
-don't), to the Contrarian Finder shared last-scan result, to portfolio import, to the
+This document describes the platform's role/permission model — as it relates to FMP/Finnhub/
+Anthropic API keys (who manages their own key, who doesn't, and how the app still works for the
+people who don't), to the Contrarian Finder shared last-scan result, to portfolio import, to the
 admin-configurable Config Properties framework, to the `admin-master`-only Login-as
-troubleshooting tool, and to registration/password/account-recovery. **Status: implemented and
+troubleshooting tool, to registration/password/account-recovery, and to the Candlestick Charts +
+Pattern Q&A feature. **Status: implemented and
 live-verified (2026-08-02 for the API key sections; 2026-08-05 for Contrarian Finder retention;
 2026-08-07 for Portfolio Upload — Flex; 2026-08-24 for Config Properties; 2026-08-27 for the Flex
 guided stepper, footer/cash row markers, and template-governance admin tools; 2026-08-28 for
@@ -13,9 +14,11 @@ below; 2026-08-30 for Registration, Password Policy & Security Questions, includ
 the selectable-questions and post-login Manage Security Questions follow-ons; 2026-08-31 for
 Contrarian Finder Run History; 2026-09-06 for the User Usage Dashboard, retroactively documented
 here on 2026-09-07 alongside its Monthly-tab aggregation rework; 2026-09-07 for the Stock
-Analysis tab; 2026-09-12 for the Dashboard sub-tab's independently-controlled charts).** Role
-names below
-use the exact casing as created in the database: `user-contra-withKey` (capital K),
+Analysis tab; 2026-09-12 for the Dashboard sub-tab's independently-controlled charts; 2026-09-20
+for extending bring-your-own + Admin-Master Fallback to a third provider, Anthropic; 2026-09-26
+through 2026-10-03 for Candlestick Pattern Detection's full 4-tier/34-pattern build-out and the
+Candlestick Pattern Q&A module, documented here for the first time on 2026-10-03).** Role names
+below use the exact casing as created in the database: `user-contra-withKey` (capital K),
 `user-contra-wokey` (lowercase), `admin-master`.
 
 ## Roles
@@ -37,16 +40,18 @@ use the exact casing as created in the database: `user-contra-withKey` (capital 
   key when the calling user has none on file. Granted `contrarian_finder:scan` but **not**
   `api_keys:manage_own`.
 - **`admin-master`** — exactly one account across the whole application (currently
-  `subrataroygcp@gmail.com`, which already holds both an FMP and a Finnhub key). Its entire
-  purpose is to hold the **shared fallback key**: any user whose role is `user`, `admin`, or
-  `user-contra-wokey` and who has no key of their own on file gets `admin-master`'s key used
-  on their behalf instead of hitting a `503`. Confirmed a full superset of `admin` — it holds
-  every permission `admin` has (full Admin Console access, user/role/permission/function
-  management) *plus* being the anointed fallback-key holder, not a narrowly-scoped role.
-  Single-account-ness is an **operational convention, not code-enforced** — no uniqueness
-  constraint exists; the app trusts the admin not to promote a second user to this role. The
-  stored key can be either/both FMP and Finnhub, same as any other key-holding role — no
-  special-casing needed, the existing `users_subscriptions` schema already supports it.
+  `subrataroygcp@gmail.com`, which already holds an FMP, a Finnhub, and (2026-09-20) an
+  Anthropic key). Its entire purpose is to hold the **shared fallback key**: any user whose
+  role is `user`, `admin`, or `user-contra-wokey` and who has no key of their own on file gets
+  `admin-master`'s key used on their behalf instead of hitting a `503`. Confirmed a full
+  superset of `admin` — it holds every permission `admin` has (full Admin Console access,
+  user/role/permission/function management) *plus* being the anointed fallback-key holder, not
+  a narrowly-scoped role. Single-account-ness is an **operational convention, not
+  code-enforced** — no uniqueness constraint exists; the app trusts the admin not to promote a
+  second user to this role. The stored key can be any/all of FMP, Finnhub, and Anthropic, same
+  as any other key-holding role — no special-casing needed, the existing `users_subscriptions`
+  schema already supports it (`provider` is a plain string column, no allowlist beyond the
+  application-level check in `userSubscription.controller.ts`).
 
 ## Contrarian Finder — shared last-scan result & retention tiers
 
@@ -127,6 +132,22 @@ provider)` — so the fallback lives entirely there, not in any of the 8 call si
    role gets "add one via PUT /subscriptions" (unchanged); a fallback-eligible role whose
    fallback came up empty gets "contact an admin" instead, since they may not even have
    `api_keys:manage_own` to add their own.
+
+**Extended to a third provider, 2026-09-20**: Candlestick Pattern Q&A's free-text Ask now
+resolves the caller's `anthropic` key through this exact same `getDecryptedKey(userId,
+'anthropic')` call, with no new fallback logic — a role already on the
+`api_key_fallback_eligible_roles` Config Property list gets Anthropic fallback automatically
+the moment `admin-master` has their own Anthropic key on file. `anthropicClient.service.ts`
+takes the resolved key as an explicit per-call argument rather than caching one client, so
+different callers' requests can never cross-use each other's key.
+
+**Spend control, not yet built**: unlike FMP/Finnhub, an Anthropic key is real, metered dollar
+cost per question rather than a plan-tier quota, so before loading a real balance onto the
+account the platform owner asked whether the app could show `admin-master` the account's
+remaining $ balance. Confirmed no such query exists in Anthropic's API (Console-only, human
+read) — see `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md` Section 9.4/11.9 for
+the full finding and the recommended self-tracked budget-cap alternative, which has not been
+built yet.
 
 ## UI visibility rules
 
@@ -422,6 +443,152 @@ from the nav for a role without it (not merely disabled), with a direct-URL guar
 same treatment already given to Admin/API Keys. Each of the 4 lookups is independent and
 remembered for the rest of your browser session (picking a ticker in one slot doesn't affect the
 other three, and reloading the page keeps all 4 where you left them).
+
+## Support Tickets
+
+**Status: implemented and live-verified, 2026-09-05; requester identity and an unread-reply
+indicator added 2026-09-18.** A "Support" link, visible to every signed-in user regardless of
+role, opens a small ticket-submission/view panel — the only in-app way to reach an admin, and the
+only one reachable while a self-registered account is still under review. Any user can create a
+ticket, see their own tickets, and reply to keep a conversation going; replying to a ticket that
+was previously closed or on hold reopens it automatically.
+
+Only a role holding `support:manage` (granted the same way as any other Admin Console permission —
+`admin`/`admin-master` can grant it to any role) sees the admin-side Support Tickets screen:
+every user's tickets, filterable by status, with the ability to reply and change status. That
+screen now shows **who each ticket is from** (the requester's email, next to the subject) — a real
+gap before 2026-09-18, when only the ticket's own content was visible.
+
+On the user side, the "Support" link now carries a small red badge with a count, the moment a new
+reply from an admin arrives — mirroring the count badge an admin already sees next to their own
+name for brand-new tickets awaiting a first response. The badge (and the same indicator next to
+each individual ticket) clears the instant you open that ticket; sending your own reply also
+clears it, since it means you've caught up on everything up to that point.
+
+## Stock Analysis — Candlestick Charts
+
+**Status: implemented and live-verified across three rounds, 2026-09-18.** A "Candlestick Charts"
+panel on the left side of the Stock Analysis tab, alongside (not replacing) the 4 preview
+quadrants above — gated by the same `stock_analysis:view` permission as the rest of that tab.
+
+The panel lists every symbol anyone has already looked up (shared across all users — green means
+looked up within the last 10 minutes, grey means still viewable but not brand-new), plus a field
+to look up any new symbol. Clicking a symbol — or entering a new one — opens a full-screen chart:
+
+- **Six timeframes** to choose from: 5 Minute, 15 Minute, 30 Minute, 1 Hour, 4 Hour, and 1 Day.
+  Switching between them is instant if that timeframe has already been looked up recently; if not,
+  you'll see a prompt to fetch fresh data rather than an automatic (and costly) fetch.
+- **Nine toggleable indicators**, shown as small buttons above the chart: Moving Averages,
+  Bollinger Bands, VWAP, Pivot Points, Fibonacci, RSI, MACD, and — added in the third round —
+  **Volume MA** and **OBV**. Volume MA smooths out the Volume panel's day-to-day spikes into a
+  trend line; OBV (On-Balance Volume) is a running tally that rises on days price closes higher
+  and falls on days it closes lower, shown on its own left-side scale under the Volume bars —
+  useful for spotting when trading volume and price direction start to disagree.
+- A **Fresh/Stale** badge and "Pulled `<time>`" caption show how current the displayed data is; a
+  **Refresh** link appears once data goes stale, and the initial fetch for a never-looked-up
+  symbol/timeframe always requires an explicit click — nothing fetches automatically.
+
+**Fetching fresh data is rate-limited per user** — a shared budget across every symbol and
+timeframe you look up, admin-configurable (Admin Console → Config Properties → "Stock Analysis
+Rate Limits" → **User's Max New Requests** / **User's API Rate Limit Window (Minutes)** — renamed
+from their original "Candlestick..." labels 2026-09-19, in anticipation of this same limit
+eventually covering more than just this one feature). Merely opening the chart, or switching to a
+timeframe that's already been looked up recently, never counts against this limit — only the
+explicit "Fetch fresh data"/"Refresh" action does.
+
+### Switching symbols without closing the chart
+
+**Status: implemented and live-verified, 2026-09-29.** The chart's header, which used to show the
+symbol as plain text, is now a dropdown (click the ticker + ▾) — pick a different symbol from the
+same cached list the left-hand panel shows, or type a brand-new one, without closing the full-screen
+chart first. Switching keeps your current timeframe, active indicators, and pattern-picker
+selections exactly as they were — it does **not** reset to the 1 Day/default view the way opening a
+fresh chart from the left-hand panel does.
+
+### Pattern Detection
+
+**Status: implemented and live-verified across many rounds, 2026-09-26 through 2026-10-03.** Below
+the price chart, the app automatically scans the displayed candles for candlestick patterns,
+grouped into 4 tiers by how many candles each pattern takes to recognize — deliberately a rule you
+can reason about ("more candles to track = harder to use correctly"), not an arbitrary difficulty
+label:
+
+| Tier | Candles | Chart badges | Shown |
+|---|---|---|---|
+| **Simple** | 1 | 9 (Doji and its 3 sub-types, Hammer, Shooting Star, Marubozu, Spinning Top, Belt Hold) | Always on |
+| **Composite** | 2 | 10 (Engulfing, Harami, Piercing Line/Dark Cloud Cover, Tweezer Bottom/Top, Kicking) | On demand |
+| **Advanced** | 3 | 12 (Morning/Evening Star, Three White Soldiers/Black Crows, Three Inside/Outside Up/Down, Abandoned Baby, Tasuki Gap) | On demand |
+| **Complex** | 5 | 2 (Rising/Falling Three Methods) | On demand |
+
+(Pattern Q&A below has one additional entry, **Hanging Man** — the exact same shape as Hammer, so
+it has its own curated write-up but shows on the chart as a plain Hammer badge, since telling the
+two apart requires knowing the preceding trend, which this chart's geometry-only detection
+deliberately doesn't attempt.)
+
+The Simple tier's badges are always visible; the other three tiers are **off by default** — a
+"Pattern:" control above the chart groups all 4 pickers in one place, each with a checkbox list of
+that tier's own patterns (and an "All" checkbox to toggle every pattern in that tier at once).
+Checking a pattern shows it as a small colored badge directly under the candle where it completed;
+hovering a badge draws a connector line up into the price chart so you can see exactly which
+candle(s) it's pointing at, and the badge's own tooltip shows that candle's real Open/High/Low/
+Close. Bullish-leaning badges are green, bearish-leaning ones are red, and badges whose meaning
+depends on which candle they're attached to (Doji family, Marubozu, Belt Hold) use a neutral gray.
+Every badge's 2-character label always fits: the full pattern name is in its tooltip, and the exact
+same pattern name is what you'll find if you look it up in Pattern Q&A below.
+
+## Candlestick Pattern Q&A
+
+**Status: implemented and live-verified, 2026-09-20 through 2026-10-03.** A single permission,
+`candlestick_question_answer:ask`, gates the whole feature — viewing/browsing and asking your own
+question both require it, zero default grants, same "Admin or Admin-Master can grant to any role"
+pattern as Stock Analysis/Usage Audit. Reached via the "Pattern Q&A →" link on the Candlestick
+Charts panel, or "Ask about patterns →" inside an open chart (which closes the chart and takes you
+there, since patterns aren't tied to one specific symbol). There are two completely independent
+ways to get an answer:
+
+### Browse Curated Questions
+
+A searchable table of **every pattern's pre-written Q&A**, organized the same way a textbook
+chapter would be — each pattern has exactly 5 questions, one per category:
+
+1. **Definition** — "What is a _ pattern?"
+2. **Interpretation** — what the pattern suggests about the shift in buying/selling control
+3. **Reliability** — what makes a real occurrence of it more or less trustworthy
+4. **How to Use** — how it's typically acted on in practice
+5. **Common Mistakes** — the most common way people misread or misapply it
+
+Clicking a question expands its answer inline, directly underneath — including a small diagram of
+the pattern's shape where one exists (every pattern currently has one). The table can be filtered by
+**Pattern**, **Complexity** (Simple/Composite/Advanced/Complex, same 4 tiers as the chart), and
+**Category**, or searched by typing any pattern name or keyword. Browsing is instant and free —
+nothing here ever calls an LLM.
+
+### Ask Your Own Question
+
+A free-text box for a question not already covered by the curated table above. Pick a **Trading
+Horizon** first — **Day-Trading**, **Swing Trading**, or **Long-Term Investment** — since the
+answer is scoped to that horizon's own curated content (a pattern's write-up can be tagged relevant
+to one, two, or all three horizons; asking from a horizon a pattern isn't tagged for means that
+pattern's content won't be considered). Behind the scenes, your question goes through a real
+multi-step search: the LLM searches the curated knowledge base (possibly more than once, refining
+its search), then either synthesizes an answer strictly from what it found, or tells you plainly
+that the curated content doesn't cover your question — it is **never** allowed to answer from its
+own general knowledge, and never gives personalized trading advice on top of pattern education.
+
+**Rate-limited per user** — a shared budget across every question you ask, admin-configurable
+(Admin Console → Config Properties → "Candlestick Q&A" group — currently 10 questions per rolling
+10-minute window; `admin`/`admin-master` are exempt entirely). The button's own label currently
+says "uses 1 of your daily limit," which is a holdover from an earlier design — the real window is
+the shorter, admin-configurable one described above, not a calendar day. Browsing curated
+questions never counts against this limit, only asking your own does.
+
+### Managing the curated content (admin)
+
+A separate permission, `candlestick_question_answer:manage_content`, controls a small Admin Console
+screen for adding new patterns and their curated Q&A entries directly (content created this way is
+Approved immediately — there's no pending-review queue for admin-authored content today). This is
+how every pattern described in the Pattern Detection section above got its curated write-up and
+diagram in the first place.
 
 ## Known leftover, not cleaned up yet
 

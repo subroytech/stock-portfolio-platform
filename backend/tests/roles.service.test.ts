@@ -178,6 +178,26 @@ describe('grantPermission / revokePermission', () => {
     expect(mockQuery.mock.calls[1][0]).toContain('DELETE FROM m_role_permissions');
   });
 
+  test('grantPermission refuses candlestick_question_answer:llm_calling when the role does not already have candlestick_question_answer:ask', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // parent-check finds nothing
+    await expect(grantPermission('2', 'candlestick_question_answer:llm_calling')).rejects.toThrow(MissingParentPermissionError);
+    expect(mockQuery).toHaveBeenCalledTimes(1); // never reaches the INSERT
+  });
+
+  test('grantPermission allows candlestick_question_answer:llm_calling once the role already has candlestick_question_answer:ask', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // parent-check finds the grant
+    mockQuery.mockResolvedValueOnce({}); // the INSERT
+    await grantPermission('2', 'candlestick_question_answer:llm_calling');
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+    expect(mockQuery.mock.calls[1][0]).toContain('INSERT INTO m_role_permissions');
+  });
+
+  test('revokePermission refuses to revoke candlestick_question_answer:ask while the role still has the dependent :llm_calling', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ permission_key: 'candlestick_question_answer:llm_calling' }] });
+    await expect(revokePermission('2', 'candlestick_question_answer:ask')).rejects.toThrow(ParentPermissionInUseError);
+    expect(mockQuery).toHaveBeenCalledTimes(1); // never reaches the DELETE
+  });
+
   test('granting an unrelated permission never triggers the admin-master-only role-name lookup', async () => {
     mockQuery.mockResolvedValueOnce({}); // just the INSERT - no role-name SELECT beforehand
     await grantPermission('2', 'functions:manage');

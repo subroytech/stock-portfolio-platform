@@ -1,5 +1,5 @@
 import {
-  computeVWAP, computePivotPoints, computeFibonacciRetracement,
+  computeVWAP, computeOBV, computePivotPoints, computeFibonacciRetracement,
   computeSmaSeries, computeBbSeries, computeRsiSeries, computeMacdSeries,
   type CandlestickBar,
 } from '../src/services/candlestickIndicators.service';
@@ -18,6 +18,23 @@ describe('computeVWAP', () => {
   test('a zero-volume bar falls back to its own typical price instead of dividing by zero', () => {
     const bar: CandlestickBar = { date: 'd1', open: 10, high: 12, low: 8, close: 10, volume: 0 };
     expect(computeVWAP([bar])).toEqual([10]); // typical = (12+8+10)/3 = 10
+  });
+});
+
+describe('computeOBV', () => {
+  test('adds volume on an up day, subtracts on a down day, unchanged on a flat day, first bar has no prior to compare', () => {
+    const bar1: CandlestickBar = { date: 'd1', open: 10, high: 11, low: 9, close: 10, volume: 100 }; // first - no prior
+    const bar2: CandlestickBar = { date: 'd2', open: 10, high: 12, low: 10, close: 12, volume: 50 }; // up: +50
+    const bar3: CandlestickBar = { date: 'd3', open: 12, high: 12, low: 8, close: 8, volume: 30 }; // down: -30
+    const bar4: CandlestickBar = { date: 'd4', open: 8, high: 9, low: 7, close: 8, volume: 20 }; // flat: unchanged
+    // oldest-to-newest: 0, 0+50=50, 50-30=20, 20 (unchanged)
+    const result = computeOBV([bar4, bar3, bar2, bar1]); // newest-first input
+    expect(result).toEqual([20, 20, 50, 0]); // newest-first output
+  });
+
+  test('a single bar has no prior close to compare against - OBV is 0', () => {
+    const bar: CandlestickBar = { date: 'd1', open: 10, high: 12, low: 8, close: 10, volume: 500 };
+    expect(computeOBV([bar])).toEqual([0]);
   });
 });
 

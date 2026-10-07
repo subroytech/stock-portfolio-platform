@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import * as client from '../api/client';
 import StockAnalysisPage from './StockAnalysisPage';
@@ -13,7 +14,9 @@ function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
-      <StockAnalysisPage />
+      <MemoryRouter>
+        <StockAnalysisPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }

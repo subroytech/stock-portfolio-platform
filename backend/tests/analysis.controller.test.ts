@@ -18,6 +18,10 @@ jest.mock('../src/services/userSubscription.service', () => ({
   getDecryptedKey: jest.fn(),
 }));
 jest.mock('../src/services/usageTracking.service');
+jest.mock('../src/services/fmpRateLimit.service', () => ({
+  ...jest.requireActual('../src/services/fmpRateLimit.service'),
+  checkFmpRateLimit: jest.fn(),
+}));
 // The 2 new Gate<->Submit cache tests below push this file's total real request count against
 // these routes past the real rateLimiters' per-user window (found live: a Gate request was
 // silently 429'd mid-suite, which looked like a cache/expiry bug until traced to this) - same
@@ -34,6 +38,7 @@ import * as contrarianComebackData from '../src/services/contrarianComebackData.
 import * as contrarianComebackCache from '../src/services/contrarianComebackCache';
 import * as userSubscription from '../src/services/userSubscription.service';
 import * as usageTracking from '../src/services/usageTracking.service';
+import { checkFmpRateLimit } from '../src/services/fmpRateLimit.service';
 import { InvalidTickerError } from '../src/utils/errors';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
@@ -46,6 +51,7 @@ const mockComputeContrarianComebackSubmit = analysisService.computeContrarianCom
 const mockFetchContrarianComebackData = contrarianComebackData.fetchContrarianComebackData as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
 const mockLogUsage = usageTracking.logUsage as jest.Mock;
+const mockCheckRateLimit = checkFmpRateLimit as jest.Mock;
 
 const authCookie = `auth_token=${signToken('user-1')}`;
 
@@ -62,6 +68,7 @@ beforeEach(() => {
   );
   mockLogUsage.mockReset();
   mockLogUsage.mockResolvedValue(undefined);
+  mockCheckRateLimit.mockReset().mockResolvedValue({ allowed: true, exempt: false, limit: 10, windowMinutes: 10, usedInWindow: 0 });
   // contrarianComebackCache is the real module (not mocked) - several tests below reuse
   // 'user-1'/'AAPL', so without this an earlier test's Gate call would leak a cache hit into a
   // later, unrelated Submit test.
@@ -165,6 +172,15 @@ describe('GET /analysis/long-term/:symbol', () => {
     const res = await request(app).get('/analysis/long-term/AAPL').set('Cookie', authCookie);
     expect(res.status).toBe(200);
   });
+
+  test('429 with the rate limit\'s own message when the shared budget is exhausted, before any real fetch or key lookup', async () => {
+    mockCheckRateLimit.mockResolvedValueOnce({ allowed: false, exempt: false, limit: 10, windowMinutes: 10, usedInWindow: 10 });
+    const res = await request(app).get('/analysis/long-term/AAPL').set('Cookie', authCookie);
+    expect(res.status).toBe(429);
+    expect(res.body.error).toContain('10 new requests per 10 minutes');
+    expect(mockGetDecryptedKey).not.toHaveBeenCalled();
+    expect(mockFetchLongTermAnalysisData).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /analysis/contrarian-comeback/:symbol/gate', () => {
@@ -229,6 +245,15 @@ describe('GET /analysis/contrarian-comeback/:symbol/gate', () => {
     const res = await request(app).get('/analysis/contrarian-comeback/ZZZZ/gate').set('Cookie', authCookie);
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'No data returned for ZZZZ. Check the ticker symbol or your API key.' });
+  });
+
+  test('429 with the rate limit\'s own message when the shared budget is exhausted, before any real fetch or key lookup', async () => {
+    mockCheckRateLimit.mockResolvedValueOnce({ allowed: false, exempt: false, limit: 10, windowMinutes: 10, usedInWindow: 10 });
+    const res = await request(app).get('/analysis/contrarian-comeback/AAPL/gate').set('Cookie', authCookie);
+    expect(res.status).toBe(429);
+    expect(res.body.error).toContain('10 new requests per 10 minutes');
+    expect(mockGetDecryptedKey).not.toHaveBeenCalled();
+    expect(mockFetchContrarianComebackData).not.toHaveBeenCalled();
   });
 });
 
@@ -360,5 +385,31 @@ describe('POST /analysis/contrarian-comeback/:symbol', () => {
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  test('429 on a cache-miss submit when the shared budget is exhausted, before any real fetch or key lookup', async () => {
+    mockCheckRateLimit.mockResolvedValueOnce({ allowed: false, exempt: false, limit: 10, windowMinutes: 10, usedInWindow: 10 });
+    const res = await request(app).post('/analysis/contrarian-comeback/AAPL').set('Cookie', authCookie).send(validBody);
+    expect(res.status).toBe(429);
+    expect(res.body.error).toContain('10 new requests per 10 minutes');
+    expect(mockGetDecryptedKey).not.toHaveBeenCalled();
+    expect(mockFetchContrarianComebackData).not.toHaveBeenCalled();
+  });
+
+  test('a cache-hit submit never touches the rate limit at all, even when the shared budget is exhausted', async () => {
+    mockFetchContrarianComebackData.mockResolvedValue({ symbol: 'AAPL', apiCallCounts: { fmp: 9, finnhub: 1 } });
+    mockComputeContrarianComebackGate.mockResolvedValue({ symbol: 'AAPL', check1Pass: true, failedCheck: null });
+    const gateRes = await request(app).get('/analysis/contrarian-comeback/AAPL/gate').set('Cookie', authCookie);
+    expect(gateRes.status).toBe(200);
+    mockCheckRateLimit.mockClear();
+
+    // Now exhausted - a fresh (cache-miss) request would 429, but this Submit should reuse
+    // Gate's cached result and never call checkFmpRateLimit at all.
+    mockCheckRateLimit.mockResolvedValue({ allowed: false, exempt: false, limit: 10, windowMinutes: 10, usedInWindow: 10 });
+    mockComputeContrarianComebackSubmit.mockResolvedValue({ symbol: 'AAPL', format: 'A' });
+    const submitRes = await request(app).post('/analysis/contrarian-comeback/AAPL').set('Cookie', authCookie).send(validBody);
+
+    expect(submitRes.status).toBe(200);
+    expect(mockCheckRateLimit).not.toHaveBeenCalled();
   });
 });

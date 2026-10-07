@@ -1,6 +1,7 @@
 import '../lib/chartSetup';
 import { Line } from 'react-chartjs-2';
 import { useStockPreview } from '../api/stockPreview';
+import { ApiError } from '../api/client';
 import { buildChartSeries, computeReturns, type PeriodReturns } from '../lib/stockPreview';
 import { formatCurrency } from '../lib/format';
 
@@ -29,7 +30,7 @@ function formatPill(v: number | null): string {
 // Contrarian Finder/Long-Term Analysis/Contrarian Comeback's symbol-click preview) and inline
 // inside a Stock Analysis quadrant.
 export default function StockPreviewBody({ symbol }: StockPreviewBodyProps) {
-  const { data, isLoading, isError } = useStockPreview(symbol);
+  const { data, isLoading, isError, error } = useStockPreview(symbol);
 
   const quote = data?.quote;
   const historical = data?.historical ?? [];
@@ -52,7 +53,9 @@ export default function StockPreviewBody({ symbol }: StockPreviewBodyProps) {
       </div>
 
       {isLoading && <p className="text-sm text-text-secondary">Loading…</p>}
-      {isError && <p className="text-sm text-danger">Could not load preview data.</p>}
+      {isError && (
+        <p className="text-sm text-danger">{error instanceof ApiError ? error.message : 'Could not load preview data.'}</p>
+      )}
       {!isLoading && !isError && !hasEnoughData && (
         <p className="text-sm text-text-secondary">Not enough historical data for {symbol}.</p>
       )}

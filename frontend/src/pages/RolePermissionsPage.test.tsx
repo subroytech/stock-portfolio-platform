@@ -57,14 +57,15 @@ describe('RolePermissionsPage', () => {
     expect(screen.getByRole('checkbox', { name: /Manage Functions/ })).not.toBeChecked();
   });
 
-  test('Save is disabled until a checkbox is toggled', async () => {
+  test('both the top and bottom Save buttons are disabled until a checkbox is toggled', async () => {
     mockFetch(['roles:manage']);
     renderPage();
     await selectAdminRole();
-    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect(screen.getByTestId('save-permissions-top')).toBeDisabled();
+    expect(screen.getByTestId('save-permissions-bottom')).toBeDisabled();
   });
 
-  test('checking a box only stages locally - no network call until Save is clicked', async () => {
+  test('checking a box only stages locally - no network call until Save is clicked, and both Save buttons enable together', async () => {
     mockFetch(['roles:manage']);
     renderPage();
     await selectAdminRole();
@@ -72,9 +73,24 @@ describe('RolePermissionsPage', () => {
 
     await userEvent.click(screen.getByRole('checkbox', { name: /Manage Functions/ }));
     expect(client.apiFetch).toHaveBeenCalledTimes(callsBeforeToggle); // still no new call
-    expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled();
+    expect(screen.getByTestId('save-permissions-top')).not.toBeDisabled();
+    expect(screen.getByTestId('save-permissions-bottom')).not.toBeDisabled();
 
-    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await userEvent.click(screen.getByTestId('save-permissions-bottom'));
+    await waitFor(() => expect(client.apiFetch).toHaveBeenCalledWith('/roles/2/permissions', {
+      method: 'POST',
+      body: JSON.stringify({ permissionKey: 'functions:manage' }),
+    }));
+  });
+
+  test('the top Save button saves just like the bottom one', async () => {
+    mockFetch(['roles:manage']);
+    renderPage();
+    await selectAdminRole();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Manage Functions/ }));
+    await userEvent.click(screen.getByTestId('save-permissions-top'));
+
     await waitFor(() => expect(client.apiFetch).toHaveBeenCalledWith('/roles/2/permissions', {
       method: 'POST',
       body: JSON.stringify({ permissionKey: 'functions:manage' }),
@@ -87,7 +103,7 @@ describe('RolePermissionsPage', () => {
     await selectAdminRole();
 
     await userEvent.click(screen.getByRole('checkbox', { name: /Manage Roles/ }));
-    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await userEvent.click(screen.getByTestId('save-permissions-bottom'));
 
     await waitFor(() => expect(client.apiFetch).toHaveBeenCalledWith('/roles/2/permissions/roles:manage', { method: 'DELETE' }));
   });

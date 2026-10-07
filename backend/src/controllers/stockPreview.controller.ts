@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import * as marketData from '../services/marketData.service';
 import * as userSubscription from '../services/userSubscription.service';
 import * as usageTracking from '../services/usageTracking.service';
+import { checkFmpRateLimit, FmpRateLimitExceededError } from '../services/fmpRateLimit.service';
 
 // This route sits behind requireAuth (see app.ts), so req.user is always
 // populated by the time this handler runs.
@@ -23,7 +24,15 @@ export async function preview(req: Request, res: Response, next: NextFunction): 
   }
 
   try {
-    const key = await userSubscription.getDecryptedKey(getUserId(req), 'fmp');
+    const userId = getUserId(req);
+    const rateLimit = await checkFmpRateLimit(userId);
+    if (!rateLimit.allowed) {
+      throw new FmpRateLimitExceededError(
+        `You've reached the limit of ${rateLimit.limit} new requests per ${rateLimit.windowMinutes} minutes. Please try again shortly.`,
+      );
+    }
+
+    const key = await userSubscription.getDecryptedKey(userId, 'fmp');
 
     const [quoteResult, histResult] = await Promise.allSettled([
       marketData.getQuotes([symbol], key),
@@ -43,13 +52,17 @@ export async function preview(req: Request, res: Response, next: NextFunction): 
     // each caller to log it separately. histResult is guaranteed fulfilled here (a rejection
     // already threw, above); a real vs. cached call is reported by getHistorical()/getQuotes()
     // themselves via the shared day-cache.
-    usageTracking.logUsage(getUserId(req), 'stock_preview', {
+    usageTracking.logUsage(userId, 'stock_preview', {
       fmp_historical: histResult.value.realCalls,
       fmp_quote: quoteResult.status === 'fulfilled' ? quoteResult.value.realCalls : 1,
     }).catch((e) => console.error('usage log failed', e));
 
     res.json({ symbol, quote: quote ?? null, historical: hist });
   } catch (err) {
+    if (err instanceof FmpRateLimitExceededError) {
+      res.status(429).json({ error: err.message });
+      return;
+    }
     if (err instanceof userSubscription.MissingUserApiKeyError) {
       res.status(503).json({ error: err.message });
       return;

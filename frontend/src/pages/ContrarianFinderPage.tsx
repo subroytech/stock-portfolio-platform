@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
-  STRENGTH_LIST_QUERY_KEY, useContrarianBatchScan, useStockUniverse, useRunHistoryDetail,
+  STRENGTH_LIST_QUERY_KEY, useContrarianBatchScan, useStockUniverse, useRunHistoryDetail, getRunCompleteness,
   type ScanResult, type RunHistoryListItem,
 } from '../api/contrarianFinder';
 import { ApiError } from '../api/client';
@@ -49,7 +49,7 @@ export default function ContrarianFinderPage() {
   // 403s the underlying GETs regardless; this only controls whether the entry point/drawer
   // ever render at all.
   const canViewHistory = session?.permissions?.includes('contrarian_finder:view_history') ?? false;
-  const [threshold, setThreshold] = useState(25);
+  const [threshold, setThreshold] = useState(15);
   const [batchSize, setBatchSize] = useState(125);
   const [maxBatches, setMaxBatches] = useState(5);
   const [scanDays, setScanDays] = useState(7);
@@ -80,6 +80,19 @@ export default function ContrarianFinderPage() {
   // stays undefined rather than silently falling back to the live scan -
   // briefly showing the wrong run's data would be worse than a brief loading gap.
   const effectiveData = isArchiveMode ? archivedRun.data?.run : scan.data;
+
+  // Complementary to the backend's own resilient incremental persistence (2026-09-19, closes a
+  // real gap found live where an interrupted scan left real FMP cost with no trace anywhere) -
+  // this doesn't prevent every interruption (a crash, sleep, or force-quit bypasses it), but it
+  // does catch the common "navigated away without thinking" case pre-emptively, on top of the
+  // backend now catching every case reactively (whatever batches did complete stay durable
+  // regardless of whether this warning was heeded).
+  useEffect(() => {
+    if (!scan.isPending) return;
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [scan.isPending]);
 
   const candidates = useMemo(
     () => (effectiveData ? filterCandidates(effectiveData.results, threshold) : []),
@@ -210,12 +223,17 @@ export default function ContrarianFinderPage() {
             the results currently on screen, independent of the (possibly
             since-edited) live form below. Guarded for sessionStorage data
             persisted by an older build of this page, which predates this field. */}
-        {!isArchiveMode && !scan.isPending && scan.data?.params && (
-          <p className="text-xs italic text-text-secondary">
-            Last scan used: {scan.data.params.threshold}% threshold · {scan.data.params.scanDays}-day window · batch size {scan.data.params.batchSize} · max {scan.data.params.maxBatches} batches · {scan.data.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
-            {scan.data.completedAt && <> · run {formatAsOf(scan.data.completedAt)}</>}
-          </p>
-        )}
+        {!isArchiveMode && !scan.isPending && scan.data?.params && (() => {
+          const { expectedTotal, isComplete } = getRunCompleteness(scan.data.params, scan.data.scanned, scan.data.universeSize);
+          return (
+            <p className={`text-xs italic ${isComplete ? 'text-text-secondary' : 'font-medium not-italic text-warning'}`}>
+              Last scan used: {scan.data.params.threshold}% threshold · {scan.data.params.scanDays}-day window · batch size {scan.data.params.batchSize} · max {scan.data.params.maxBatches} batches · {scan.data.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
+              {scan.data.completedAt && <> · run {formatAsOf(scan.data.completedAt)}</>}
+              {' '}· {scan.data.scanned} of {expectedTotal} scanned
+              {!isComplete && ' — partial run, interrupted before it finished'}
+            </p>
+          );
+        })()}
 
         <div className="rounded-card bg-bg-card p-4 shadow-card">
           <div className="flex flex-wrap items-end gap-4">

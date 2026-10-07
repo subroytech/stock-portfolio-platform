@@ -320,8 +320,8 @@ describe('TabShell', () => {
     expect(client.apiFetch).toHaveBeenCalledWith('/analysis/contrarian-comeback/AAA/gate');
   });
 
-  describe('Stock Analysis tab (gated by stock_analysis:view, migration 041)', () => {
-    test('without the permission, no nav link renders and a direct URL visit redirects to Portfolio', async () => {
+  describe('Stock Analysis tab (gated by stock_analysis:view OR candlestick_question_answer:ask, migrations 041/047)', () => {
+    test('without either permission, no nav link renders and a direct URL visit redirects to Portfolio', async () => {
       renderShell('/stock-analysis');
       // "Log out" renders unconditionally from the very first paint, so it can't prove the
       // session has resolved - "API Keys" depends on the (default-mocked) session's
@@ -337,7 +337,7 @@ describe('TabShell', () => {
       expect(screen.getByTestId('tab-panel-stock-analysis')).toHaveClass('hidden');
     });
 
-    test('with the permission, the nav link appears and is navigable to the 4-quadrant panel', async () => {
+    test('with only stock_analysis:view, the nav renders a plain link (not a popover trigger) targeting the 4-quadrant panel', async () => {
       vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
         if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['stock_analysis:view'] });
         if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
@@ -348,9 +348,13 @@ describe('TabShell', () => {
       await userEvent.click(await screen.findByRole('link', { name: 'Stock Analysis' }));
       expect(screen.getByTestId('tab-panel-stock-analysis')).not.toHaveClass('hidden');
       expect(screen.getAllByTestId('stock-analysis-quadrant-input')).toHaveLength(4);
+      // Only one of the two permissions is held - nothing to switch between, so no popover
+      // trigger (button) renders at all, only the plain link.
+      expect(screen.queryByRole('button', { name: 'Stock Analysis ▾' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
     });
 
-    test('with the permission, a direct URL visit renders the panel without redirecting', async () => {
+    test('with only stock_analysis:view, a direct URL visit renders the panel without redirecting', async () => {
       vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
         if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['stock_analysis:view'] });
         if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
@@ -388,6 +392,115 @@ describe('TabShell', () => {
       await userEvent.click(screen.getByTestId('stock-analysis-quadrant-cc'));
       expect(screen.getByTestId('tab-panel-contrarian-comeback')).not.toHaveClass('hidden');
       expect(within(screen.getByTestId('tab-panel-contrarian-comeback')).getByLabelText('Ticker')).toHaveValue('AAPL');
+    });
+
+    test('with both permissions, the trigger is a popover (not a plain link) with no persistent extra row, and switches between Candlestick Charts and Candlestick Tutorial', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') {
+          return Promise.resolve({
+            id: '1', email: 'a@b.com', roles: ['user'],
+            permissions: ['stock_analysis:view', 'candlestick_question_answer:ask'],
+          });
+        }
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        if (url.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+        if (url === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      const trigger = await screen.findByRole('button', { name: 'Stock Analysis ▾' });
+      // Closed by default - no persistent menu/row taking up layout space (the whole point of
+      // the popover over the earlier always-visible sub-tab-bar row).
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+
+      await userEvent.click(trigger);
+      const menu = screen.getByRole('menu');
+      const chartsLink = within(menu).getByRole('menuitem', { name: 'Candlestick Charts' });
+      expect(within(menu).getByRole('menuitem', { name: 'Candlestick Tutorial' })).toBeInTheDocument();
+
+      await userEvent.click(chartsLink);
+      // Clicking a menu item both navigates and closes the popover.
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+      expect(screen.getByTestId('tab-panel-stock-analysis')).not.toHaveClass('hidden');
+      expect(trigger).toHaveClass('bg-accent'); // the trigger itself stays highlighted while on either sub-page
+
+      await userEvent.click(trigger);
+      await userEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Candlestick Tutorial' }));
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+      expect(screen.getByTestId('tab-panel-candlestick-question-answer')).not.toHaveClass('hidden');
+      expect(screen.getByTestId('tab-panel-stock-analysis')).toHaveClass('hidden');
+      expect(trigger).toHaveClass('bg-accent');
+    });
+
+    test('with both permissions, clicking outside the open popover closes it without navigating', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') {
+          return Promise.resolve({
+            id: '1', email: 'a@b.com', roles: ['user'],
+            permissions: ['stock_analysis:view', 'candlestick_question_answer:ask'],
+          });
+        }
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await userEvent.click(await screen.findByRole('button', { name: 'Stock Analysis ▾' }));
+      expect(screen.getByRole('menu')).toBeInTheDocument();
+
+      await userEvent.click(screen.getByTestId('stock-analysis-menu-backdrop'));
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+      // Still on Portfolio - the backdrop click only closed the menu, it didn't navigate.
+      expect(screen.getByTestId('tab-panel-portfolio')).not.toHaveClass('hidden');
+    });
+  });
+
+  describe('Candlestick Pattern Q&A (gated by candlestick_question_answer:ask, migration 047) - reachable via the Stock Analysis nav entry', () => {
+    test('without the permission, a direct URL visit redirects to Portfolio', async () => {
+      renderShell('/candlestick-question-answer');
+      await screen.findByRole('button', { name: 'API Keys' });
+      expect(screen.queryByRole('link', { name: 'Stock Analysis' })).not.toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.getByTestId('tab-panel-portfolio')).not.toHaveClass('hidden');
+      });
+      expect(screen.getByTestId('tab-panel-candlestick-question-answer')).toHaveClass('hidden');
+    });
+
+    test('with only the permission (no stock_analysis:view), the Stock Analysis nav entry appears and targets this page directly, with no popover', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['candlestick_question_answer:ask'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        if (url.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+        if (url === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions: [] });
+        return Promise.resolve({});
+      });
+      renderShell('/candlestick-question-answer');
+
+      expect(await screen.findByTestId('candlestick-qa-question-input')).toBeInTheDocument();
+      expect(screen.getByTestId('tab-panel-candlestick-question-answer')).not.toHaveClass('hidden');
+      // The real gap this was built for: a role with :ask but not stock_analysis:view must
+      // still get a clickable way in, since both of the page's own contextual links live
+      // inside the gated Stock Analysis panel.
+      const link = screen.getByRole('link', { name: 'Stock Analysis' });
+      expect(link).toHaveAttribute('href', '/candlestick-question-answer');
+      expect(screen.queryByRole('link', { name: 'Candlestick Charts' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: 'Candlestick Tutorial' })).not.toBeInTheDocument();
+    });
+
+    test('with only the permission, clicking the Stock Analysis nav entry from elsewhere navigates straight here', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+        if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['candlestick_question_answer:ask'] });
+        if (url === '/portfolios') return Promise.resolve({ portfolios: [] });
+        if (url.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+        if (url === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions: [] });
+        return Promise.resolve({});
+      });
+      renderShell();
+
+      await userEvent.click(await screen.findByRole('link', { name: 'Stock Analysis' }));
+      expect(screen.getByTestId('tab-panel-candlestick-question-answer')).not.toHaveClass('hidden');
+      expect(await screen.findByTestId('candlestick-qa-question-input')).toBeInTheDocument();
     });
   });
 });

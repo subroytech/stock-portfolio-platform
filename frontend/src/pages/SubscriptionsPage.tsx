@@ -12,9 +12,13 @@ import { ApiError } from '../api/client';
 // the caller's own 'fmp' key). Finnhub became a real consumed provider
 // 2026-07-26 — Long-Term Analysis uses it (optionally) for the news panel,
 // the first feature in the platform to actually read a stored Finnhub key.
+// Anthropic joined the same bring-your-own + Admin-Master Fallback model used by the two
+// above - Candlestick Pattern Q&A's free-text Ask resolves the caller's own 'anthropic' key via
+// userSubscription.service.ts's getDecryptedKey(), same as every FMP/Finnhub call site.
 const PROVIDERS: { id: string; label: string; note: string | null }[] = [
   { id: 'fmp', label: 'FMP (Financial Modeling Prep)', note: null },
   { id: 'finnhub', label: 'Finnhub', note: 'used by Long-Term Analysis for news' },
+  { id: 'anthropic', label: 'Anthropic (Claude)', note: "used by Candlestick Pattern Q&A's free-text Ask" },
 ];
 
 export default function SubscriptionsPage() {

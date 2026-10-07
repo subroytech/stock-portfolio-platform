@@ -1,5 +1,5 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
-// Partial mocks, not full automocks - CandlestickRateLimitExceededError/MissingUserApiKeyError
+// Partial mocks, not full automocks - FmpRateLimitExceededError/MissingUserApiKeyError
 // are real Error subclasses the controller checks via `instanceof`, same pattern
 // momentum.controller.test.ts already uses for AnalysisServiceError/MissingUserApiKeyError.
 jest.mock('../src/services/candlestick.service', () => ({
@@ -88,8 +88,8 @@ describe('POST /candlestick/:symbol/:interval/refresh', () => {
   });
 
   test('429 when the rate limit is exceeded', async () => {
-    const candlestickServiceReal = jest.requireActual('../src/services/candlestick.service');
-    mockRefresh.mockRejectedValue(new candlestickServiceReal.CandlestickRateLimitExceededError('limit reached'));
+    const fmpRateLimitReal = jest.requireActual('../src/services/fmpRateLimit.service');
+    mockRefresh.mockRejectedValue(new fmpRateLimitReal.FmpRateLimitExceededError('limit reached'));
     const res = await request(app).post('/candlestick/AAPL/5min/refresh').set('Cookie', authCookie);
     expect(res.status).toBe(429);
     expect(res.body.error).toBe('limit reached');

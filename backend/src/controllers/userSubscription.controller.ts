@@ -3,7 +3,7 @@ import * as userSubscriptionService from '../services/userSubscription.service';
 
 // Application-level allowlist, not a DB constraint — adding a new provider
 // later is a one-line change here, no migration needed.
-const ALLOWED_PROVIDERS = ['fmp', 'finnhub'];
+const ALLOWED_PROVIDERS = ['fmp', 'finnhub', 'anthropic'];
 
 // Every route this controller serves sits behind requireAuth (see app.ts), so
 // req.user is always populated by the time a handler runs.

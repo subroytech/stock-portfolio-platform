@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import * as candlestickService from '../services/candlestick.service';
 import * as userSubscription from '../services/userSubscription.service';
 import { CANDLESTICK_INTERVALS, type CandlestickInterval } from '../services/candlestick.service';
+import { FmpRateLimitExceededError } from '../services/fmpRateLimit.service';
 
 // This route sits behind requireAuth (see app.ts), so req.user is always populated by the time
 // this handler runs.
@@ -66,7 +67,7 @@ export async function refresh(req: Request, res: Response, next: NextFunction): 
     const snapshot = await candlestickService.refresh(symbol, interval, getUserId(req));
     res.json(snapshot);
   } catch (err) {
-    if (err instanceof candlestickService.CandlestickRateLimitExceededError) {
+    if (err instanceof FmpRateLimitExceededError) {
       res.status(429).json({ error: err.message });
       return;
     }

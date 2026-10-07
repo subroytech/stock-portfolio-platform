@@ -20,6 +20,8 @@ import supportTicketRoutes from './routes/supportTicket.routes';
 import usageAuditRoutes from './routes/usageAudit.routes';
 import flexQuotaRoutes from './routes/flexQuota.routes';
 import candlestickRoutes from './routes/candlestick.routes';
+import rateLimitStatusRoutes from './routes/rateLimit.routes';
+import candlestickQuestionAnswerRoutes from './routes/candlestickQuestionAnswer.routes';
 import errorHandler from './middleware/errorHandler';
 import rateLimiters from './middleware/rateLimit';
 import requireAuth from './middleware/requireAuth';
@@ -91,6 +93,13 @@ app.use('/flex-quota', requireAuth, rateLimiters, flexQuotaRoutes);
 // actually restricts visibility, this route just needs a known caller (for the per-user rate
 // limit on POST .../refresh).
 app.use('/candlestick', requireAuth, rateLimiters, candlestickRoutes);
+// A user's own combined-rate-limit status - backs the header "(i)"/"W" indicator. requireAuth
+// only, same "my own account data" boundary as /flex-quota/status.
+app.use('/rate-limit', requireAuth, rateLimiters, rateLimitStatusRoutes);
+// Candlestick Pattern Q&A (Phase 1) - requireAuth only at this mount level; each route inside
+// is individually gated by requirePermission (candlestick_question_answer:ask/manage_content),
+// same split as /portfolio-templates.
+app.use('/candlestick-question-answer', requireAuth, rateLimiters, candlestickQuestionAnswerRoutes);
 
 app.use(errorHandler);
 

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch, ApiError } from './client';
+import { RATE_LIMIT_STATUS_QUERY_KEY } from './rateLimitStatus';
 
 // Stock Analysis - Candlestick Charts (Phase 1). 1min was considered and dropped - live-verified
 // against a real FMP account as a genuine plan-tier restriction (HTTP 402), not a market-hours
@@ -63,7 +64,9 @@ export interface CandlestickIndicators {
   macd: (MacdIndicator | null)[];
   bb20: (BollingerBandsIndicator | null)[];
   volume: number[];
+  volumeSma20: (number | null)[];
   vwap: number[];
+  obv: number[];
   pivotPoints: PivotPointsIndicator | null;
   fibonacci: FibonacciIndicator | null;
 }
@@ -73,6 +76,10 @@ export interface CandlestickSnapshot {
   indicators: CandlestickIndicators;
   updatedAt: string;
   isFresh: boolean;
+  // Best-effort, peeked from the shared 'quote' cache other features already populate (see
+  // candlestick.service.ts's peekCompanyName) - null if no other feature has looked up this
+  // symbol's quote yet today, never a reason to block or delay rendering the rest of the snapshot.
+  companyName: string | null;
 }
 
 export interface CachedSymbolSummary {
@@ -122,5 +129,9 @@ export function useRefreshCandlestick() {
       queryClient.setQueryData(['candlestick', 'snapshot', symbol, interval], data);
       queryClient.invalidateQueries({ queryKey: ['candlestick', 'cachedSymbols'] });
     },
+    // Candlestick refreshes count against the combined rate limit too - refresh the header
+    // indicator right after this settles (success or a 429) rather than waiting for its own
+    // poll interval.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: RATE_LIMIT_STATUS_QUERY_KEY }),
   });
 }

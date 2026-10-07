@@ -5,11 +5,16 @@ jest.mock('../src/services/userSubscription.service', () => ({
   getDecryptedKey: jest.fn(),
 }));
 jest.mock('../src/services/usageTracking.service');
+jest.mock('../src/services/fmpRateLimit.service', () => ({
+  ...jest.requireActual('../src/services/fmpRateLimit.service'),
+  checkFmpRateLimit: jest.fn(),
+}));
 
 import request from 'supertest';
 import * as marketData from '../src/services/marketData.service';
 import * as userSubscription from '../src/services/userSubscription.service';
 import * as usageTracking from '../src/services/usageTracking.service';
+import { checkFmpRateLimit } from '../src/services/fmpRateLimit.service';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
 
@@ -17,6 +22,7 @@ const mockGetHistorical = marketData.getHistorical as jest.Mock;
 const mockGetQuotes = marketData.getQuotes as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
 const mockLogUsage = usageTracking.logUsage as jest.Mock;
+const mockCheckRateLimit = checkFmpRateLimit as jest.Mock;
 
 const authCookie = `auth_token=${signToken('user-1')}`;
 
@@ -26,6 +32,7 @@ beforeEach(() => {
   mockGetDecryptedKey.mockReset();
   mockGetDecryptedKey.mockResolvedValue('fake-fmp-key');
   mockLogUsage.mockReset().mockResolvedValue(undefined);
+  mockCheckRateLimit.mockReset().mockResolvedValue({ allowed: true, exempt: false, limit: 10, windowMinutes: 10, usedInWindow: 0 });
 });
 
 describe('GET /stock-preview/:symbol', () => {
@@ -100,5 +107,14 @@ describe('GET /stock-preview/:symbol', () => {
     expect(res.status).toBe(200);
     expect(res.body.symbol).toBe('AAPL');
     expect(mockGetHistorical).toHaveBeenCalledWith('AAPL', 'fake-fmp-key', 96);
+  });
+
+  test('429 with the rate limit\'s own message when the shared budget is exhausted, before any real fetch or key lookup', async () => {
+    mockCheckRateLimit.mockResolvedValueOnce({ allowed: false, exempt: false, limit: 10, windowMinutes: 10, usedInWindow: 10 });
+    const res = await request(app).get('/stock-preview/AAPL').set('Cookie', authCookie);
+    expect(res.status).toBe(429);
+    expect(res.body.error).toContain('10 new requests per 10 minutes');
+    expect(mockGetDecryptedKey).not.toHaveBeenCalled();
+    expect(mockGetHistorical).not.toHaveBeenCalled();
   });
 });

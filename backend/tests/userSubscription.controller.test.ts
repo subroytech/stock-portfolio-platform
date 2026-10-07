@@ -73,6 +73,19 @@ describe('PUT /subscriptions/:provider', () => {
     expect(res.status).toBe(400);
   });
 
+  test('accepts anthropic as a real provider, not the 400 "unrecognized provider" path', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+    mockQuery.mockImplementation((_sql: string, params: unknown[]) => Promise.resolve({
+      rows: [{
+        provider: 'anthropic', api_key_encrypted: params[2], plan_tier: params[3], status: params[4],
+        renewal_date: params[5], created_at: 't1', updated_at: 't1',
+      }],
+    }));
+    const res = await request(app).put('/subscriptions/anthropic').set('Cookie', authCookie).send({ apiKey: 'sk-ant-real-key' });
+    expect(res.status).toBe(200);
+    expect(res.body.subscription.provider).toBe('anthropic');
+  });
+
   test('400 when apiKey is missing', async () => {
     const res = await request(app).put('/subscriptions/fmp').set('Cookie', authCookie).send({});
     expect(res.status).toBe(400);

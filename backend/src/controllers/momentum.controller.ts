@@ -3,6 +3,7 @@ import * as marketData from '../services/marketData.service';
 import * as analysisService from '../services/analysisService';
 import * as userSubscription from '../services/userSubscription.service';
 import * as usageTracking from '../services/usageTracking.service';
+import { checkFmpRateLimit, FmpRateLimitExceededError } from '../services/fmpRateLimit.service';
 
 // This route sits behind requireAuth (see app.ts), so req.user is always
 // populated by the time this handler runs.
@@ -20,7 +21,15 @@ export async function analyze(req: Request, res: Response, next: NextFunction): 
   }
 
   try {
-    const key = await userSubscription.getDecryptedKey(getUserId(req), 'fmp');
+    const userId = getUserId(req);
+    const rateLimit = await checkFmpRateLimit(userId);
+    if (!rateLimit.allowed) {
+      throw new FmpRateLimitExceededError(
+        `You've reached the limit of ${rateLimit.limit} new requests per ${rateLimit.windowMinutes} minutes. Please try again shortly.`,
+      );
+    }
+
+    const key = await userSubscription.getDecryptedKey(userId, 'fmp');
 
     const [histResult, quoteResult] = await Promise.allSettled([
       marketData.getHistorical(symbol, key, 130),
@@ -49,12 +58,16 @@ export async function analyze(req: Request, res: Response, next: NextFunction): 
     // histResult is guaranteed fulfilled here (a rejection already threw, above) - a real vs.
     // cached call is reported by getHistorical()/getQuotes() themselves, same "an attempt is a
     // real cost" principle used everywhere else this shared day-cache is read.
-    usageTracking.logUsage(getUserId(req), 'momentum', {
+    usageTracking.logUsage(userId, 'momentum', {
       fmp_historical: histResult.value.realCalls,
       fmp_quote: quoteResult.status === 'fulfilled' ? quoteResult.value.realCalls : 1,
     }).catch((e) => console.error('usage log failed', e));
     res.json({ symbol, name: quote?.name ?? null, analysis });
   } catch (err) {
+    if (err instanceof FmpRateLimitExceededError) {
+      res.status(429).json({ error: err.message });
+      return;
+    }
     if (err instanceof userSubscription.MissingUserApiKeyError) {
       res.status(503).json({ error: err.message });
       return;

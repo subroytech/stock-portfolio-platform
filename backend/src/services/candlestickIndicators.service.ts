@@ -46,6 +46,27 @@ export function computeVWAP(bars: CandlestickBar[]): number[] {
   return vwap.reverse();
 }
 
+// On-Balance Volume - a cumulative running total: adds the bar's volume on an up day (close >
+// prior close), subtracts it on a down day, unchanged on a flat day or the first bar (no prior
+// close to compare against). Only OBV's slope/trend matters, not its absolute value, so starting
+// the accumulation at 0 for whatever window it's computed over (same as VWAP above) is standard
+// and doesn't change the trend shape. Returned newest-first, same convention as computeVWAP.
+export function computeOBV(bars: CandlestickBar[]): number[] {
+  const oldestFirst = [...bars].reverse();
+  let obv = 0;
+  const result: number[] = [];
+  for (let i = 0; i < oldestFirst.length; i++) {
+    if (i > 0) {
+      const prevClose = oldestFirst[i - 1].close;
+      const close = oldestFirst[i].close;
+      if (close > prevClose) obv += oldestFirst[i].volume;
+      else if (close < prevClose) obv -= oldestFirst[i].volume;
+    }
+    result.push(obv);
+  }
+  return result.reverse();
+}
+
 export interface PivotPoints {
   pp: number;
   r1: number;

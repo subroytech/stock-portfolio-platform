@@ -17,6 +17,7 @@ function setsEqual(a: Set<string>, b: Set<string>): boolean {
 // the worst case is a display-only nesting glitch, never a bypass of the real guard.
 const PERMISSION_PARENT: Record<string, string> = {
   'contrarian_finder:scan_history': 'contrarian_finder:scan',
+  'candlestick_question_answer:llm_calling': 'candlestick_question_answer:ask',
 };
 
 // Reorders the flat (alphabetical-by-name) function list so a child permission renders
@@ -126,6 +127,16 @@ export default function RolePermissionsPage() {
 
       {selectedRoleId && (
         <>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={!isDirty || saving}
+            data-testid="save-permissions-top"
+            className="self-start rounded-btn bg-accent px-4 py-1.5 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-60"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+
           <div className="flex flex-col gap-2">
             {(permissionsLoading || functionsLoading || draft === null) && <p className="text-sm text-text-secondary">Loading…</p>}
             {draft !== null && orderedFunctions.map((fn) => (
@@ -154,6 +165,7 @@ export default function RolePermissionsPage() {
             type="button"
             onClick={handleSave}
             disabled={!isDirty || saving}
+            data-testid="save-permissions-bottom"
             className="self-start rounded-btn bg-accent px-4 py-1.5 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-60"
           >
             {saving ? 'Saving…' : 'Save'}

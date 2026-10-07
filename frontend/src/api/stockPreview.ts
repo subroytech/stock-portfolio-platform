@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { apiFetch } from './client';
+import { apiFetch, ApiError } from './client';
 import type { HistoricalBar } from '../lib/stockPreview';
 
 export interface StockPreviewQuote {
@@ -27,5 +27,9 @@ export function useStockPreview(symbol: string | null) {
     // produced 4 logged calls instead of 1).
     queryFn: ({ signal }) => apiFetch<StockPreviewResponse>(`/stock-preview/${encodeURIComponent(symbol!)}`, { signal }),
     enabled: symbol !== null,
+    // A 429 (shared rate limit exhausted) is never worth auto-retrying - it won't have cleared
+    // by the next attempt and just delays the real error reaching the user. Every other error
+    // keeps the global default single retry (frontend/src/lib/queryClient.ts).
+    retry: (failureCount, error) => !(error instanceof ApiError && error.status === 429) && failureCount < 1,
   });
 }

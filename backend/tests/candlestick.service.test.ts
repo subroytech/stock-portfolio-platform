@@ -18,7 +18,7 @@ jest.mock('../src/services/userSubscription.service', () => ({
   getDecryptedKey: jest.fn(),
 }));
 jest.mock('../src/services/usageTracking.service', () => ({ logUsage: jest.fn() }));
-jest.mock('../src/services/candlestickRateLimit.service', () => ({ checkCandlestickRateLimit: jest.fn() }));
+jest.mock('../src/services/fmpRateLimit.service', () => ({ checkFmpRateLimit: jest.fn(), FmpRateLimitExceededError: jest.requireActual('../src/services/fmpRateLimit.service').FmpRateLimitExceededError }));
 
 import { pool } from '../src/db/pool';
 import * as marketData from '../src/services/marketData.service';
@@ -26,8 +26,8 @@ import * as fmpDailyCache from '../src/services/fmpDailyCache.service';
 import * as fmpIntradayCache from '../src/services/fmpIntradayCache.service';
 import * as userSubscription from '../src/services/userSubscription.service';
 import * as usageTracking from '../src/services/usageTracking.service';
-import { checkCandlestickRateLimit } from '../src/services/candlestickRateLimit.service';
-import { getSnapshot, refresh, listCachedSymbols, INTERVAL_RANGES, CandlestickRateLimitExceededError } from '../src/services/candlestick.service';
+import { checkFmpRateLimit, FmpRateLimitExceededError } from '../src/services/fmpRateLimit.service';
+import { getSnapshot, refresh, listCachedSymbols, INTERVAL_RANGES } from '../src/services/candlestick.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
 const mockGetHistorical = marketData.getHistorical as jest.Mock;
@@ -38,7 +38,7 @@ const mockFetchAndStore = fmpIntradayCache.fetchAndStore as jest.Mock;
 const mockDeriveIsFresh = fmpIntradayCache.deriveIsFresh as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
 const mockLogUsage = usageTracking.logUsage as jest.Mock;
-const mockCheckRateLimit = checkCandlestickRateLimit as jest.Mock;
+const mockCheckRateLimit = checkFmpRateLimit as jest.Mock;
 
 // A bar dated relative to "now" (not a hardcoded date) so display-window trimming (Phase 1.1)
 // never accidentally filters it out regardless of when the test suite actually runs. Format
@@ -65,9 +65,18 @@ beforeEach(() => {
   mockLogUsage.mockResolvedValue(undefined);
 });
 
+// Peeked from the shared 'quote' cache alongside the interval's own data - candlestick.service.ts
+// calls peekCached() twice now (once for the interval's own bars/history, once for the company
+// name), so a bare FIFO mockResolvedValueOnce queue would silently hand the wrong call the wrong
+// value. Argument-aware instead: branches on apiName, so tests can configure each independently
+// and adding a future third peekCached() call site can never shift existing tests' assumptions.
+function mockPeekCachedByApiName(byApiName: Record<string, unknown>) {
+  mockPeekCached.mockImplementation(async (_symbol: string, apiName: string) => byApiName[apiName] ?? null);
+}
+
 describe('getSnapshot', () => {
   test('1day - reads from the existing daily cache (peekCached), never fetches, computes indicators', async () => {
-    mockPeekCached.mockResolvedValueOnce({ data: [RAW_BAR, RAW_BAR], updatedAt: '2026-09-17T20:00:00Z', wasCachedToday: true });
+    mockPeekCachedByApiName({ 'historical-price-eod': { data: [RAW_BAR, RAW_BAR], updatedAt: '2026-09-17T20:00:00Z', wasCachedToday: true } });
 
     const result = await getSnapshot('AAPL', '1day');
 
@@ -80,6 +89,27 @@ describe('getSnapshot', () => {
     expect(result?.indicators).toHaveProperty('vwap');
     expect(result?.indicators).toHaveProperty('pivotPoints');
     expect(result?.indicators).toHaveProperty('fibonacci');
+  });
+
+  test('1day - includes the company name peeked from the shared quote cache', async () => {
+    mockPeekCachedByApiName({
+      'historical-price-eod': { data: [RAW_BAR], updatedAt: 'x', wasCachedToday: true },
+      quote: { data: [{ name: 'Apple Inc.' }], updatedAt: 'y', wasCachedToday: true },
+    });
+
+    const result = await getSnapshot('AAPL', '1day');
+
+    expect(mockPeekCached).toHaveBeenCalledWith('AAPL', 'quote');
+    expect(result?.companyName).toBe('Apple Inc.');
+  });
+
+  test('1day - companyName is null when no quote has been cached for this symbol yet, never triggering a real fetch', async () => {
+    mockPeekCachedByApiName({ 'historical-price-eod': { data: [RAW_BAR], updatedAt: 'x', wasCachedToday: true } });
+
+    const result = await getSnapshot('AAPL', '1day');
+
+    expect(result?.companyName).toBeNull();
+    expect(mockFmpGet).not.toHaveBeenCalled();
   });
 
   test('1day - null when nothing cached yet', async () => {
@@ -102,6 +132,15 @@ describe('getSnapshot', () => {
   test('intraday - null when nothing cached yet', async () => {
     mockGetCached.mockResolvedValueOnce(null);
     expect(await getSnapshot('AAPL', '5min')).toBeNull();
+  });
+
+  test('intraday - also includes the company name peeked from the shared quote cache', async () => {
+    mockGetCached.mockResolvedValueOnce({ bars: [NUMERIC_BAR], indicators: { sma20: [null] }, updatedAt: 'x', isFresh: false });
+    mockPeekCachedByApiName({ quote: { data: [{ name: 'Apple Inc.' }], updatedAt: 'y', wasCachedToday: true } });
+
+    const result = await getSnapshot('AAPL', '5min');
+
+    expect(result?.companyName).toBe('Apple Inc.');
   });
 
   test('self-heals a cache row written before Phase 1.1\'s series shape existed (the real bug found live 2026-09-18: a stale row\'s sma20/macd/etc. as bare values, not arrays, crashed the frontend) by recomputing from the cached bars instead of passing the stale shape through', async () => {
@@ -130,7 +169,7 @@ describe('getSnapshot', () => {
     const old = numericBarHoursAgo(240, { close: 999 }); // 10 days old - outside 5min's 3-day display window
     mockGetCached.mockResolvedValueOnce({
       bars: [recent, old],
-      indicators: { sma20: [1, 2], sma50: [3, 4], ema20: [5, 6], rsi14: [7, 8], macd: [{ macd: 1, signal: 1, hist: 0 }, { macd: 2, signal: 2, hist: 0 }], bb20: [{ upper: 1, mid: 1, lower: 1, bw: 0 }, { upper: 2, mid: 2, lower: 2, bw: 0 }] },
+      indicators: { sma20: [1, 2], sma50: [3, 4], ema20: [5, 6], rsi14: [7, 8], macd: [{ macd: 1, signal: 1, hist: 0 }, { macd: 2, signal: 2, hist: 0 }], bb20: [{ upper: 1, mid: 1, lower: 1, bw: 0 }, { upper: 2, mid: 2, lower: 2, bw: 0 }], volumeSma20: [9, 10] },
       updatedAt: 'x',
       isFresh: true,
     });
@@ -143,9 +182,12 @@ describe('getSnapshot', () => {
     expect(result?.indicators.sma20).toEqual([1]);
     expect(result?.indicators.sma50).toEqual([3]);
     expect(result?.indicators.rsi14).toEqual([7]);
+    expect(result?.indicators.volumeSma20).toEqual([9]);
     // Window-relative indicators are recomputed fresh from just the trimmed bar, not the wide set
-    // - a single-bar VWAP equals that bar's own typical price ((12+9+50)/3 = 23.67).
+    // - a single-bar VWAP equals that bar's own typical price ((12+9+50)/3 = 23.67); a single bar
+    // has no prior close to compare against, so OBV is 0 regardless of what the wide set held.
     expect((result?.indicators.vwap as number[])[0]).toBeCloseTo((12 + 9 + 50) / 3);
+    expect((result?.indicators.obv as number[])[0]).toBe(0);
   });
 
   test('Phase 1.1 - 1day computes history series over the wide (buffered) bars before trimming to the display window', async () => {
@@ -162,14 +204,16 @@ describe('getSnapshot', () => {
     // sma50 should be non-null for the returned (display-window) bars - proving it was computed
     // over the full 65-bar wide set, not just whatever survived trimming.
     expect((result?.indicators.sma50 as (number | null)[])[0]).not.toBeNull();
+    // volumeSma20 gets the same wide-then-trim treatment - same lookback proof as sma50 above.
+    expect((result?.indicators.volumeSma20 as (number | null)[])[0]).not.toBeNull();
   });
 });
 
 describe('refresh', () => {
-  test('throws CandlestickRateLimitExceededError and never fetches when the limit is exhausted', async () => {
-    mockCheckRateLimit.mockResolvedValueOnce({ allowed: false, limit: 10, windowMinutes: 10, usedInWindow: 10 });
+  test('throws FmpRateLimitExceededError and never fetches when the limit is exhausted', async () => {
+    mockCheckRateLimit.mockResolvedValueOnce({ allowed: false, exempt: false, limit: 10, windowMinutes: 10, usedInWindow: 10 });
 
-    await expect(refresh('AAPL', '5min', 'u1')).rejects.toThrow(CandlestickRateLimitExceededError);
+    await expect(refresh('AAPL', '5min', 'u1')).rejects.toThrow(FmpRateLimitExceededError);
     expect(mockGetDecryptedKey).not.toHaveBeenCalled();
     expect(mockLogUsage).not.toHaveBeenCalled();
   });
@@ -178,7 +222,7 @@ describe('refresh', () => {
     mockCheckRateLimit.mockResolvedValueOnce({ allowed: true, limit: 10, windowMinutes: 10, usedInWindow: 0 });
     mockGetDecryptedKey.mockResolvedValueOnce('fmp-key');
     mockGetHistorical.mockResolvedValueOnce({ bars: [RAW_BAR], realCalls: 1 });
-    mockPeekCached.mockResolvedValueOnce({ data: [RAW_BAR], updatedAt: '2026-09-18T00:00:00Z', wasCachedToday: true });
+    mockPeekCachedByApiName({ 'historical-price-eod': { data: [RAW_BAR], updatedAt: '2026-09-18T00:00:00Z', wasCachedToday: true } });
 
     const result = await refresh('AAPL', '1day', 'u1');
 
@@ -188,6 +232,21 @@ describe('refresh', () => {
     expect(result.updatedAt).toBe('2026-09-18T00:00:00Z');
     expect(result.isFresh).toBe(true);
     expect(mockLogUsage).toHaveBeenCalledWith('u1', 'stock_analysis_candlestick', { fmp_historical: 1 });
+  });
+
+  test('1day - also includes the company name peeked from the shared quote cache, without spending a real fetch on it', async () => {
+    mockCheckRateLimit.mockResolvedValueOnce({ allowed: true, limit: 10, windowMinutes: 10, usedInWindow: 0 });
+    mockGetDecryptedKey.mockResolvedValueOnce('fmp-key');
+    mockGetHistorical.mockResolvedValueOnce({ bars: [RAW_BAR], realCalls: 1 });
+    mockPeekCachedByApiName({
+      'historical-price-eod': { data: [RAW_BAR], updatedAt: '2026-09-18T00:00:00Z', wasCachedToday: true },
+      quote: { data: [{ name: 'Apple Inc.' }], updatedAt: 'y', wasCachedToday: true },
+    });
+
+    const result = await refresh('AAPL', '1day', 'u1');
+
+    expect(result.companyName).toBe('Apple Inc.');
+    expect(mockFmpGet).not.toHaveBeenCalled();
   });
 
   test('intraday - delegates the real fetch+cache-write to fmpIntradayCache.fetchAndStore, logs realCalls: 1', async () => {

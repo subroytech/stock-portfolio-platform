@@ -51,7 +51,7 @@ export async function getUniverse(req: Request, res: Response, next: NextFunctio
 // omitted/undefined `tickerRefresh` in the response when the flag isn't set,
 // so a normal "Run Scan" response shape is unchanged.
 export async function scanBatch(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const { batchIndex, batchSize, maxBatches, qualityPreset, scanDays, updateAllTickerData } = req.body || {};
+  const { batchIndex, batchSize, maxBatches, qualityPreset, scanDays, updateAllTickerData, threshold, runRowId } = req.body || {};
 
   const clampedBatchSize = clamp(batchSize, 10, 250, cf.CF_BATCH);
   const clampedMaxBatches = clamp(maxBatches, 1, 10, cf.CF_MAX_BATCHES);
@@ -59,7 +59,8 @@ export async function scanBatch(req: Request, res: Response, next: NextFunction)
   const idx = typeof batchIndex === 'number' ? batchIndex : parseInt(String(batchIndex), 10);
 
   try {
-    const key = await userSubscription.getDecryptedKey(getUserId(req), 'fmp');
+    const userId = getUserId(req);
+    const key = await userSubscription.getDecryptedKey(userId, 'fmp');
     const universe = await cf.assembleUniverse();
     const batches = cf.buildBatches(universe, clampedBatchSize, clampedMaxBatches);
 
@@ -78,10 +79,35 @@ export async function scanBatch(req: Request, res: Response, next: NextFunction)
     // portfolio.service.ts's refreshPrices(). Doesn't additionally count the optional
     // "Run Scan (+ Mkt Cap)" profile calls refreshTickerDataBatch() makes when
     // updateAllTickerData is set - a rarer, confirm-gated path, left as a known simplification.
-    usageTracking.logUsage(getUserId(req), 'contrarian_finder_scan', {
+    usageTracking.logUsage(userId, 'contrarian_finder_scan', {
       fmp_quote: batches[idx].length, fmp_historical: batches[idx].length,
     }).catch((e) => console.error('usage log failed', e));
-    res.json({ batchIndex: idx, totalBatches: batches.length, universeSize: universe.length, results, tickerRefresh });
+
+    // Persist this batch's contribution durably before responding - a real bug found live
+    // 2026-09-19: the old end-of-loop-only save meant an interrupted scan (tab closed/refreshed
+    // mid-run) left real FMP cost with zero trace anywhere. batch 0 starts the shared run row;
+    // every later batch appends to it. Wrapped so a persistence hiccup never turns a genuinely
+    // successful scan batch into a failed response - the user should still see their results.
+    let newRunRowId: string | undefined = typeof runRowId === 'string' ? runRowId : undefined;
+    try {
+      if (idx === 0) {
+        const permissions = await rolesService.getUserPermissions(userId);
+        const runTier: cf.ContrarianRunTier = permissions.includes('contrarian_finder:scan_history') ? 'admin' : 'user';
+        const params = {
+          threshold: typeof threshold === 'number' ? threshold : null,
+          batchSize: clampedBatchSize, maxBatches: clampedMaxBatches,
+          qualityPreset: typeof qualityPreset === 'string' ? qualityPreset : 'standard',
+          scanDays: clampedScanDays,
+        };
+        newRunRowId = await cf.saveLastScan(userId, runTier, { universeSize: universe.length, scanned: results.length, params, results });
+      } else if (newRunRowId) {
+        await cf.appendRunProgress(newRunRowId, { scanned: results.length, results });
+      }
+    } catch (e) {
+      console.error('incremental scan persistence failed', e);
+    }
+
+    res.json({ batchIndex: idx, totalBatches: batches.length, universeSize: universe.length, results, tickerRefresh, runRowId: newRunRowId });
   } catch (err) {
     if (err instanceof userSubscription.MissingUserApiKeyError) {
       res.status(503).json({ error: err.message });

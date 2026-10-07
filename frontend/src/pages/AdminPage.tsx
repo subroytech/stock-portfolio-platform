@@ -8,6 +8,7 @@ import FunctionsPage from './FunctionsPage';
 import RolePermissionsPage from './RolePermissionsPage';
 import RolesPage from './RolesPage';
 import PortfolioTemplateApprovalPage from './PortfolioTemplateApprovalPage';
+import AdminCandlestickQuestionAnswerPage from './AdminCandlestickQuestionAnswerPage';
 import ConfigPropertiesPage from './ConfigPropertiesPage';
 import AdminSupportTicketsPage from './AdminSupportTicketsPage';
 import UsageAuditPage from './UsageAuditPage';
@@ -20,6 +21,7 @@ const TABS = [
   { id: 'masterData', label: 'Master Data' },
   { id: 'userAttributes', label: 'Manage User Attribute' },
   { id: 'portfolioTemplates', label: 'Portfolio Templates' },
+  { id: 'candlestickQuestionAnswer', label: 'Candlestick Pattern Q&A' },
   { id: 'configProperties', label: 'Config Properties' },
   { id: 'support', label: 'Support Tickets' },
   { id: 'usageAudit', label: 'User Usage' },
@@ -62,6 +64,9 @@ export default function AdminPage() {
   // section) - hidden entirely (not disabled) for an admin session that hasn't been granted
   // this specific Function, same pattern as apis/masterData above.
   const canManagePortfolioTemplates = session?.permissions?.includes('portfolio_template:manage_status') ?? false;
+  // Candlestick Pattern Q&A (Phase 1) content management - hidden entirely (not disabled)
+  // without the permission, same pattern as every other gated tab on this page.
+  const canManageCandlestickQuestionAnswer = session?.permissions?.includes('candlestick_question_answer:manage_content') ?? false;
   // Config Properties (2026-08-24) - grantable only to admin-master (roles.service.ts's
   // ADMIN_MASTER_ONLY_PERMISSIONS), so this tab is invisible to every other admin session,
   // same hidden-not-disabled pattern as apis/masterData/portfolioTemplates above.
@@ -87,6 +92,7 @@ export default function AdminPage() {
     if (tab.id === 'apis') return canManageOwnKeys;
     if (tab.id === 'masterData') return canManageMasterData;
     if (tab.id === 'portfolioTemplates') return canManagePortfolioTemplates;
+    if (tab.id === 'candlestickQuestionAnswer') return canManageCandlestickQuestionAnswer;
     if (tab.id === 'configProperties') return canManageConfigProperties;
     if (tab.id === 'support') return canManageSupport;
     if (tab.id === 'usageAudit') return canViewUsageAudit;
@@ -160,6 +166,7 @@ export default function AdminPage() {
         {activeTab === 'userAttributes' && activeSubTab === 'permissions' && <RolePermissionsPage />}
         {activeTab === 'userAttributes' && activeSubTab === 'roles' && <RolesPage />}
         {activeTab === 'portfolioTemplates' && canManagePortfolioTemplates && <PortfolioTemplateApprovalPage />}
+        {activeTab === 'candlestickQuestionAnswer' && canManageCandlestickQuestionAnswer && <AdminCandlestickQuestionAnswerPage />}
         {activeTab === 'configProperties' && canManageConfigProperties && <ConfigPropertiesPage />}
         {activeTab === 'support' && canManageSupport && <AdminSupportTicketsPage />}
         {activeTab === 'usageAudit' && canViewUsageAudit && <UsageAuditPage />}

@@ -15,6 +15,7 @@
     "lint": "eslint src tests",
     "migrate": "ts-node src/db/migrate.ts",
     "seed:tickers": "ts-node src/db/seedTickerData.ts",
+    "seed:candlestick-question-answer": "ts-node src/db/seedCandlestickQuestionAnswer.ts",
     "backfill:ticker-data": "ts-node src/db/backfillTickerData.ts"
   },
   "keywords": [],
@@ -22,6 +23,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",

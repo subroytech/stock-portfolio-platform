@@ -24,6 +24,7 @@ export class RoleNotAllowedForPermissionError extends Error {}
 // only such pair - extend by adding another entry if a second case shows up.
 const PERMISSION_REQUIRES: Record<string, string> = {
   'contrarian_finder:scan_history': 'contrarian_finder:scan',
+  'candlestick_question_answer:llm_calling': 'candlestick_question_answer:ask',
 };
 
 // Config Properties (2026-08-24) is system-level configuration - the user's own call was that

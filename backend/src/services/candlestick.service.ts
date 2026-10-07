@@ -14,19 +14,18 @@ import * as momentum from './momentum.service';
 import * as candlestickIndicators from './candlestickIndicators.service';
 import * as userSubscription from './userSubscription.service';
 import * as usageTracking from './usageTracking.service';
-import { checkCandlestickRateLimit } from './candlestickRateLimit.service';
+import { checkFmpRateLimit, FmpRateLimitExceededError } from './fmpRateLimit.service';
 import type { CandlestickBar } from './candlestickIndicators.service';
 
 export type CandlestickInterval = '5min' | '15min' | '30min' | '1hour' | '4hour' | '1day';
 export const CANDLESTICK_INTERVALS: CandlestickInterval[] = ['5min', '15min', '30min', '1hour', '4hour', '1day'];
-
-export class CandlestickRateLimitExceededError extends Error {}
 
 export interface CandlestickSnapshot {
   bars: CandlestickBar[];
   indicators: Record<string, unknown>;
   updatedAt: string;
   isFresh: boolean;
+  companyName: string | null;
 }
 
 // Phase 1.1 - per-interval display window (what the user actually sees) and lookback buffer
@@ -59,10 +58,13 @@ export const INTERVAL_RANGES: Record<CandlestickInterval, { displayDays: number;
   '1day': { displayDays: 224, bufferDays: 70 },
 };
 
-// The six indicators that need real trailing history to be accurate from the first DISPLAYED
-// bar onward - computed once over the full wide/buffered bars (see buildDisplaySnapshot).
-// vwap/pivotPoints/fibonacci/volume are deliberately NOT here - see computeWindowRelativeIndicators.
-const HISTORY_DEPENDENT_KEYS = ['sma20', 'sma50', 'ema20', 'rsi14', 'macd', 'bb20'] as const;
+// The indicators that need real trailing history to be accurate from the first DISPLAYED bar
+// onward - computed once over the full wide/buffered bars (see buildDisplaySnapshot).
+// vwap/pivotPoints/fibonacci/volume/obv are deliberately NOT here - see
+// computeWindowRelativeIndicators. volumeSma20 needs the same trailing-window treatment as
+// sma20 (just fed volume instead of close) - the existing buffer, sized for sma50's 50-period
+// need, comfortably covers its shorter 20-period lookback too.
+const HISTORY_DEPENDENT_KEYS = ['sma20', 'sma50', 'ema20', 'rsi14', 'macd', 'bb20', 'volumeSma20'] as const;
 
 function extractBars(raw: unknown): CandlestickBar[] {
   const arr = Array.isArray(raw) ? raw : ((raw as { historical?: unknown[] })?.historical ?? []);
@@ -115,6 +117,7 @@ function computeHistorySeries(bars: CandlestickBar[]): Record<string, unknown> {
     rsi14: candlestickIndicators.computeRsiSeries(closes, 14),
     macd: candlestickIndicators.computeMacdSeries(closes),
     bb20: candlestickIndicators.computeBbSeries(closes, 20),
+    volumeSma20: candlestickIndicators.computeSmaSeries(bars.map((b) => b.volume), 20),
   };
 }
 
@@ -131,6 +134,10 @@ function computeWindowRelativeIndicators(bars: CandlestickBar[]): Record<string,
     vwap: candlestickIndicators.computeVWAP(bars),
     pivotPoints: candlestickIndicators.computePivotPoints(bars),
     fibonacci: candlestickIndicators.computeFibonacciRetracement(bars),
+    // Cumulative from the start of the window, same reasoning as VWAP above - only OBV's
+    // slope/trend is ever meaningful, so where the cumulative sum starts doesn't change the
+    // visible trend shape, just offsets every point by a constant.
+    obv: candlestickIndicators.computeOBV(bars),
   };
 }
 
@@ -186,6 +193,19 @@ async function fetchIntradayBars(symbol: string, interval: CandlestickInterval, 
   return data ? extractBars(data) : [];
 }
 
+// Read-only, best-effort - peeks the shared 'quote' cache (Refresh Prices/Momentum/Stock Preview/
+// GET /quotes/Long-Term Analysis/Contrarian Comeback all populate the same entries) for a
+// symbol's company name. Never triggers a real FMP call itself, even from refresh() below -
+// "reads stay free" applies here too, since this is cosmetic (a label), not core data; if no
+// other feature has looked up this symbol's quote yet today, this just returns null and the
+// caller falls back to the raw ticker symbol it already shows.
+async function peekCompanyName(symbol: string): Promise<string | null> {
+  const cached = await fmpDailyCache.peekCached<unknown>(symbol, 'quote');
+  if (!cached) return null;
+  const q = Array.isArray(cached.data) ? cached.data[0] : cached.data;
+  return (q as { name?: string } | undefined)?.name ?? null;
+}
+
 // Read-only - never calls FMP. Backs the pop-up's instant-open and the "switching to an
 // already-cached timeframe is free" behavior. Returns null if this (symbol, interval)
 // combination has never been fetched at all - the caller shows a confirm-to-fetch prompt instead.
@@ -195,24 +215,25 @@ export async function getSnapshot(symbol: string, interval: CandlestickInterval)
     if (!cached) return null;
     const wideBars = extractBars(cached.data).slice(0, dailyBarLimit());
     const { bars, indicators } = buildDisplaySnapshot(wideBars, computeHistorySeries(wideBars), interval);
-    return { bars, indicators, updatedAt: cached.updatedAt, isFresh: cached.wasCachedToday };
+    return { bars, indicators, updatedAt: cached.updatedAt, isFresh: cached.wasCachedToday, companyName: await peekCompanyName(symbol) };
   }
   const cached = await fmpIntradayCache.getCached(symbol, interval);
   if (!cached) return null;
   const wideBars = cached.bars as CandlestickBar[];
   const wideHistorySeries = isValidHistorySeries(cached.indicators) ? cached.indicators : computeHistorySeries(wideBars);
   const { bars, indicators } = buildDisplaySnapshot(wideBars, wideHistorySeries, interval);
-  return { bars, indicators, updatedAt: cached.updatedAt, isFresh: cached.isFresh };
+  return { bars, indicators, updatedAt: cached.updatedAt, isFresh: cached.isFresh, companyName: await peekCompanyName(symbol) };
 }
 
 // The explicit, confirmed action - the only path that ever makes a real FMP call for this
-// feature. Checks the rate limit first; throws CandlestickRateLimitExceededError if it's
-// exhausted, which the controller maps to 429.
+// feature. Checks the shared, all-encompassing rate limit first (also covers Stock Preview/
+// Momentum/Long-Term Analysis/Contrarian Comeback - see fmpRateLimit.service.ts); throws
+// FmpRateLimitExceededError if it's exhausted, which the controller maps to 429.
 export async function refresh(symbol: string, interval: CandlestickInterval, userId: string): Promise<CandlestickSnapshot> {
-  const rateLimit = await checkCandlestickRateLimit(userId);
+  const rateLimit = await checkFmpRateLimit(userId);
   if (!rateLimit.allowed) {
-    throw new CandlestickRateLimitExceededError(
-      `You've reached the limit of ${rateLimit.limit} new candlestick requests per ${rateLimit.windowMinutes} minutes. Please try again shortly.`,
+    throw new FmpRateLimitExceededError(
+      `You've reached the limit of ${rateLimit.limit} new requests per ${rateLimit.windowMinutes} minutes. Please try again shortly.`,
     );
   }
 
@@ -225,7 +246,10 @@ export async function refresh(symbol: string, interval: CandlestickInterval, use
     const wideBars = extractBars(result.bars);
     const peeked = await fmpDailyCache.peekCached<unknown>(symbol, 'historical-price-eod');
     const { bars, indicators } = buildDisplaySnapshot(wideBars, computeHistorySeries(wideBars), interval);
-    snapshot = { bars, indicators, updatedAt: peeked?.updatedAt ?? new Date().toISOString(), isFresh: true };
+    // companyName peeked last, same ordering as getSnapshot() - it shares peekCached() with the
+    // historical-price-eod lookup just above, so calling it first would (and once did) shift
+    // which mocked value that lookup actually receives in tests.
+    snapshot = { bars, indicators, updatedAt: peeked?.updatedAt ?? new Date().toISOString(), isFresh: true, companyName: await peekCompanyName(symbol) };
     realCalls = result.realCalls;
   } else {
     const stored = await fmpIntradayCache.fetchAndStore(symbol, interval, async () => {
@@ -233,7 +257,7 @@ export async function refresh(symbol: string, interval: CandlestickInterval, use
       return { bars: rawBars, indicators: computeHistorySeries(rawBars) };
     });
     const { bars, indicators } = buildDisplaySnapshot(stored.bars as CandlestickBar[], stored.indicators, interval);
-    snapshot = { bars, indicators, updatedAt: stored.updatedAt, isFresh: true };
+    snapshot = { bars, indicators, updatedAt: stored.updatedAt, isFresh: true, companyName: await peekCompanyName(symbol) };
     realCalls = 1;
   }
 

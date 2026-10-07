@@ -40,7 +40,7 @@ function scanResult(overrides: Partial<ScanResult>): ScanResult {
 function singleBatchResponse() {
   const results: ScanResult[] = [
     scanResult({ symbol: 'AAA', changePct: -30, name: 'Alpha Co', changeSinceDate: '2026-06-16' }),
-    scanResult({ symbol: 'BBB', changePct: -10, name: 'Beta Co' }), // below default 25% threshold
+    scanResult({ symbol: 'BBB', changePct: -10, name: 'Beta Co' }), // below default 15% threshold
     scanResult({
       symbol: 'CCC', changePct: 3, name: 'Charlie Co',
       strength: { rsi: 60, sma20: 100, sma50: 95, rr: 2, kF: 0.3, halfKelly: 0.15 },
@@ -91,7 +91,7 @@ describe('ContrarianFinderPage', () => {
     renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), { roles: ['user'], permissions: [] });
 
     expect(screen.queryByRole('button', { name: 'Run scan' })).not.toBeInTheDocument();
-    expect(screen.getByText('Candidates (1)')).toBeInTheDocument(); // only AAA (-30%) clears the default 25% threshold
+    expect(screen.getByText('Candidates (1)')).toBeInTheDocument(); // only AAA (-30%) clears the default 15% threshold
     expect(scanBatchCalls(apiFetchSpy)).toHaveLength(0); // the fallback GET fires (checking for a newer shared result), but never a re-scan
 
     const thresholdInput = screen.getByRole('spinbutton', { name: /drop threshold/i });
@@ -123,7 +123,7 @@ describe('ContrarianFinderPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Run scan' }));
     await waitFor(() => expect(client.apiFetch).toHaveBeenCalledWith('/contrarian-finder/scan-batch', {
       method: 'POST',
-      body: JSON.stringify({ batchSize: 125, maxBatches: 5, qualityPreset: 'standard', scanDays: 7, batchIndex: 0 }),
+      body: JSON.stringify({ batchSize: 125, maxBatches: 5, qualityPreset: 'standard', scanDays: 7, batchIndex: 0, threshold: 15 }),
     }));
   });
 
@@ -132,7 +132,7 @@ describe('ContrarianFinderPage', () => {
     renderPage();
     await userEvent.click(screen.getByRole('button', { name: 'Run scan' }));
 
-    expect(await screen.findByText('Candidates (1)')).toBeInTheDocument(); // only AAA (-30%) clears 25%
+    expect(await screen.findByText('Candidates (1)')).toBeInTheDocument(); // only AAA (-30%) clears 15%
     expect(scanBatchCalls(client.apiFetch as unknown as { mock: { calls: unknown[][] } })).toHaveLength(1);
 
     await userEvent.clear(screen.getByRole('spinbutton', { name: /drop threshold/i }));
@@ -167,7 +167,7 @@ describe('ContrarianFinderPage', () => {
     await screen.findByText('Candidates (1)');
 
     expect(screen.getByText(
-      /Last scan used: 25% threshold · 7-day window · batch size 125 · max 5 batches · Standard quality · run /,
+      /Last scan used: 15% threshold · 7-day window · batch size 125 · max 5 batches · Standard quality · run /,
     )).toBeInTheDocument();
 
     // Change the live threshold and an Advanced field without re-running -
@@ -178,7 +178,7 @@ describe('ContrarianFinderPage', () => {
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Scan window' }), '14');
 
     expect(screen.getByText(
-      /Last scan used: 25% threshold · 7-day window · batch size 125 · max 5 batches · Standard quality · run /,
+      /Last scan used: 15% threshold · 7-day window · batch size 125 · max 5 batches · Standard quality · run /,
     )).toBeInTheDocument();
   });
 
@@ -191,11 +191,11 @@ describe('ContrarianFinderPage', () => {
 
     first.unmount();
     const second = renderPage(first.queryClient); // same-tab nav
-    expect(screen.getByText(/Last scan used: 25% threshold/)).toBeInTheDocument();
+    expect(screen.getByText(/Last scan used: 15% threshold/)).toBeInTheDocument();
 
     second.unmount();
     renderPage(); // fresh QueryClient - simulates a full page reload, sessionStorage intact
-    expect(screen.getByText(/Last scan used: 25% threshold/)).toBeInTheDocument();
+    expect(screen.getByText(/Last scan used: 15% threshold/)).toBeInTheDocument();
   });
 
   test('does not crash on pre-existing persisted scan data that predates the retained-parameters field', () => {
@@ -242,11 +242,11 @@ describe('ContrarianFinderPage', () => {
     await waitFor(() => expect(scanBatchCalls(apiFetchSpy)).toHaveLength(2));
     expect(scanBatchCalls(apiFetchSpy)[0]).toEqual(['/contrarian-finder/scan-batch', {
       method: 'POST',
-      body: JSON.stringify({ batchSize: 125, maxBatches: 5, qualityPreset: 'standard', scanDays: 7, batchIndex: 0 }),
+      body: JSON.stringify({ batchSize: 125, maxBatches: 5, qualityPreset: 'standard', scanDays: 7, batchIndex: 0, threshold: 15 }),
     }]);
     expect(scanBatchCalls(apiFetchSpy)[1]).toEqual(['/contrarian-finder/scan-batch', {
       method: 'POST',
-      body: JSON.stringify({ batchSize: 125, maxBatches: 5, qualityPreset: 'standard', scanDays: 7, batchIndex: 1 }),
+      body: JSON.stringify({ batchSize: 125, maxBatches: 5, qualityPreset: 'standard', scanDays: 7, batchIndex: 1, threshold: 15 }),
     }]);
 
     // AAA + BBB, both -30%. Never attempted a 3rd batch, even though the
@@ -309,41 +309,34 @@ describe('ContrarianFinderPage', () => {
       }) as typeof client.apiFetch);
     }
 
-    test('fires a fire-and-forget save once a scan completes, with the right body shape', async () => {
-      const batch = singleBatchResponse();
-      const apiFetchSpy = pathAwareApiFetch(batch);
-      renderPage();
-
-      await userEvent.click(screen.getByRole('button', { name: 'Run scan' }));
-      await screen.findByText('Candidates (1)');
-
-      await waitFor(() => expect(apiFetchSpy).toHaveBeenCalledWith('/contrarian-finder/last-scan', {
-        method: 'POST',
-        body: JSON.stringify({
-          universeSize: batch.universeSize,
-          scanned: batch.results.length,
-          params: { threshold: 25, batchSize: 125, maxBatches: 5, qualityPreset: 'standard', scanDays: 7 },
-          results: batch.results,
-        }),
-      }));
-    });
-
-    test('does not fire the save call when the scan errors out', async () => {
-      const apiFetchSpy = vi.spyOn(client, 'apiFetch').mockImplementation(((path: string, init?: RequestInit) => {
-        if (path === '/contrarian-finder/last-scan') {
-          return Promise.resolve(init?.method === 'POST' ? { success: true } : { lastScan: null });
-        }
-        return Promise.reject(new ApiError(503, 'No fmp API key on file.', null));
+    // Resilient incremental persistence (2026-09-19) - a real gap found live: the old
+    // end-of-loop-only save meant an interrupted scan left real FMP cost with zero trace
+    // anywhere. Persistence now happens inside scan-batch itself, batch by batch, threaded via
+    // runRowId - there's no separate save call left to test for "fires once done" anymore.
+    test('threads runRowId from batch 0\'s response into every later batch\'s request, and never calls the old separate save endpoint', async () => {
+      const batch0 = { batchIndex: 0, totalBatches: 2, universeSize: 6, results: [scanResult({ symbol: 'AAA', changePct: -30 })], runRowId: 'run-42' };
+      const batch1 = { batchIndex: 1, totalBatches: 2, universeSize: 6, results: [scanResult({ symbol: 'BBB', changePct: -30 })], runRowId: 'run-42' };
+      const batchResponses = [batch0, batch1];
+      let nextScanBatchIndex = 0;
+      const apiFetchSpy = vi.spyOn(client, 'apiFetch').mockImplementation(((path: string) => {
+        if (path === '/contrarian-finder/last-scan') return Promise.resolve({ lastScan: null });
+        const res = batchResponses[nextScanBatchIndex] ?? batch1;
+        nextScanBatchIndex += 1;
+        return Promise.resolve(res);
       }) as typeof client.apiFetch);
       renderPage();
 
       await userEvent.click(screen.getByRole('button', { name: 'Run scan' }));
-      await screen.findByText('No fmp API key on file.');
+      await waitFor(() => expect(screen.getByText('Candidates (2)')).toBeInTheDocument());
 
-      const savedCalls = apiFetchSpy.mock.calls.filter(
+      const scanCalls = scanBatchCalls(apiFetchSpy);
+      expect(JSON.parse((scanCalls[0][1] as RequestInit).body as string).runRowId).toBeUndefined(); // batch 0 starts fresh
+      expect(JSON.parse((scanCalls[1][1] as RequestInit).body as string).runRowId).toBe('run-42'); // batch 1 reuses it
+
+      const oldSavePostCalls = apiFetchSpy.mock.calls.filter(
         ([path, init]) => path === '/contrarian-finder/last-scan' && (init as RequestInit | undefined)?.method === 'POST',
       );
-      expect(savedCalls).toHaveLength(0);
+      expect(oldSavePostCalls).toHaveLength(0);
     });
 
     test('a fresh session with no local cache/sessionStorage shows results sourced from the server fallback, including the run timestamp', async () => {
@@ -400,6 +393,64 @@ describe('ContrarianFinderPage', () => {
 
       expect(screen.getAllByText('AAA').length).toBeGreaterThan(0); // this session's own run
       expect(screen.queryByText('STALE')).not.toBeInTheDocument(); // never downgraded to the older shared record
+    });
+  });
+
+  // "X of N scanned" completeness display (2026-09-19) - derived from getRunCompleteness(),
+  // reusing scanned/universeSize/params already stored, no new field needed.
+  describe('run completeness display', () => {
+    test('a fully-completed run shows "N of N scanned" with no partial styling/warning', async () => {
+      vi.spyOn(client, 'apiFetch').mockResolvedValue(singleBatchResponse()); // universeSize: 3, 3 results
+      renderPage();
+      await userEvent.click(screen.getByRole('button', { name: 'Run scan' }));
+      await screen.findByText('Candidates (1)');
+
+      const line = await screen.findByText(/Last scan used:/);
+      expect(line).toHaveTextContent('3 of 3 scanned');
+      expect(line).not.toHaveTextContent('partial');
+      expect(line.className).not.toContain('text-warning');
+    });
+
+    test('a run that stopped short of its own intended scope shows "X of N scanned" with partial styling/warning', () => {
+      // Persisted directly (not run live) - a run stuck at 125/458 with maxBatches=5/batchSize=125
+      // (intended total = min(458, 625) = 458) - exactly the shape a real interrupted scan leaves
+      // behind, per the live forensic finding that prompted this feature.
+      sessionStorage.setItem('contrarianFinder:lastScan', JSON.stringify({
+        universeSize: 458, scanned: 125, results: [scanResult({ symbol: 'AAA', changePct: -30 })],
+        params: { threshold: 25, batchSize: 125, maxBatches: 5, qualityPreset: 'standard', scanDays: 7 },
+        completedAt: '2026-09-19T06:24:13.000Z',
+      }));
+      vi.spyOn(client, 'apiFetch').mockResolvedValue({ lastScan: null }); // the unconditional mount-time fallback GET
+      renderPage();
+
+      const line = screen.getByText(/Last scan used:/);
+      expect(line).toHaveTextContent('125 of 458 scanned');
+      expect(line).toHaveTextContent(/partial run/i);
+      expect(line.className).toContain('text-warning');
+    });
+  });
+
+  describe('beforeunload guard while a scan is in progress', () => {
+    test('warns before leaving while pending, not once idle/done', async () => {
+      let resolveFetch!: (value: unknown) => void;
+      const pending = new Promise((resolve) => { resolveFetch = resolve; });
+      vi.spyOn(client, 'apiFetch').mockReturnValue(pending as ReturnType<typeof client.apiFetch>);
+      renderPage();
+
+      const event = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false); // idle - nothing to warn about yet
+
+      await userEvent.click(screen.getByRole('button', { name: 'Run scan' }));
+      const eventDuringScan = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(eventDuringScan);
+      expect(eventDuringScan.defaultPrevented).toBe(true); // scan is genuinely in flight
+
+      resolveFetch(singleBatchResponse());
+      await screen.findByText('Candidates (1)');
+      const eventAfterDone = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(eventAfterDone);
+      expect(eventAfterDone.defaultPrevented).toBe(false); // done - no longer pending
     });
   });
 
@@ -471,7 +522,7 @@ describe('ContrarianFinderPage', () => {
       expect(apiFetchSpy).toHaveBeenCalledWith('/contrarian-finder/scan-batch', {
         method: 'POST',
         body: JSON.stringify({
-          batchSize: 125, maxBatches: 5, qualityPreset: 'standard', scanDays: 7, updateAllTickerData: true, batchIndex: 0,
+          batchSize: 125, maxBatches: 5, qualityPreset: 'standard', scanDays: 7, updateAllTickerData: true, batchIndex: 0, threshold: 15,
         }),
       });
       expect(await screen.findByText(/Mkt Cap refresh:/)).toBeInTheDocument(); // shows while genuinely in flight

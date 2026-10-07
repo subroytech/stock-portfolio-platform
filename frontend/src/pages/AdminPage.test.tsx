@@ -207,6 +207,28 @@ describe('AdminPage', () => {
     expect(screen.queryByRole('button', { name: 'Config Properties' })).not.toBeInTheDocument();
   });
 
+  test('a session with candlestick_question_answer:manage_content sees the "Candlestick Pattern Q&A" tab and can switch to it', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'admin@b.com', roles: ['admin'], permissions: ['api_keys:manage_own', 'users:manage_roles', 'candlestick_question_answer:manage_content'] });
+      if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
+      if (url === '/candlestick-question-answer/patterns') return Promise.resolve({ patterns: [] });
+      if (url === '/candlestick-question-answer/admin/entries') return Promise.resolve({ entries: [] });
+      return Promise.resolve({});
+    });
+    renderPage();
+    await screen.findByText('FMP (Financial Modeling Prep)');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Candlestick Pattern Q&A' }));
+    expect(await screen.findByText('New Pattern')).toBeInTheDocument();
+  });
+
+  test('a session without candlestick_question_answer:manage_content does not see the "Candlestick Pattern Q&A" tab', async () => {
+    mockAdminSession(); // default helper - no candlestick_question_answer:manage_content
+    renderPage();
+    await screen.findByText('FMP (Financial Modeling Prep)');
+    expect(screen.queryByRole('button', { name: 'Candlestick Pattern Q&A' })).not.toBeInTheDocument();
+  });
+
   test('a session with usage_audit:view sees the "User Usage" tab and can switch to it', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
       if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'admin@b.com', roles: ['admin'], permissions: ['api_keys:manage_own', 'users:manage_roles', 'usage_audit:view'] });

@@ -126,7 +126,42 @@ and neither substitutes for the other.
 
 ---
 
-## 3.6 Current state (as of 2026-09-12)
+## 3.6 Current state (as of 2026-09-19)
+
+- **904 backend / 516 frontend tests passing** (up from 845/488 as of 2026-09-12), `tsc`/lint
+  clean both sides. New backend test files from the Candlestick Charts build (2026-09-18):
+  `candlestick.controller.test.ts`, `candlestick.service.test.ts`,
+  `candlestickIndicators.service.test.ts`, `candlestickRateLimit.service.test.ts`,
+  `fmpIntradayCache.service.test.ts`; new frontend test files `CandlestickPopup.test.tsx` and
+  `CandlestickSymbolList.test.tsx`. `fmpDailyCache.service.test.ts` gained coverage for its new
+  in-flight request-coalescing behavior (the dev-mode double-billing fix, 2026-09-18).
+  `marketData.service.test.ts`, `longTermAnalysisData.service.test.ts`, and
+  `contrarianComebackData.service.test.ts` all gained a direct `jest.mock('../src/db/pool', ...)`
+  — see the CI-fix bug note below.
+- **A real, live-caught bug worth noting for future test design**: a candlestick chart cached
+  under an earlier code version — before the current per-bar-series shape existed for several
+  indicator fields — crashed on reopen with `TypeError: series is not iterable`, because
+  `getSnapshot()` never recomputed a cached row's indicators on read. Every existing test passed,
+  because none of them exercised reading back a row shaped like an *old* version of the code would
+  have written it — a reminder to test not just "does fresh data round-trip correctly" but also
+  "does previously-written data in an older shape still read back safely," whenever a stored
+  JSON/JSONB shape changes. Fixed with a self-healing check plus a new regression test covering
+  exactly this stale-shape scenario.
+- **A real CI-only bug found the same week**: `marketData.service.test.ts` and two other backend
+  test files mocked a service module in a way that still forced Node to load the *real* file
+  underneath the mock (either via `jest.mock(path)` with no factory, which still needs the real
+  module to build an automatic mock, or via `jest.requireActual(path)` inside the factory). That
+  real file imports the real database connection module, which throws at import time if
+  `DATABASE_URL` isn't set — exactly the case in CI's `backend` job, which deliberately never sets
+  it (unit tests shouldn't need a real database). This passed locally every time, because a local
+  `.env` file always supplies a real `DATABASE_URL`, masking the problem completely — a good
+  example of a CI-only failure that's invisible in local development no matter how many times you
+  run the suite, and worth remembering if a test file ever passes locally but fails in a GitHub
+  Actions log. Fixed by mocking the database module directly in all three files, so the real
+  service file can load safely underneath any mocking style without ever touching a real
+  connection.
+
+## 3.6a Previous state (as of 2026-09-12)
 
 - **845 backend / 488 frontend tests passing** (up from 817/483 as of 2026-09-07), `tsc`/lint
   clean both sides. New/rewritten backend test files from the 2026-09-09 through 2026-09-12
@@ -147,7 +182,7 @@ and neither substitutes for the other.
   connection — a reminder that some classes of bugs are only visible via live verification
   against the real DB, not unit tests with a mocked pool, however thorough.
 
-## 3.6a Previous state (as of 2026-09-07)
+## 3.6b Previous state (as of 2026-09-07)
 
 - **817 backend / 483 frontend tests passing** (up from 689/413 as of 2026-08-31), `tsc`/lint
   clean both sides. New test files added for the four features shipped 2026-09-07: backend's
@@ -160,7 +195,7 @@ and neither substitutes for the other.
   Monthly Summary + Function/FMP/Finnhub Split" entry) — a good example of a test file needing
   a real rewrite, not just new cases added, when the underlying design itself changes.
 
-## 3.6b Previous state (as of 2026-08-31)
+## 3.6c Previous state (as of 2026-08-31)
 
 - All four CI jobs (backend, frontend, analysis-service, e2e) have been green together
   multiple times (see `CLAUDE.md`'s "Contrarian Finder Stock Universe" entry onward).

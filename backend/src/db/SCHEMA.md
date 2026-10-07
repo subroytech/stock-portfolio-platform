@@ -710,6 +710,52 @@ Indexes: `user_evt_password_history_pkey` (PK), `idx_password_history_user_id` (
 `(user_id, created_at)` — covers both `recordPassword()`'s prune query and
 `isPasswordReused()`'s "last 5 for this user" read, both ordered by `created_at DESC`).
 
+### `users_support_tickets` / `users_support_ticket_messages`
+Added by migration `037`, 2026-09-05 (Support Tickets — the first in-app channel for a user to
+reach an admin at all, since this repo has no email capability, and the only one reachable while
+a self-registered account is still `status: 'pending'`). Unprefixed — child data of the account
+itself, same bucket as `users_roles`/`users_subscriptions`. `status` (`'new'` | `'open'` |
+`'on_hold'` | `'closed'`, app-enforced, no DB check constraint) doubles as the *admin*-side unread
+flag: the status on creation, and whatever a ticket flips back to the instant its owner sends a
+fresh message regardless of prior status (the reopen mechanic). Deliberately no `description`
+column on the ticket itself — the description is just message #1 in the thread, avoiding storing
+it twice; deliberately no `is_admin_reply` column on a message either — derived for free as
+`sender_user_id !== ticket.user_id`, immune to a sender's role changing later.
+
+**`user_last_read_at`, added by migration `043`, 2026-09-18** — the *owner*-side unread flag,
+needed since `status` can't do double duty for it (it can land on any of the 3 admin-owned resting
+states regardless of whether the owner has seen the latest reply). Unread-by-owner is **derived,
+not stored**, as `user_last_read_at < updated_at`: an owner's own reply stamps both columns
+together (read); an admin reply only moves `updated_at` forward (unread); opening the ticket as
+its owner stamps `user_last_read_at = now()` (cleared) — see `supportTicket.service.ts`'s
+`markOpenedByUser()`, the mirror of the existing `markOpenedByAdmin()` status-based read-receipt.
+`DEFAULT now()` (not `NULL`) means any ticket with a genuinely-unread admin reply already sitting
+in it *before* this migration ran reads as "read" once deployed — an accepted, one-time rollout
+gap, not worth a conditional backfill.
+
+| Column (`users_support_tickets`) | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `user_id` | `INT8` | FK → `users(id)`, `ON DELETE CASCADE` |
+| `subject` | `VARCHAR(150)` | `NOT NULL` |
+| `status` | `VARCHAR(20)` | `NOT NULL`, default `'new'` — see above |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+| `updated_at` | `TIMESTAMPTZ` | default `now()`, bumped by application code on every new message or status change — no DB trigger |
+| `user_last_read_at` | `TIMESTAMPTZ` | `NOT NULL`, default `now()` — added by migration `043`, see above |
+
+| Column (`users_support_ticket_messages`) | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `ticket_id` | `INT8` | FK → `users_support_tickets(id)`, `ON DELETE CASCADE` |
+| `sender_user_id` | `INT8` | FK → `users(id)`, `ON DELETE SET NULL` — SET NULL, not CASCADE, so an admin's own account being deleted later doesn't erase their reply from someone else's ticket history |
+| `body` | `TEXT` | `NOT NULL` |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `idx_support_tickets_user_id`; `idx_support_tickets_status_updated` (composite on
+`(status, updated_at DESC)` — serves the admin's per-status filtered list, its newest-activity-
+first sort, and the summary page's per-status counts, all at once); `idx_support_ticket_messages
+_ticket_id` (composite on `(ticket_id, created_at)`).
+
 ### `sys_schema_migrations`
 Internal bookkeeping table created/maintained by `migrate.js` (not part of the app schema)
 — tracks which files in `migrations/` have been applied, so re-running `npm run migrate`
@@ -776,6 +822,149 @@ precedent for what `m_` means (master/shared data) over a stricter "rarely chang
 Indexes: `m_fmp_daily_cache_pkey` (PK, `symbol, api_name`). No TTL — rows are overwritten in
 place on the next day's fetch rather than expired/deleted, so the table's size is bounded by
 `(distinct symbols ever looked up) × (distinct api_name values)`, not by time.
+
+### `m_stock_ticker_candlestick_cache`
+Added by migration `044`, 2026-09-18 (Stock Analysis — Candlestick Charts). Shared,
+`(symbol, time_interval)`-keyed cache for intraday OHLCV bars (`5min`/`15min`/`30min`/`1hour`/
+`4hour`) plus their precomputed technical indicators, so every viewer of the same symbol+interval
+benefits from one real FMP call instead of paying for their own — same shared-cache precedent as
+`m_fmp_daily_cache` above, but with a **time-based (10-minute) freshness rule** instead of a
+calendar-day one, since intraday bars turn over far faster than daily data. `1day` candlestick
+charts deliberately reuse the *existing* `m_fmp_daily_cache`/`marketData.service.ts` path instead
+— this table only covers the five new sub-daily intervals. `time_interval`, not `interval`, as the
+column name — `interval` collides with CockroachDB's own `INTERVAL` type. `bars`/`indicators` are
+both JSONB rather than normalized rows, same precedent as `m_fmp_daily_cache`'s own `api_result`
+column — a whole bar series (or indicator series) is always read/written as one unit, never
+queried bar-by-bar. Read/written through `fmpIntradayCache.service.ts`'s `getCached()` (read-only,
+never calls FMP) and `fetchAndStore()` (the only path that ever makes a real fetch, always called
+behind `candlestick.service.ts`'s own per-user rate-limit check).
+
+`1min` was considered and dropped before this table was created — live-verified against a real
+FMP account's stored key: `GET /historical-chart/1min` returns a genuine HTTP 402 ("Restricted
+Endpoint... not available under your current subscription"), confirmed via a raw fetch (not just
+this app's own 402-collapses-to-null wrapper) and confirmed not a market-hours artifact (an
+explicit past-date range got the identical 402).
+
+| Column | Type | Notes |
+|---|---|---|
+| `symbol` | `VARCHAR(20)` | part of PK |
+| `time_interval` | `VARCHAR(10)` | part of PK — one of `5min`/`15min`/`30min`/`1hour`/`4hour` |
+| `bars` | `JSONB` | `NOT NULL` — the raw OHLCV bar series for this symbol+interval |
+| `indicators` | `JSONB` | `NOT NULL` — precomputed technical indicators over the same bar series (see `candlestick.service.ts`'s history-dependent vs. window-relative split) |
+| `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `m_stock_ticker_candlestick_cache_pkey` (PK, `symbol, time_interval`);
+`idx_stock_ticker_candlestick_cache_updated_at` (on `updated_at DESC` — backs
+`listCachedSymbols()`'s newest-activity-first left-panel list). **Priority backlog item, not built
+yet**: row deletion/retention here needs a nuanced, interval-aware policy to manage DB size — e.g.
+`5min`/`15min` rows likely need pruning far sooner than `1hour`/`4hour` rows, since a stale
+5-minute bar from weeks ago has little ongoing use. No TTL or sweep job exists yet; this table
+grows unbounded (one row per `(symbol, time_interval)` ever looked up, upserted in place) until
+that's designed.
+
+### `m_candlestick_pattern` / `m_candlestick_question_answer_entry` / `user_evt_candlestick_question_answer_log`
+Added by migration `047`, 2026-09-20 through 2026-10-03 (Candlestick Pattern Q&A), with schema
+refinements in migrations `048`–`051`/`053`–`055`. A curated candlestick-*pattern* knowledge base
+(Doji/Hammer/Engulfing/etc.), distinct from the indicator-relevance content behind the earlier
+Candlestick Quick Reference feature. Two ways to get an answer: browse an already-curated
+question (instant, direct DB read) or ask a free-text question, answered by an LLM via
+function-calling strictly against this same curated content — falling through to an honest
+"unable to answer" rather than guessing. `m_` prefix for the pattern catalog and its Q&A entries,
+matching `m_portfolio_template_mapping_master`/`_dtls`'s own "master content, grown by live
+activity, not a one-time seed" precedent.
+
+**`m_candlestick_pattern`** — one row per pattern. `complexity_tier` (`VARCHAR(10)`, no DB `CHECK`
+— app-validated) is a plain rule-of-thumb: tier = candle count (`Simple` = 1, `Composite` = 2,
+`Advanced` = 3, `Complex` = 5) — deliberately a rule a self-directed investor can reason about
+("more candles to track = harder to use correctly"), not an arbitrary difficulty label.
+`is_day_trading`/`is_medium_term`/`is_long_term` are three explicit booleans (not an array) —
+horizon-relevance is a property of the *pattern* ("does a Doji matter for day-trading?"), not
+re-decided per Q&A entry, and a genuinely fixed 3-value concept doesn't need an array's own
+extensibility. Both `complexity_tier` and the three horizon columns were added as safe, non-
+breaking column adds (`DEFAULT 'Simple'` / `DEFAULT false`) with the real per-pattern values
+backfilled in a separate migration each time — CockroachDB doesn't reliably make a schema change
+visible to dependent DML submitted in the same multi-statement batch, so every DDL-then-backfill
+pair in this feature is deliberately split across two migration files.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `pattern_name` | `VARCHAR(100)` | unique — the exact display name, also what the frontend's `PATTERN_LABELS`/diagram lookup key on by hand-maintained convention |
+| `formation_description` | `TEXT` | |
+| `status` | `VARCHAR(20)` | `'active'` \| `'inactive'`, app-enforced |
+| `is_day_trading` / `is_medium_term` / `is_long_term` | `BOOLEAN` | added by migration `048`, default `false` |
+| `complexity_tier` | `VARCHAR(10)` | added by migration `050`; `'Simple'` \| `'Composite'` \| `'Advanced'` \| `'Complex'` — `'Composite'` was renamed from `'Complex'` by migration `053` once the new 5-candle tier needed that name instead |
+| `signal_type` | `VARCHAR(20)` | added by migration `054`; `'reversal'` \| `'continuation'` \| `'indecision'` |
+| `directional_bias` | `VARCHAR(20)` | added by migration `054`; `'bullish'` \| `'bearish'` \| `'neutral'` \| `'context-dependent'` — the latter covers Marubozu/Belt Hold, whose direction depends on which candle they're attached to, not the pattern name itself |
+| `requires_gap` | `BOOLEAN` | added by migration `054`, default `false` — derived directly from each detector's own code (e.g. Piercing Line/Dark Cloud Cover check `curr.open < prev.low`/`> prev.high`), not a judgment call; only 8 of 34 patterns are `true` |
+| `trend_context` | `VARCHAR(20)` | added by migration `054`, default `'none'`; `'prior-downtrend'` \| `'prior-uptrend'` \| `'either'` \| `'none'` — the trend context that makes the pattern meaningful (for a reversal, the trend about to reverse; for a continuation, the trend already in progress) |
+| `synonyms` | `JSONB` | added by migration `054`, nullable — array of alternate names (e.g. `["Inside Bar"]` for Harami); deliberately sparse, excluding genuinely ambiguous terms like "Pin Bar" |
+| `mirror_pattern_id` | `INT8` | added by migration `054`; self-referencing FK → `m_candlestick_pattern(id)`, `ON DELETE SET NULL`, nullable. Links true directional-opposite pairs only (Bullish Engulfing ↔ Bearish Engulfing, Hammer ↔ Shooting Star) — deliberately **not** used for same-shape-different-context pairs like Hammer/Hanging Man, which share identical geometry but aren't mirrors of each other |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Migration `054`'s six columns back a planned `filter_patterns_by_metadata` tool (Phase 1 of a
+ReAct-style upgrade to the Ask path below) — deterministic, structured lookups like "which
+patterns are bullish continuation signals" or "what's the mirror of Tweezer Bottom," answered
+without any LLM call. Backfilled for all 34 existing patterns by migration `055`, grouped by
+identical value-tuples to keep that file auditable (e.g. every bullish, no-gap, prior-downtrend
+reversal pattern shares one `UPDATE ... WHERE pattern_name IN (...)` statement) rather than 34
+near-duplicate rows. Not yet consumed by any backend code — the tool itself is still to be built.
+
+**`m_candlestick_question_answer_entry`** — one or more Q&A entries per pattern. `category`
+(added by migration `048`, app-validated, no `CHECK`) is a fixed, difficulty-ordered sequence —
+`Definition` → `Interpretation` → `Reliability` → `How to Use` → `Common Mistakes` — with
+`Definition`/`Interpretation` mapping to `tier 101` and the other three to `tier 201`; `tier 301`
+is reserved for not-yet-built content that combines multiple patterns into one interpretation.
+The entry's own `horizon` column (originally mirroring the frontend's `HorizonId` type) was
+dropped entirely by migration `048` once horizon-relevance moved onto the *pattern* row above —
+one mechanism, not a hybrid. `status` mirrors `m_portfolio_template_mapping_master`'s own
+`'Pending Approval'` → `'Approved'`/`'Rejected'` lifecycle exactly, though every entry seeded or
+admin-authored so far is `'Approved'` — no pending-review queue exists yet for this content.
+`source_question_answer_log_id` is a forward-looking audit pointer (which log row, if any,
+originated this entry) deliberately **not** a DB-enforced FK — a mutual hard FK with the log
+table below would be circular, since that table has its own FK back to this one.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INT8` | PK, default `unique_rowid()` |
+| `pattern_id` | `INT8` | FK → `m_candlestick_pattern(id)`, `ON DELETE CASCADE` |
+| `tier` | `INT2` | `101` \| `201` \| `301` |
+| `category` | `VARCHAR(30)` | added by migration `048`; `Definition`/`Interpretation`/`Reliability`/`How to Use`/`Common Mistakes` |
+| `question_text` / `answer_text` | `TEXT` | |
+| `status` | `VARCHAR(20)` | default `'Pending Approval'`; every current row is `'Approved'` |
+| `created_by` / `reviewed_by` | `INT8` | FK → `users(id)`, `ON DELETE SET NULL` |
+| `reviewed_at` | `TIMESTAMPTZ` | nullable |
+| `source_question_answer_log_id` | `INT8` | not DB-enforced — see above |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `idx_candlestick_qa_entry_pattern` (on `pattern_id`); `idx_candlestick_qa_entry_tier_
+category_status` (composite, added by migration `048` replacing the original horizon-based
+index once `horizon` was dropped from this table — backs both the curated picker's browse/search
+and the LLM's own `search_question_answer_entries` tool call).
+
+**`user_evt_candlestick_question_answer_log`** — one row per free-text question asked (the
+curated-picker/Browse path is a cheap read and is never logged here). Every row represents
+exactly one real, billed Anthropic call — even an `'unable_to_answer'` outcome still invoked the
+LLM — which is what backs `candlestickQuestionAnswerRateLimit.service.ts`'s per-user rate limit
+(counting rows is correct here, unlike `fmpRateLimit.service.ts`'s reuse of `user_evt_usage`,
+where one row can represent many real FMP calls). Deliberately **no TTL** set, unlike most other
+`user_evt_` tables — kept indefinitely so a future admin gap-analysis feature can mine older
+`'unable_to_answer'` rows for real content gaps, a deliberate exception to this prefix's usual
+auto-expiring convention.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `SERIAL` | PK |
+| `user_id` | `INTEGER` | FK → `users(id)`, `ON DELETE CASCADE` |
+| `question_text` | `TEXT` | |
+| `horizon` | `VARCHAR(20)` | the horizon the **asker** picked for this question — unrelated to the pattern-level horizon columns above |
+| `tier` | `INT2` | nullable |
+| `outcome` | `VARCHAR(30)` | `'answered_from_kb'` \| `'unable_to_answer'` |
+| `matched_entry_id` | `INT8` | FK → `m_candlestick_question_answer_entry(id)`, `ON DELETE SET NULL` |
+| `llm_call_details` | `JSONB` | nullable |
+| `created_at` | `TIMESTAMPTZ` | default `now()`, no TTL — see above |
+
+Indexes: `idx_candlestick_qa_log_user_created` (composite on `(user_id, created_at DESC)`).
 
 ## CockroachDB-specific notes
 

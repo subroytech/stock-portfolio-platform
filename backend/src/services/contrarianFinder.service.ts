@@ -493,11 +493,15 @@ const ADMIN_HISTORY_LIMIT_FALLBACK = 60;
 // mental model the user described, distinct from the admin tier's shared
 // history. GET /contrarian-finder/last-scan is deliberately unaffected by
 // any of this - still just the single most recent row across both tiers.
+// Returns the new row's id (2026-09-19) - doubles as the "start a run" step for incremental
+// per-batch persistence (see appendRunProgress below): scanBatch() calls this on batchIndex 0
+// and threads the returned id back through the frontend's batch loop so every later batch
+// updates this same row instead of each batch creating its own.
 export async function saveLastScan(
   userId: string,
   runTier: ContrarianRunTier,
   data: { universeSize: number; scanned: number; params: unknown; results: unknown },
-): Promise<void> {
+): Promise<string> {
   const values = [userId, data.universeSize, data.scanned, JSON.stringify(data.params), JSON.stringify(data.results)];
 
   if (runTier === 'user') {
@@ -508,26 +512,26 @@ export async function saveLastScan(
         `DELETE FROM tx_shared_contrarian_run WHERE started_by = $1 AND run_tier = 'user'`,
         [userId],
       );
-      await client.query(
+      const { rows } = await client.query<{ id: string }>(
         `INSERT INTO tx_shared_contrarian_run (started_by, run_tier, universe_size, scanned, params, results)
-         VALUES ($1, 'user', $2, $3, $4, $5)`,
+         VALUES ($1, 'user', $2, $3, $4, $5) RETURNING id`,
         values,
       );
       await client.query('COMMIT');
+      return rows[0].id;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => { /* best-effort */ });
       throw err;
     } finally {
       client.release();
     }
-    return;
   }
 
   const historyLimit = await getConfigInt(ADMIN_HISTORY_RETENTION_KEY, ADMIN_HISTORY_LIMIT_FALLBACK);
 
-  await pool.query(
+  const { rows } = await pool.query<{ id: string }>(
     `INSERT INTO tx_shared_contrarian_run (started_by, run_tier, universe_size, scanned, params, results)
-     VALUES ($1, 'admin', $2, $3, $4, $5)`,
+     VALUES ($1, 'admin', $2, $3, $4, $5) RETURNING id`,
     values,
   );
   await pool.query(
@@ -536,6 +540,21 @@ export async function saveLastScan(
        SELECT id FROM tx_shared_contrarian_run WHERE run_tier = 'admin' ORDER BY completed_at DESC LIMIT $1
      )`,
     [historyLimit],
+  );
+  return rows[0].id;
+}
+
+// Appends one batch's contribution to an already-started run (see saveLastScan above) - a
+// single atomic UPDATE, JSONB array concatenation (||) rather than a separate read-then-write,
+// so a batch's real cost is durable the instant its own request completes, regardless of what
+// happens to the browser a moment later. Never creates a row - callers must already hold an id
+// from saveLastScan's own return value.
+export async function appendRunProgress(id: string, data: { scanned: number; results: unknown[] }): Promise<void> {
+  await pool.query(
+    `UPDATE tx_shared_contrarian_run
+     SET scanned = scanned + $2, results = results || $3::jsonb, completed_at = now()
+     WHERE id = $1`,
+    [id, data.scanned, JSON.stringify(data.results)],
   );
 }
 

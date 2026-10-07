@@ -23,4 +23,8 @@ matching Artifact (redeploying reuses the same link above; it never creates a ne
 API Call Ledger has no single source file, so it needs a manual re-synthesis from the current
 code any time the underlying FMP/Finnhub call logic changes meaningfully.
 
-*Published 2026-08-15. API Call Ledger added 2026-09-07. All 5 refreshed 2026-09-12.*
+*Published 2026-08-15. API Call Ledger added 2026-09-07. All 5 refreshed 2026-09-12, and again
+2026-10-04 (Platform Field Guide + Access & Roles Reference refreshed 2026-10-03 for Candlestick
+Pattern Q&A coverage; Database Atlas, Rebuild Roadmap, and API Call Ledger refreshed 2026-10-04 —
+the latter two required first backfilling real gaps in their own source docs, `Architecture.md`
+and `backend/src/db/SCHEMA.md`, which hadn't been updated for several rounds of shipped work).*

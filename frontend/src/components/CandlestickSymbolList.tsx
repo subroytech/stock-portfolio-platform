@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useCachedSymbolsList, type CandlestickInterval } from '../api/candlestick';
+import { useSession } from '../api/auth';
 import { formatAsOf } from '../lib/format';
 import CandlestickPopup from './CandlestickPopup';
 
@@ -11,6 +13,14 @@ import CandlestickPopup from './CandlestickPopup';
 // (still viewable, just not live-fresh). Clicking a row - or submitting a new symbol - opens the
 // full-screen pop-up.
 export default function CandlestickSymbolList() {
+  const navigate = useNavigate();
+  const { data: session } = useSession();
+  // Candlestick Pattern Q&A - a contextual link into that feature's own route, not a top-level
+  // nav tab (moved off the header 2026-09-21 per explicit direction: this feature lives inside
+  // Stock Analysis now, not alongside Portfolio/Momentum/etc.). Same destination route as
+  // CandlestickPopup.tsx's own "Ask about patterns" shortcut, deliberately different label so
+  // the two don't read as duplicates of each other.
+  const canCandlestickQuestionAnswer = session?.permissions?.includes('candlestick_question_answer:ask') ?? false;
   const { data, isLoading, isError } = useCachedSymbolsList();
   const [newSymbolInput, setNewSymbolInput] = useState('');
   const [selected, setSelected] = useState<{ symbol: string; interval: CandlestickInterval } | null>(null);
@@ -28,7 +38,19 @@ export default function CandlestickSymbolList() {
 
   return (
     <div className="w-64 shrink-0 rounded-card border border-border bg-bg-card p-3" data-testid="candlestick-symbol-list">
-      <h2 className="mb-2 text-sm font-semibold text-text-primary">Candlestick Charts</h2>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-text-primary">Candlestick Charts</h2>
+        {canCandlestickQuestionAnswer && (
+          <button
+            type="button"
+            onClick={() => navigate('/candlestick-question-answer')}
+            data-testid="candlestick-pattern-qa-link"
+            className="shrink-0 rounded-btn bg-accent/10 px-2 py-1 text-xs font-medium text-accent hover:bg-accent/20"
+          >
+            Tutorial →
+          </button>
+        )}
+      </div>
 
       <form onSubmit={handleNewSymbolSubmit} className="mb-3 flex gap-1.5">
         <input

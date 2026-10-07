@@ -51,6 +51,12 @@ interface BatchScanResponse {
   universeSize: number;
   results: ScanResult[];
   tickerRefresh?: TickerRefreshBatchResult;
+  // Id of the shared tx_shared_contrarian_run row this batch just started or appended to -
+  // threaded back into the next batch's request body so every batch of one run updates the same
+  // row (resilient incremental persistence, 2026-09-19). Undefined if the backend's own
+  // persistence step failed - the scan itself still succeeded, just without a durability write
+  // for that particular batch.
+  runRowId?: string;
 }
 
 export interface TickerRefreshProgress {
@@ -94,6 +100,15 @@ export interface LastScanRecord {
   scanned: number;
   params: RunParams;
   results: ScanResult[];
+}
+
+// A run's own intended total isn't the raw universe size - a deliberately-scoped smaller run
+// (e.g. maxBatches: 2) is just as "complete" once it covers what it set out to, not the whole
+// universe. Comparing scanned against this (not universeSize directly) is what lets "X of N"
+// tell partial and complete apart correctly, with no separate status column needed (2026-09-19).
+export function getRunCompleteness(params: RunParams, scanned: number, universeSize: number): { expectedTotal: number; isComplete: boolean } {
+  const expectedTotal = Math.min(universeSize, params.maxBatches * params.batchSize);
+  return { expectedTotal, isComplete: scanned >= expectedTotal };
 }
 
 export type BatchScanPhase = 'idle' | 'scanning' | 'waiting' | 'done';
@@ -295,9 +310,11 @@ export function useContrarianBatchScan() {
     const myRunId = (runIdRef.current += 1);
     const isCancelled = () => runIdRef.current !== myRunId;
 
-    // threshold isn't part of the wire request (filtering is client-side),
-    // so it's split off here: wireInput goes over the network, params (which
-    // includes it) becomes the persisted read-only record of this run.
+    // threshold is never used for server-side filtering (that stays client-side), but the
+    // backend now needs it too, on batch 0, purely to store as part of this run's persisted
+    // params record (resilient incremental persistence, 2026-09-19 - see scanBatch/saveLastScan
+    // on the backend). wireInput goes over the network as-is; params (built from the same input)
+    // stays the client's own read-only record of this run.
     const { threshold, ...wireInput } = input;
     const params: RunParams = {
       threshold,
@@ -319,6 +336,11 @@ export function useContrarianBatchScan() {
     let batchIndex = 0;
     let tickerRefreshTotal = 0;
     let universeSize = 0;
+    // Id of the shared run row this scan is writing to - undefined until batch 0's response
+    // hands one back (or if that batch's persistence step itself failed). Threaded into every
+    // later batch's request body so they all update the same row instead of each batch
+    // (mistakenly) starting its own.
+    let runRowId: string | undefined;
 
     try {
       while (batchIndex < totalBatches) {
@@ -327,10 +349,11 @@ export function useContrarianBatchScan() {
 
         const res = await apiFetch<BatchScanResponse>('/contrarian-finder/scan-batch', {
           method: 'POST',
-          body: JSON.stringify({ ...wireInput, batchIndex }),
+          body: JSON.stringify({ ...wireInput, batchIndex, threshold, runRowId }),
         });
         if (isCancelled()) return;
 
+        runRowId = res.runRowId ?? runRowId;
         totalBatches = res.totalBatches;
         universeSize = res.universeSize;
         allResults.push(...res.results);
@@ -355,14 +378,12 @@ export function useContrarianBatchScan() {
         const completedAt = new Date().toISOString();
         setData({ universeSize, scanned: allResults.length, results: allResults, params, completedAt });
         setProgress((p) => ({ ...p, phase: 'done', waitRemaining: 0 }));
-        // Fire-and-forget: shares this completed scan across every user
-        // (Architecture.md — regular users can only view, never run, a scan).
-        // Never fired for an error/abandoned run — only reached once the
-        // while loop above finishes normally.
-        apiFetch('/contrarian-finder/last-scan', {
-          method: 'POST',
-          body: JSON.stringify({ universeSize, scanned: allResults.length, params, results: allResults }),
-        }).catch(() => {});
+        // No separate "save the completed scan" call needed here anymore (2026-09-19) - each
+        // batch already persisted its own contribution to the shared run row as it completed
+        // (scanBatch/saveLastScan+appendRunProgress on the backend), so the last batch's own
+        // write already left that row in its finished state. This is also what makes the run
+        // resilient to being interrupted before reaching this point: whatever batches did
+        // complete are already durable, not lost just because the loop never got here.
       }
     } catch (err) {
       if (!isCancelled()) { setIsError(true); setError(err); }

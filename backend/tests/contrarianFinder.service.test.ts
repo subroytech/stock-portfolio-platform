@@ -11,7 +11,7 @@ import * as analysisService from '../src/services/analysisService';
 import {
   buildBatches, filterCandidates, resolveQuality, assembleUniverse, scanStock, scanBatch,
   fetchStockData, assembleScanBatch, getUniverseTable, refreshTickerDataBatch,
-  saveLastScan, getLastScan, listRunHistory, getRunById, CF_MAX,
+  saveLastScan, getLastScan, listRunHistory, getRunById, appendRunProgress, CF_MAX,
 } from '../src/services/contrarianFinder.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
@@ -255,18 +255,20 @@ describe('saveLastScan / getLastScan', () => {
   const params = { threshold: 25, batchSize: 125, maxBatches: 3, qualityPreset: 'standard', scanDays: 7 };
   const results = [{ symbol: 'AAPL', filterFail: false }];
 
-  test('admin tier: inserts a new history row, then prunes back to the DB-configured retention count', async () => {
+  test('admin tier: inserts a new history row, then prunes back to the DB-configured retention count, returning the new row\'s id', async () => {
     mockQuery.mockReset();
     mockQuery.mockResolvedValueOnce({ rows: [{ value: '60' }] }); // getConfigInt's config-value read
-    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'run-1' }] }); // the INSERT ... RETURNING id
     mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
 
-    await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
+    const id = await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
 
+    expect(id).toBe('run-1');
     expect(mockQuery).toHaveBeenCalledTimes(3);
     const [insertSql, insertParams] = mockQuery.mock.calls[1];
     expect(insertSql).toContain('INSERT INTO tx_shared_contrarian_run');
     expect(insertSql).toContain("'admin'");
+    expect(insertSql).toContain('RETURNING id');
     expect(insertParams).toEqual(['user-1', 348, 348, JSON.stringify(params), JSON.stringify(results)]);
 
     const [pruneSql, pruneParams] = mockQuery.mock.calls[2];
@@ -279,7 +281,7 @@ describe('saveLastScan / getLastScan', () => {
   test('admin tier: prunes using a non-default DB-configured retention count', async () => {
     mockQuery.mockReset();
     mockQuery.mockResolvedValueOnce({ rows: [{ value: '15' }] });
-    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'run-2' }] }); // the INSERT
     mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
 
     await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
@@ -291,7 +293,7 @@ describe('saveLastScan / getLastScan', () => {
   test('admin tier: falls back to 60 when no retention value is configured', async () => {
     mockQuery.mockReset();
     mockQuery.mockResolvedValueOnce({ rows: [] }); // no active config row
-    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'run-3' }] }); // the INSERT
     mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
 
     await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
@@ -303,7 +305,7 @@ describe('saveLastScan / getLastScan', () => {
   test('admin tier: falls back to 60 when the configured retention value is unparseable', async () => {
     mockQuery.mockReset();
     mockQuery.mockResolvedValueOnce({ rows: [{ value: 'not-a-number' }] });
-    mockQuery.mockResolvedValueOnce({ rows: [] }); // the INSERT
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'run-4' }] }); // the INSERT
     mockQuery.mockResolvedValueOnce({ rows: [] }); // the prune DELETE
 
     await saveLastScan('user-1', 'admin', { universeSize: 348, scanned: 348, params, results });
@@ -312,13 +314,14 @@ describe('saveLastScan / getLastScan', () => {
     expect(pruneParams).toEqual([60]);
   });
 
-  test('user tier: upserts exactly one row per user via a transactional delete+insert, not a plain INSERT', async () => {
-    const client = { query: jest.fn().mockResolvedValue({ rows: [] }), release: jest.fn() };
+  test('user tier: upserts exactly one row per user via a transactional delete+insert, not a plain INSERT, returning the new row\'s id', async () => {
+    const client = { query: jest.fn().mockResolvedValue({ rows: [{ id: 'run-5' }] }), release: jest.fn() };
     mockConnect.mockReset();
     mockConnect.mockResolvedValue(client);
 
-    await saveLastScan('user-2', 'user', { universeSize: 100, scanned: 100, params, results });
+    const id = await saveLastScan('user-2', 'user', { universeSize: 100, scanned: 100, params, results });
 
+    expect(id).toBe('run-5');
     expect(mockConnect).toHaveBeenCalledTimes(1);
     expect(client.query).toHaveBeenNthCalledWith(1, 'BEGIN');
     const [deleteSql, deleteParams] = client.query.mock.calls[1];
@@ -328,6 +331,7 @@ describe('saveLastScan / getLastScan', () => {
     const [insertSql, insertParams] = client.query.mock.calls[2];
     expect(insertSql).toContain('INSERT INTO tx_shared_contrarian_run');
     expect(insertSql).toContain("'user'");
+    expect(insertSql).toContain('RETURNING id');
     expect(insertParams).toEqual(['user-2', 100, 100, JSON.stringify(params), JSON.stringify(results)]);
     expect(client.query).toHaveBeenNthCalledWith(4, 'COMMIT');
     expect(client.release).toHaveBeenCalledTimes(1);
@@ -351,7 +355,27 @@ describe('saveLastScan / getLastScan', () => {
     expect(client.query).toHaveBeenNthCalledWith(4, 'ROLLBACK');
     expect(client.release).toHaveBeenCalledTimes(1);
   });
+});
 
+describe('appendRunProgress', () => {
+  test('appends this batch\'s results and increments scanned via a single atomic UPDATE, not a read-then-write', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const batchResults = [{ symbol: 'MSFT', filterFail: false }];
+
+    await appendRunProgress('run-1', { scanned: 125, results: batchResults });
+
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    const [sql, params] = mockQuery.mock.calls[0];
+    expect(sql).toContain('UPDATE tx_shared_contrarian_run');
+    expect(sql).toContain('scanned = scanned + $2');
+    expect(sql).toContain('results = results || $3::jsonb');
+    expect(sql).toContain('WHERE id = $1');
+    expect(params).toEqual(['run-1', 125, JSON.stringify(batchResults)]);
+  });
+});
+
+describe('getLastScan', () => {
   test('getLastScan returns null when no run has ever been saved', async () => {
     mockQuery.mockReset();
     mockQuery.mockResolvedValueOnce({ rows: [] });

@@ -5,6 +5,7 @@ import * as contrarianComebackData from '../services/contrarianComebackData.serv
 import * as contrarianComebackCache from '../services/contrarianComebackCache';
 import * as userSubscription from '../services/userSubscription.service';
 import * as usageTracking from '../services/usageTracking.service';
+import { checkFmpRateLimit, FmpRateLimitExceededError } from '../services/fmpRateLimit.service';
 import { InvalidTickerError } from '../utils/errors';
 
 // Thin proxy round-trip: Node (auth-checked) -> Python analysis-service ->
@@ -44,6 +45,12 @@ export async function longTermAnalysis(req: Request, res: Response, next: NextFu
 
   try {
     const userId = getUserId(req);
+    const rateLimit = await checkFmpRateLimit(userId);
+    if (!rateLimit.allowed) {
+      throw new FmpRateLimitExceededError(
+        `You've reached the limit of ${rateLimit.limit} new requests per ${rateLimit.windowMinutes} minutes. Please try again shortly.`,
+      );
+    }
     const fmpKey = await userSubscription.getDecryptedKey(userId, 'fmp');
 
     // Finnhub news is optional — matches the source app's treatment of news
@@ -66,6 +73,10 @@ export async function longTermAnalysis(req: Request, res: Response, next: NextFu
       .catch((e) => console.error('usage log failed', e));
     res.json(result);
   } catch (err) {
+    if (err instanceof FmpRateLimitExceededError) {
+      res.status(429).json({ error: err.message });
+      return;
+    }
     if (err instanceof userSubscription.MissingUserApiKeyError) {
       res.status(503).json({ error: err.message });
       return;
@@ -112,6 +123,12 @@ export async function contrarianComebackGate(req: Request, res: Response, next: 
 
   try {
     const userId = getUserId(req);
+    const rateLimit = await checkFmpRateLimit(userId);
+    if (!rateLimit.allowed) {
+      throw new FmpRateLimitExceededError(
+        `You've reached the limit of ${rateLimit.limit} new requests per ${rateLimit.windowMinutes} minutes. Please try again shortly.`,
+      );
+    }
     const { fmpKey, finnhubKey } = await resolveKeys(userId);
     const { apiCallCounts, ...data } = await contrarianComebackData.fetchContrarianComebackData(symbol, fmpKey, finnhubKey);
     // Populates the short-lived Gate -> Submit cache (contrarianComebackCache.ts) - if the user
@@ -128,6 +145,10 @@ export async function contrarianComebackGate(req: Request, res: Response, next: 
       .catch((e) => console.error('usage log failed', e));
     res.json(result);
   } catch (err) {
+    if (err instanceof FmpRateLimitExceededError) {
+      res.status(429).json({ error: err.message });
+      return;
+    }
     if (err instanceof userSubscription.MissingUserApiKeyError) {
       res.status(503).json({ error: err.message });
       return;
@@ -178,6 +199,15 @@ export async function contrarianComebackSubmit(req: Request, res: Response, next
       data = cached;
       apiCallCounts = { fmp: 0, finnhub: 0 };
     } else {
+      // Only reached on a cache miss, i.e. only when a real fetch is actually about to happen -
+      // the cache-hit branch above stays free and never touches the rate limit, same as every
+      // other cache-hit case this shared budget covers.
+      const rateLimit = await checkFmpRateLimit(userId);
+      if (!rateLimit.allowed) {
+        throw new FmpRateLimitExceededError(
+          `You've reached the limit of ${rateLimit.limit} new requests per ${rateLimit.windowMinutes} minutes. Please try again shortly.`,
+        );
+      }
       const { fmpKey, finnhubKey } = await resolveKeys(userId);
       const fetched = await contrarianComebackData.fetchContrarianComebackData(symbol, fmpKey, finnhubKey);
       apiCallCounts = fetched.apiCallCounts ?? { fmp: 0, finnhub: 0 };
@@ -198,6 +228,10 @@ export async function contrarianComebackSubmit(req: Request, res: Response, next
       .catch((e) => console.error('usage log failed', e));
     res.json(result);
   } catch (err) {
+    if (err instanceof FmpRateLimitExceededError) {
+      res.status(429).json({ error: err.message });
+      return;
+    }
     if (err instanceof userSubscription.MissingUserApiKeyError) {
       res.status(503).json({ error: err.message });
       return;

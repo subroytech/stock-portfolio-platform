@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { hasAdminConsoleAccess, useLogout, useSession } from '../api/auth';
 import { ApiKeysModalContext } from '../lib/apiKeysModal';
@@ -6,6 +7,8 @@ import { TickerHandoffContext, type HandoffTarget, type TickerHandoff } from '..
 import UserPersonaBadge from './UserPersonaBadge';
 import ImpersonationBanner from './ImpersonationBanner';
 import SupportWidget from './SupportWidget';
+import RateLimitIndicator from './RateLimitIndicator';
+import RateLimitBlockedToast from './RateLimitBlockedToast';
 import DashboardPage from '../pages/DashboardPage';
 import FlexPortfolioPage from '../pages/FlexPortfolioPage';
 import MomentumPage from '../pages/MomentumPage';
@@ -13,6 +16,7 @@ import ContrarianFinderPage from '../pages/ContrarianFinderPage';
 import LongTermAnalysisPage from '../pages/LongTermAnalysisPage';
 import ContrarianComebackPage from '../pages/ContrarianComebackPage';
 import StockAnalysisPage from '../pages/StockAnalysisPage';
+import CandlestickQuestionAnswerPage from '../pages/CandlestickQuestionAnswerPage';
 import SubscriptionsPage from '../pages/SubscriptionsPage';
 
 const TABS = [
@@ -24,9 +28,9 @@ const TABS = [
 ] as const;
 
 // The one persistent component for the whole signed-in session (see App.tsx's
-// single `path="/*"` route). Every tab is mounted here at all times - the URL
-// only controls which one is *visible* (via CSS), never which one *exists* -
-// so switching tabs never unmounts/resets a tool's in-progress state, unlike
+// single `path="/*"` route). Every tab lives here, lazily mounted on first
+// visit and never unmounted again after that (see visitedTabs below) - so
+// switching tabs never unmounts/resets a tool's in-progress state, unlike
 // the previous one-route-per-tool setup where navigating away destroyed it.
 export default function TabShell() {
   const location = useLocation();
@@ -40,12 +44,19 @@ export default function TabShell() {
   // management is no longer open to every signed-in user by default (api_keys:manage_own,
   // migration 018). Hidden entirely (not just disabled) when absent.
   const canManageOwnKeys = session?.permissions?.includes('api_keys:manage_own') ?? false;
+  // Combined rate limit (fmpRateLimit.service.ts) is a deliberate role-name check, not a
+  // permission - admin/admin-master are unconditionally exempt from it, so the header
+  // indicator/toast are never shown to them at all, not just shown-but-always-green.
+  const isExemptFromRateLimit = session?.roles.includes('admin') || session?.roles.includes('admin-master') || false;
   // Non-admin's API Keys entry point - SubscriptionsPage itself no longer owns any modal
   // chrome (Admin Console Phase 7: it's also embedded plain, unwrapped, as AdminPage's "My
   // API(s)" tab), so the overlay lives here instead, the only remaining caller that needs it.
   const [showApiKeys, setShowApiKeys] = useState(false);
   const [handoff, setHandoff] = useState<TickerHandoff | null>(null);
   const requestIdRef = useRef(0);
+  // Stock Analysis's own popover (below) - open/closed state for its Candlestick Charts/
+  // Tutorial menu, same click-to-toggle + outside-click-closes shape as UserPersonaBadge's menu.
+  const [stockAnalysisMenuOpen, setStockAnalysisMenuOpen] = useState(false);
 
   // Every tab used to mount unconditionally at all times (only CSS `hidden` toggled which one was
   // visible) so switching tabs never reset a tool's in-progress state - but that also meant a
@@ -75,11 +86,47 @@ export default function TabShell() {
   // the first top-level tab that also needs a direct-URL guard (see the panel below), since
   // every other tab here has always been open to any signed-in session.
   const canStockAnalysis = session?.permissions?.includes('stock_analysis:view') ?? false;
+  // Candlestick Pattern Q&A (Phase 1) - gated Function, zero default grants. Was a plain
+  // contextual link only (moved off the top-level nav 2026-09-21) until a real gap surfaced:
+  // a role granted candlestick_question_answer:ask without stock_analysis:view had no way to
+  // ever reach it, since both prior entry points lived inside the Stock Analysis panel. Folded
+  // back into the nav as "Stock Analysis"'s own popover entry below (a second nav row was tried
+  // first and rejected live for costing a full line of vertical space on every page).
+  const canCandlestickQuestionAnswer = session?.permissions?.includes('candlestick_question_answer:ask') ?? false;
+  // The combined "Stock Analysis" nav entry is visible with either permission - its target
+  // route depends on which one the session actually has, so an ask-only session lands
+  // directly on the page it can use instead of the stock-analysis route's own guard bouncing
+  // it home. "Active" covers both routes so the button stays highlighted on either sub-page.
+  const canStockAnalysisGroup = canStockAnalysis || canCandlestickQuestionAnswer;
+  const stockAnalysisGroupPath = canStockAnalysis ? '/stock-analysis' : '/candlestick-question-answer';
+  const stockAnalysisGroupActive = location.pathname === '/stock-analysis' || location.pathname === '/candlestick-question-answer';
+  // The popover (vs. a plain link) is only needed when there's an actual choice to make - a
+  // session with just one of the two permissions has nothing to pick between, so it stays a
+  // single direct link, same as before.
+  const canStockAnalysisMenu = canStockAnalysis && canCandlestickQuestionAnswer;
 
+  // Real bug found live 2026-09-19: launching a tab that hadn't been visited yet this session
+  // (e.g. Contrarian Finder/Momentum's "LT"/"CC" row actions) silently lost the result - the
+  // underlying request genuinely fired and completed, but the "Analyzing..." spinner never
+  // cleared. Root cause: visitedTabs' lazy mount (above) means the target page can now mount
+  // for the very first time at the *same instant* it receives the handoff, landing that mount
+  // inside React StrictMode's dev-only double-invoke window - the mutation's eventual response
+  // updates a component instance that's no longer the one being rendered. tickerHandoff.ts's own
+  // comment ("both tabs stay mounted at all times") predates lazy mounting and is no longer true.
+  // Fix: mark the target visited (mount it) in its own synchronous flush BEFORE dispatching the
+  // handoff, so by the time the handoff arrives the page has already finished mounting - a plain
+  // update to an already-mounted page, exactly like every tab behaved before lazy mounting
+  // existed. flushSync (not e.g. setTimeout) keeps this synchronous end-to-end, matching how
+  // React state updates from a click handler already behave elsewhere in this codebase.
   function launch(target: HandoffTarget, symbol: string) {
+    const path = `/${target}`;
     requestIdRef.current += 1;
-    setHandoff({ target, symbol, requestId: requestIdRef.current });
-    navigate(`/${target}`);
+    const requestId = requestIdRef.current;
+    flushSync(() => {
+      setVisitedTabs((prev) => (prev.has(path) ? prev : new Set(prev).add(path)));
+    });
+    setHandoff({ target, symbol, requestId });
+    navigate(path);
   }
 
   return (
@@ -88,7 +135,7 @@ export default function TabShell() {
       <div className="min-h-screen bg-bg-primary">
         <header className="flex flex-wrap items-center gap-3 border-b border-border bg-bg-secondary px-4 py-3 shadow-card sm:px-6">
           <nav className="flex flex-wrap items-center gap-1">
-            {[...TABS, ...(canStockAnalysis ? [{ path: '/stock-analysis', label: 'Stock Analysis' }] : [])].map((tab) => {
+            {TABS.map((tab) => {
               const active = location.pathname === tab.path;
               return (
                 <Link
@@ -102,6 +149,70 @@ export default function TabShell() {
                 </Link>
               );
             })}
+            {canStockAnalysisGroup && !canStockAnalysisMenu && (
+              <Link
+                to={stockAnalysisGroupPath}
+                className={`rounded-btn px-3 py-1.5 text-sm font-medium transition-colors ${
+                  stockAnalysisGroupActive ? 'bg-accent text-white' : 'text-text-secondary hover:bg-bg-primary'
+                }`}
+              >
+                Stock Analysis
+              </Link>
+            )}
+            {canStockAnalysisMenu && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setStockAnalysisMenuOpen((o) => !o)}
+                  aria-haspopup="menu"
+                  aria-expanded={stockAnalysisMenuOpen}
+                  className={`rounded-btn px-3 py-1.5 text-sm font-medium transition-colors ${
+                    stockAnalysisGroupActive ? 'bg-accent text-white' : 'text-text-secondary hover:bg-bg-primary'
+                  }`}
+                >
+                  Stock Analysis ▾
+                </button>
+                {stockAnalysisMenuOpen && (
+                  <>
+                    {/* Same click-outside-to-close backdrop pattern as UserPersonaBadge's menu -
+                        a full-screen invisible layer under the menu, closing it on any outside
+                        click. */}
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setStockAnalysisMenuOpen(false)}
+                      aria-hidden="true"
+                      data-testid="stock-analysis-menu-backdrop"
+                    />
+                    <div
+                      role="menu"
+                      data-testid="stock-analysis-menu"
+                      className="absolute left-0 top-full z-50 mt-2 w-48 overflow-hidden rounded-card border border-border bg-bg-card shadow-card-lg"
+                    >
+                      <Link
+                        to="/stock-analysis"
+                        role="menuitem"
+                        onClick={() => setStockAnalysisMenuOpen(false)}
+                        className={`block px-4 py-2.5 text-sm hover:bg-bg-primary ${
+                          location.pathname === '/stock-analysis' ? 'font-semibold text-accent' : 'text-text-primary'
+                        }`}
+                      >
+                        Candlestick Charts
+                      </Link>
+                      <Link
+                        to="/candlestick-question-answer"
+                        role="menuitem"
+                        onClick={() => setStockAnalysisMenuOpen(false)}
+                        className={`block px-4 py-2.5 text-sm hover:bg-bg-primary ${
+                          location.pathname === '/candlestick-question-answer' ? 'font-semibold text-accent' : 'text-text-primary'
+                        }`}
+                      >
+                        Candlestick Tutorial
+                      </Link>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </nav>
 
           {/* ml-auto here (not on Log out) is what keeps Admin/API Keys pinned to the
@@ -125,6 +236,8 @@ export default function TabShell() {
 
           <SupportWidget />
 
+          {session && !isExemptFromRateLimit && <RateLimitIndicator />}
+
           {session && <UserPersonaBadge user={session} />}
 
           <button
@@ -137,6 +250,7 @@ export default function TabShell() {
         </header>
 
         {session && <ImpersonationBanner session={session} returnPath="/admin" />}
+        {session && !isExemptFromRateLimit && <RateLimitBlockedToast />}
 
         <div data-testid="tab-panel-portfolio" className={location.pathname === '/' ? '' : 'hidden'}>
           {canLegacy && canFlex && (
@@ -188,8 +302,12 @@ export default function TabShell() {
             without it, a user who DOES hold stock_analysis:view would get bounced away on
             every direct visit, before the session query has even resolved. */}
         {location.pathname === '/stock-analysis' && !sessionLoading && !canStockAnalysis && <Navigate to="/" replace />}
+        {location.pathname === '/candlestick-question-answer' && !sessionLoading && !canCandlestickQuestionAnswer && <Navigate to="/" replace />}
         <div data-testid="tab-panel-stock-analysis" className={location.pathname === '/stock-analysis' ? '' : 'hidden'}>
           {canStockAnalysis && visitedTabs.has('/stock-analysis') && <StockAnalysisPage />}
+        </div>
+        <div data-testid="tab-panel-candlestick-question-answer" className={location.pathname === '/candlestick-question-answer' ? '' : 'hidden'}>
+          {canCandlestickQuestionAnswer && visitedTabs.has('/candlestick-question-answer') && <CandlestickQuestionAnswerPage />}
         </div>
       </div>
 

@@ -1,4 +1,4 @@
-import { useRunHistoryList, type RunHistoryListItem } from '../api/contrarianFinder';
+import { useRunHistoryList, getRunCompleteness, type RunHistoryListItem } from '../api/contrarianFinder';
 
 interface ContrarianRunHistoryDrawerProps {
   isOpen: boolean;
@@ -62,23 +62,30 @@ export default function ContrarianRunHistoryDrawer({ isOpen, onClose, onSelectRu
               No older runs yet — once more scans are run, they&apos;ll show up here.
             </p>
           )}
-          {history.data?.runs.map((run, index) => (
-            <button
-              key={run.id}
-              type="button"
-              onClick={() => onSelectRun(run)}
-              data-testid={`run-history-row-${run.id}`}
-              className={`block w-full border-b border-border px-4 py-3 text-left hover:bg-border/40 ${index % 2 === 1 ? 'bg-bg-primary' : ''}`}
-            >
-              {/* truncate (nowrap + ellipsis) is a safety net, not the primary fix - the compact
-                  timestamp format above is what actually gets this onto one line at this width;
-                  truncate just guarantees it stays one line even for an outlier-long value. */}
-              <p className="truncate text-xs text-text-primary">
-                <span className="font-semibold">{formatCompactTimestamp(run.completedAt)}</span>
-                <span className="text-text-secondary"> · {run.params.threshold}% Threshold - {run.params.scanDays} Day Window</span>
-              </p>
-            </button>
-          ))}
+          {history.data?.runs.map((run, index) => {
+            const { isComplete } = getRunCompleteness(run.params, run.scanned, run.universeSize);
+            return (
+              <button
+                key={run.id}
+                type="button"
+                onClick={() => onSelectRun(run)}
+                data-testid={`run-history-row-${run.id}`}
+                className={`block w-full border-b border-border px-4 py-3 text-left hover:bg-border/40 ${index % 2 === 1 ? 'bg-bg-primary' : ''}`}
+              >
+                {/* truncate (nowrap + ellipsis) is a safety net, not the primary fix - the compact
+                    timestamp format above is what actually gets this onto one line at this width;
+                    truncate just guarantees it stays one line even for an outlier-long value.
+                    isComplete kept as a short suffix, not the full "X of N" - the drawer's fixed
+                    max-w-sm width has no room for it, and a complete run (the common case) needs
+                    no extra text at all. */}
+                <p className="truncate text-xs text-text-primary">
+                  <span className="font-semibold">{formatCompactTimestamp(run.completedAt)}</span>
+                  <span className="text-text-secondary"> · {run.params.threshold}% Threshold - {run.params.scanDays} Day Window</span>
+                  {!isComplete && <span className="font-medium text-warning"> · Partial</span>}
+                </p>
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
