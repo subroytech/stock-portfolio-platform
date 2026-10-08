@@ -1,3 +1,10 @@
+// candlestickQuestionAnswer.service's own partial mock below uses jest.requireActual(), which
+// loads the real module - and that module imports the real db/pool.ts, which throws at
+// module-load time if DATABASE_URL isn't set (CI deliberately never sets one for unit tests).
+// Mocking the pool directly, same fix already applied once in marketData.service.test.ts/
+// longTermAnalysisData.service.test.ts/contrarianComebackData.service.test.ts, lets the real
+// module load safely without a real Pool.
+jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
 jest.mock('../src/services/anthropicClient.service', () => ({ createMessage: jest.fn() }));
 // Partial mock: keep the real NoFilterCriteriaError class (so instanceof checks in the ask loop
 // still work) while stubbing the two query functions - same pattern this codebase already uses
