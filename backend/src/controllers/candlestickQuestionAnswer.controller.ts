@@ -11,7 +11,7 @@ import * as userSubscription from '../services/userSubscription.service';
 
 const LLM_CALLING_PERMISSION = 'candlestick_question_answer:llm_calling';
 
-const VALID_HORIZONS: Horizon[] = ['dayTrading', 'mediumTerm', 'longTerm'];
+const VALID_HORIZONS: Horizon[] = ['dayTrading', 'mediumTerm', 'longTerm', 'all'];
 const VALID_TIERS: Tier[] = [101, 201, 301];
 const VALID_CATEGORIES: Category[] = ['Definition', 'Interpretation', 'Reliability', 'How to Use', 'Common Mistakes'];
 const VALID_COMPLEXITY_TIERS: ComplexityTier[] = ['Simple', 'Composite', 'Advanced', 'Complex'];
@@ -51,20 +51,26 @@ function parseRelevantHorizons(raw: unknown): Horizon[] | null {
 // free" precedent used everywhere else in this app). `horizon`/`tier`/`query` are all optional.
 export async function searchEntries(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const horizon = req.query.horizon ? (parseHorizon(req.query.horizon) ?? undefined) : undefined;
-    if (req.query.horizon && !horizon) {
-      res.status(400).json({ error: `horizon must be one of: ${VALID_HORIZONS.join(', ')}` });
-      return;
-    }
     const entries = await candlestickQuestionAnswer.searchEntries({
       query: typeof req.query.query === 'string' ? req.query.query : undefined,
-      horizon,
       tier: req.query.tier ? parseTier(req.query.tier) : undefined,
     });
     res.json({ entries });
   } catch (err) {
     next(err);
   }
+}
+
+// Tags each matched pattern name with whether it's actually relevant to the requested horizon
+// (2026-10-08) - null when horizon is 'all' (nothing to compare against) or a name somehow has
+// no matching row. Called once per fresh resolution (LLM or template); a cache hit skips this
+// entirely and replays the already-enriched shape stored on the row, since the cache is keyed
+// per (question, horizon) - a hit's stored horizon always equals the current request's.
+async function enrichMatchedPatterns(
+  patternNames: string[], horizon: Horizon,
+): Promise<{ patternName: string; relevantForHorizon: boolean | null }[]> {
+  const relevance = await candlestickQuestionAnswer.getPatternHorizonRelevance(patternNames, horizon);
+  return patternNames.map((patternName) => ({ patternName, relevantForHorizon: relevance[patternName] ?? null }));
 }
 
 // The free-text ask path - a deterministic-first resolution cascade (Phase 2, 2026-10-05):
@@ -126,7 +132,8 @@ export async function askQuestion(req: Request, res: Response, next: NextFunctio
       // answer has no entry_ids at all, but should still surface its pattern(s) for diagrams.
       const matchedEntries = await Promise.all(result.matchedEntryIds.map((id) => candlestickQuestionAnswer.getEntryById(id)));
       const entryPatternNames = matchedEntries.filter((e): e is NonNullable<typeof e> => e !== null).map((e) => e.patternName);
-      const matchedPatterns = [...new Set([...entryPatternNames, ...result.matchedPatternNames])];
+      const matchedPatternNames = [...new Set([...entryPatternNames, ...result.matchedPatternNames])];
+      const matchedPatterns = await enrichMatchedPatterns(matchedPatternNames, horizon);
 
       await askedQuestion.recordAskedQuestion({
         questionText: question,
@@ -151,11 +158,12 @@ export async function askQuestion(req: Request, res: Response, next: NextFunctio
       return;
     }
 
-    const templateResult = await questionTemplate.matchTemplate(question, horizon);
+    const templateResult = await questionTemplate.matchTemplate(question);
     const formattedAnswer = templateResult ? questionTemplate.formatTemplateAnswer(templateResult) : null;
 
     if (formattedAnswer && templateResult) {
-      const matchedPatterns = templateResult.matches.map((m) => m.patternName);
+      const matchedPatternNames = templateResult.matches.map((m) => m.patternName);
+      const matchedPatterns = await enrichMatchedPatterns(matchedPatternNames, horizon);
       await askedQuestion.recordAskedQuestion({
         questionText: question, horizon, answerText: formattedAnswer, matchedPatternNames: matchedPatterns, status: 'Answered',
       });

@@ -31,28 +31,6 @@ describe('searchEntries', () => {
     }]);
   });
 
-  // horizon is resolved via the PATTERN's own boolean columns (migration 048), not a column on
-  // the entry - no parameter is bound for it (the column name itself varies by horizon, not a
-  // parameterized value), unlike tier/query below.
-  test('adds a horizon filter (via the pattern\'s boolean column) when given', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-
-    await svc.searchEntries({ horizon: 'mediumTerm' });
-
-    const [sql, params] = mockQuery.mock.calls[0];
-    expect(sql).toContain('p.is_medium_term = true');
-    expect(params).toEqual([]);
-  });
-
-  test('a different horizon references its own distinct boolean column', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-
-    await svc.searchEntries({ horizon: 'longTerm' });
-
-    const [sql] = mockQuery.mock.calls[0];
-    expect(sql).toContain('p.is_long_term = true');
-  });
-
   test('adds a tier filter when given', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
 
@@ -74,14 +52,12 @@ describe('searchEntries', () => {
     expect(params).toEqual(['%hammer%']);
   });
 
-  test('combines horizon (unparameterized) + tier + query together with correct parameter positions', async () => {
+  test('combines tier + query together with correct parameter positions', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
 
-    await svc.searchEntries({ query: 'star', horizon: 'longTerm', tier: 301 });
+    await svc.searchEntries({ query: 'star', tier: 301 });
 
-    const [sql, params] = mockQuery.mock.calls[0];
-    expect(sql).toContain('p.is_long_term = true');
-    // horizon takes no parameter slot, so tier ($1) and query ($2) are the only bound params.
+    const [, params] = mockQuery.mock.calls[0];
     expect(params).toEqual([301, '%star%']);
   });
 });
@@ -125,16 +101,6 @@ describe('filterPatternsByMetadata', () => {
     expect(params).toEqual(['%pin bar%']);
   });
 
-  test('a horizon filter uses the same unparameterized boolean-column approach as searchEntries', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-
-    await svc.filterPatternsByMetadata({ horizon: 'dayTrading' });
-
-    const [sql, params] = mockQuery.mock.calls[0];
-    expect(sql).toContain('p.is_day_trading = true');
-    expect(params).toEqual([]);
-  });
-
   test('combines multiple structural filters with correct parameter positions', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
 
@@ -148,6 +114,54 @@ describe('filterPatternsByMetadata', () => {
     expect(sql).toContain('p.requires_gap = $3');
     expect(sql).toContain('p.trend_context = $4');
     expect(params).toEqual(['bearish', 'Advanced', true, 'prior-uptrend']);
+  });
+});
+
+describe('getPatternHorizonRelevance', () => {
+  test('returns null for every name without querying when horizon is "all"', async () => {
+    const result = await svc.getPatternHorizonRelevance(['Hammer', 'Doji'], 'all');
+
+    expect(result).toEqual({ Hammer: null, Doji: null });
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  test('returns null for every name without querying when given no names', async () => {
+    const result = await svc.getPatternHorizonRelevance([], 'dayTrading');
+
+    expect(result).toEqual({});
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  test('maps each name to whether its own horizon column is true, for the requested horizon', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        { pattern_name: 'Hammer', is_day_trading: true, is_medium_term: true, is_long_term: true },
+        { pattern_name: 'Three Inside Up', is_day_trading: false, is_medium_term: true, is_long_term: true },
+      ],
+    });
+
+    const result = await svc.getPatternHorizonRelevance(['Hammer', 'Three Inside Up'], 'dayTrading');
+
+    expect(result).toEqual({ Hammer: true, 'Three Inside Up': false });
+    const [sql, params] = mockQuery.mock.calls[0];
+    expect(sql).toContain('pattern_name = ANY($1)');
+    expect(params).toEqual([['Hammer', 'Three Inside Up']]);
+  });
+
+  test('a different horizon reads its own distinct column', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ pattern_name: 'Three Inside Up', is_day_trading: false, is_medium_term: true, is_long_term: true }] });
+
+    const result = await svc.getPatternHorizonRelevance(['Three Inside Up'], 'mediumTerm');
+
+    expect(result).toEqual({ 'Three Inside Up': true });
+  });
+
+  test('a name with no matching row maps to null, same as "nothing to say"', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const result = await svc.getPatternHorizonRelevance(['Unknown Pattern'], 'dayTrading');
+
+    expect(result).toEqual({ 'Unknown Pattern': null });
   });
 });
 

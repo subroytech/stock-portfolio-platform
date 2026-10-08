@@ -9,15 +9,25 @@ import type { Horizon } from './candlestickQuestionAnswer.service';
 
 export type QuestionStatus = 'Answered' | 'Unable_To_Answer';
 
+// A matched pattern plus whether it's actually relevant to the horizon the question was asked
+// under (2026-10-08) - null when that horizon was 'all' (nothing to compare against). Computed
+// once by the controller's enrichMatchedPatterns() at write time and replayed verbatim on every
+// future cache hit, never recomputed - same "first answer wins" philosophy this whole cache
+// already follows for answerText itself.
+export interface MatchedPatternWithHorizonRelevance {
+  patternName: string;
+  relevantForHorizon: boolean | null;
+}
+
 export interface CachedAnswer {
   answerText: string | null;
-  matchedPatternNames: string[];
+  matchedPatternNames: MatchedPatternWithHorizonRelevance[];
 }
 
 export interface TopQuestion {
   questionText: string;
   answerText: string;
-  matchedPatternNames: string[];
+  matchedPatternNames: MatchedPatternWithHorizonRelevance[];
   questionAskedCount: number;
   lastAskedAt: string;
 }
@@ -34,7 +44,7 @@ export function normalizeQuestionText(text: string): string {
 // - the cache is read-through, never regenerative, even on a hit.
 export async function findCachedAnswer(questionText: string, horizon: Horizon): Promise<CachedAnswer | null> {
   const normalized = normalizeQuestionText(questionText);
-  const { rows } = await pool.query<{ answer_text: string | null; matched_pattern_names: string[] | null }>(
+  const { rows } = await pool.query<{ answer_text: string | null; matched_pattern_names: MatchedPatternWithHorizonRelevance[] | null }>(
     `UPDATE m_candlestick_asked_question
      SET question_asked_count = question_asked_count + 1, last_asked_at = now()
      WHERE normalized_question_text = $1 AND horizon = $2 AND question_status = 'Answered'
@@ -56,7 +66,7 @@ export async function recordAskedQuestion(input: {
   questionText: string;
   horizon: Horizon;
   answerText: string | null;
-  matchedPatternNames: string[];
+  matchedPatternNames: MatchedPatternWithHorizonRelevance[];
   status: QuestionStatus;
 }): Promise<void> {
   const normalized = normalizeQuestionText(input.questionText);
@@ -78,7 +88,7 @@ export async function recordAskedQuestion(input: {
 // else in this app.
 export async function listTopQuestions(limit = 100): Promise<TopQuestion[]> {
   const { rows } = await pool.query<{
-    question_text: string; answer_text: string; matched_pattern_names: string[] | null;
+    question_text: string; answer_text: string; matched_pattern_names: MatchedPatternWithHorizonRelevance[] | null;
     question_asked_count: string; last_asked_at: string;
   }>(
     `SELECT question_text, answer_text, matched_pattern_names, question_asked_count, last_asked_at

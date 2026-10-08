@@ -58,13 +58,29 @@ export interface Pattern {
   updatedAt: string;
 }
 
+// A matched pattern plus whether it's actually relevant to the horizon the question was asked
+// under (2026-10-08) - null when "All" was selected (nothing to compare against), so the
+// frontend can render a neutral badge instead of green/red. Shared by AskResult and TopQuestion
+// below, and by the Ask form's own popular-questions replay.
+export interface MatchedPatternWithHorizonRelevance {
+  patternName: string;
+  relevantForHorizon: boolean | null;
+}
+
 export interface AskResult {
   outcome: 'answered_from_kb' | 'unable_to_answer';
   answer: string | null;
   matchedEntryIds: string[];
-  matchedPatterns: string[];
+  matchedPatterns: MatchedPatternWithHorizonRelevance[];
   reason: string | null;
 }
+
+// Horizon stopped being an exclusionary filter anywhere in the Candlestick Tutorial feature
+// (2026-10-08) - it's informational now, and "All" (no specific preference) is a real, selectable
+// option. Deliberately its own type, scoped to this feature's Ask form only - NOT a widening of
+// the shared HorizonId from ../lib/candlestickIndicators, which Candlestick Charts also depends
+// on for an unrelated purpose (which indicators to show per timeframe).
+export type AskHorizon = HorizonId | 'all';
 
 // Phase 2 (2026-10-05) - the deterministic-first resolution cascade's cache
 // (m_candlestick_asked_question). answerText/matchedPatternNames are already included in the
@@ -73,7 +89,7 @@ export interface AskResult {
 export interface TopQuestion {
   questionText: string;
   answerText: string;
-  matchedPatternNames: string[];
+  matchedPatternNames: MatchedPatternWithHorizonRelevance[];
   questionAskedCount: number;
   lastAskedAt: string;
 }
@@ -94,10 +110,9 @@ export interface QuestionTemplate {
 
 // The curated picker's own search - a plain read, no LLM cost, so this stays a normal query
 // (not tied to any rate-limit indicator the way the ask mutation is).
-export function useSearchCuratedEntries(params: { query?: string; horizon?: HorizonId; tier?: Tier } = {}, enabled = true) {
+export function useSearchCuratedEntries(params: { query?: string; tier?: Tier } = {}, enabled = true) {
   const search = new URLSearchParams();
   if (params.query) search.set('query', params.query);
-  if (params.horizon) search.set('horizon', params.horizon);
   if (params.tier) search.set('tier', String(params.tier));
   const qs = search.toString();
 
@@ -112,7 +127,7 @@ export function useSearchCuratedEntries(params: { query?: string; horizon?: Hori
 // dedicated candlestickQuestionAnswerRateLimit.service.ts on the backend.
 export function useAskCandlestickQuestion() {
   return useMutation({
-    mutationFn: ({ question, horizon }: { question: string; horizon: HorizonId }) =>
+    mutationFn: ({ question, horizon }: { question: string; horizon: AskHorizon }) =>
       apiFetch<AskResult>('/candlestick-question-answer/ask', {
         method: 'POST',
         body: JSON.stringify({ question, horizon }),

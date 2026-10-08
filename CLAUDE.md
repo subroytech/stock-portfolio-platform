@@ -50,7 +50,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 10-05)
+# Current Build State (as of 10-08)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -2035,6 +2035,77 @@ vowel - pure grammar, not worth a schema change for.
 
 **Deferred, per explicit direction**: an "(i)" info popover next to the Ask form's own "Question"
 label, surfacing which question shapes are currently recognized - not built this round.
+
+## Candlestick Tutorial — Horizon Becomes Informational, Plus "All" Horizon Option ✅ Done
+
+Built 2026-10-08, `/plan`-approved. Closed a real usability gap found live: "What does Three
+Inside Up mean?" and other perfectly well-formed questions returned a bare `unable_to_answer`
+with zero explanation, because `matchTemplate()`/`filterPatternsByMetadata()`/`searchEntries()`
+all treated the user's selected Trading Horizon as an **exclusionary** filter - a pattern whose
+own relevant-horizons flags didn't include the selected horizon was silently dropped from the
+result set entirely, with nothing distinguishing "the engine doesn't understand your question"
+from "this pattern just isn't tagged for your horizon." Per explicit direction, this was widened
+from the original single-lookup-only proposal to cover every path in the feature - list-mode
+templates and the free-text LLM path too, not just single-pattern lookups.
+
+**Horizon stops being exclusionary everywhere in this feature, becomes purely informational**:
+`filterPatternsByMetadata()`/`searchEntries()` (`candlestickQuestionAnswer.service.ts`) and
+`matchTemplate()` (`candlestickQuestionTemplate.service.ts`) all dropped their `horizon`
+parameter/WHERE-clause branch entirely - a match is resolved first, then annotated. New
+`getPatternHorizonRelevance(patternNames, horizon)` is the single enrichment point, called once
+per successful resolution (cache/template/LLM) by a new `enrichMatchedPatterns()` helper in
+`candlestickQuestionAnswer.controller.ts` - returns `null` for every name when `horizon === 'all'`
+(nothing to compare against) or the input is empty, otherwise one `SELECT ... WHERE pattern_name
+= ANY($1)` reading the pattern's own `is_day_trading`/`is_medium_term`/`is_long_term` column for
+the requested horizon. `MatchedPatternWithHorizonRelevance { patternName, relevantForHorizon:
+boolean | null }` replaces the old plain `string[]` shape everywhere it flowed - the LLM's own
+`ask()` tool-call sites, the cache's `matched_pattern_names` JSONB column, `TopQuestion`, and the
+frontend's `AskResult`/`TopQuestion` types. **The cache-hit branch is the one deliberate
+exception** - it replays the already-enriched shape stored at write time rather than re-calling
+the enrichment helper, keeping cache hits free of any extra query (correct because the cache key
+already includes `(normalized_question_text, horizon)`, so a hit's stored horizon always equals
+the current request's). No DB migration needed anywhere - `matched_pattern_names` is JSONB with
+no fixed shape, this was a pure TS-type/write-shape change. `GET /entries`'s dead `?horizon=`
+query param (searchEntries never actually filtered by it from the Browse Curated picker, only the
+LLM's own search tool did) was removed for honesty rather than left silently ignored.
+
+**New "All" horizon option** (`Horizon`/`AskHorizon` gain `'all'`): lets a user ask without
+committing to a specific horizon - every matched pattern renders with a neutral badge (nothing to
+compare against) instead of forcing a pick. Deliberately a **feature-scoped frontend type**
+(`AskHorizon = HorizonId | 'all'` in `api/candlestickQuestionAnswer.ts`), not a widening of the
+shared `HorizonId` from `lib/candlestickIndicators.ts` - that type is also used by the unrelated
+Candlestick Charts feature (`CandlestickPopup.tsx`/`CandlestickQuickReference.tsx`) for picking
+which indicators to show per timeframe, where "All" has no meaning. The LLM's own system prompt
+and first user message were reworded to be informational, not exclusionary, about horizon, with
+`'all'` phrased as "no particular preference" rather than sent literally.
+
+**Frontend**: new `HorizonRelevanceBadges` component (`CandlestickQuestionAnswerPage.tsx`) renders
+one colored chip per matched pattern name - green (`bg-success/10 text-success`) when
+`relevantForHorizon === true`, red (`bg-danger/10 text-danger`) when `=== false`, neutral
+(`bg-text-muted/10 text-text-muted`) when `=== null` - reusing the exact same semantic-color-token
+pattern `AdminCandlestickQuestionAnswerPage.tsx`'s `STATUS_STYLES` already established. Wired into
+both the Ask answer card and Popular Questions' expanded row, the same two blocks that already
+rendered pattern diagrams. The Trading Horizon `<select>` already generates its options from
+`Object.keys(HORIZON_LABELS)`, so "All" appears automatically with zero extra markup.
+
+1032 backend tests, 823 frontend tests, `tsc`/lint clean both sides. **One-time dev-DB step**
+(not a migration): `m_candlestick_asked_question` truncated (10 stale rows carrying the old
+plain-`string[]` shape) so no row could reach the new code expecting the enriched object shape.
+**Live-verified end-to-end against the real dev DB and running server** with a throwaway
+`user`-role account (confirmed via direct query to hold `candlestick_question_answer:ask` but not
+`:llm_calling`, exercising the template cascade, not the LLM path): "What does Three Inside Up
+mean?" under Day-Trading now answers (previously `unable_to_answer`) with a **red** badge (Three
+Inside Up is `is_day_trading: false`); the identical question under Swing Trading → **green**
+badge; under **"All"** → neutral badge; a repeat ask under Day-Trading was a genuine cache hit
+(`question_asked_count` incremented 1→2 via direct query, identical enriched shape replayed) - a
+list-mode question ("Which patterns are reversal signals?") under Day-Trading returned 25
+patterns, each with its own correct per-pattern badge, including several (Three Inside Up,
+Morning Star, Evening Star, Three Black Crows, etc.) that the old exclusionary filter would have
+silently dropped entirely. Popular Questions' `top-questions` endpoint confirmed surfacing the
+same enriched shape. Throwaway account and all test cache rows cleaned up afterward. The LLM
+path's own badge rendering was verified via the updated automated tests only, not a live call -
+no real Anthropic key is on file in this dev environment, the same known gap noted in the
+Phase 1/2 build logs above.
 
 ## Next Up
 

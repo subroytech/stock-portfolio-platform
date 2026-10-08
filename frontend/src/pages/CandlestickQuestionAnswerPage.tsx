@@ -2,17 +2,20 @@ import { Fragment, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   useSearchCuratedEntries, useAskCandlestickQuestion, useTopQuestions, CATEGORIES, COMPLEXITY_TIERS,
-  type Category, type ComplexityTier,
+  type Category, type ComplexityTier, type AskHorizon, type MatchedPatternWithHorizonRelevance,
 } from '../api/candlestickQuestionAnswer';
 import { useSession } from '../api/auth';
 import { ApiError } from '../api/client';
-import type { HorizonId } from '../lib/candlestickIndicators';
 import CandlestickPatternDiagram from '../components/CandlestickPatternDiagram';
 import { hasPatternDiagram } from '../lib/candlestickPatternDiagrams';
 import CategoryBadge from '../components/CategoryBadge';
 
-const HORIZON_LABELS: Record<HorizonId, string> = {
-  dayTrading: 'Day-Trading', mediumTerm: 'Swing Trading', longTerm: 'Long-Term Investment',
+// 'all' appended last (2026-10-08) - a broader, less-specific choice than picking one of the 3
+// real horizons, same ordering rationale as it being the last tab in a filter list elsewhere in
+// this app. Horizon stopped excluding patterns from an answer this same round - it's purely
+// informational now, driving the colored relevance badges below instead.
+const HORIZON_LABELS: Record<AskHorizon, string> = {
+  dayTrading: 'Day-Trading', mediumTerm: 'Swing Trading', longTerm: 'Long-Term Investment', all: 'All',
 };
 
 // Candlestick Pattern Q&A (Phase 1) - two independent ways to get an answer, per explicit
@@ -75,7 +78,7 @@ export default function CandlestickQuestionAnswerPage() {
   );
 
   const [question, setQuestion] = useState('');
-  const [horizon, setHorizon] = useState<HorizonId>('dayTrading');
+  const [horizon, setHorizon] = useState<AskHorizon>('dayTrading');
   const ask = useAskCandlestickQuestion();
 
   // Popular Questions (Phase 2, 2026-10-05) - reads the already-fetched answerText/
@@ -299,11 +302,11 @@ export default function CandlestickQuestionAnswerPage() {
               Trading Horizon
               <select
                 value={horizon}
-                onChange={(e) => setHorizon(e.target.value as HorizonId)}
+                onChange={(e) => setHorizon(e.target.value as AskHorizon)}
                 data-testid="candlestick-qa-horizon-select"
                 className="rounded-btn border border-border bg-bg-primary px-2 py-1.5 text-sm text-text-primary"
               >
-                {(Object.keys(HORIZON_LABELS) as HorizonId[]).map((h) => (
+                {(Object.keys(HORIZON_LABELS) as AskHorizon[]).map((h) => (
                   <option key={h} value={h}>{HORIZON_LABELS[h]}</option>
                 ))}
               </select>
@@ -338,14 +341,17 @@ export default function CandlestickQuestionAnswerPage() {
           {ask.isSuccess && ask.data.outcome === 'answered_from_kb' && (
             <div className="mt-3 rounded-card border border-border bg-bg-primary p-3" data-testid="candlestick-qa-answer">
               <div className="flex items-start gap-3">
-                {ask.data.matchedPatterns.some(hasPatternDiagram) && (
+                {ask.data.matchedPatterns.some((m) => hasPatternDiagram(m.patternName)) && (
                   <div className="flex w-1/4 shrink-0 flex-col items-center gap-2">
-                    {ask.data.matchedPatterns.filter(hasPatternDiagram).map((pattern) => (
-                      <CandlestickPatternDiagram key={pattern} patternName={pattern} />
+                    {ask.data.matchedPatterns.filter((m) => hasPatternDiagram(m.patternName)).map((m) => (
+                      <CandlestickPatternDiagram key={m.patternName} patternName={m.patternName} />
                     ))}
                   </div>
                 )}
-                <p className="min-w-0 flex-1 text-sm text-text-secondary">{ask.data.answer}</p>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-text-secondary">{ask.data.answer}</p>
+                  <HorizonRelevanceBadges matches={ask.data.matchedPatterns} />
+                </div>
               </div>
             </div>
           )}
@@ -385,14 +391,17 @@ export default function CandlestickQuestionAnswerPage() {
                       data-testid={`candlestick-qa-top-question-answer-${i}`}
                     >
                       <div className="flex items-start gap-3">
-                        {q.matchedPatternNames.some(hasPatternDiagram) && (
+                        {q.matchedPatternNames.some((m) => hasPatternDiagram(m.patternName)) && (
                           <div className="flex w-1/4 shrink-0 flex-col items-center gap-2">
-                            {q.matchedPatternNames.filter(hasPatternDiagram).map((pattern) => (
-                              <CandlestickPatternDiagram key={pattern} patternName={pattern} />
+                            {q.matchedPatternNames.filter((m) => hasPatternDiagram(m.patternName)).map((m) => (
+                              <CandlestickPatternDiagram key={m.patternName} patternName={m.patternName} />
                             ))}
                           </div>
                         )}
-                        <p className="min-w-0 flex-1 text-sm text-text-secondary">{q.answerText}</p>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm text-text-secondary">{q.answerText}</p>
+                          <HorizonRelevanceBadges matches={q.matchedPatternNames} />
+                        </div>
                       </div>
                     </div>
                   )}
@@ -404,6 +413,30 @@ export default function CandlestickQuestionAnswerPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+// Green when the matched pattern is relevant to the selected Trading Horizon, red when it isn't,
+// neutral/muted when relevantForHorizon is null ("All" selected, or no data to compare against).
+function HorizonRelevanceBadges({ matches }: { matches: MatchedPatternWithHorizonRelevance[] }) {
+  if (matches.length === 0) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {matches.map((m) => (
+        <span
+          key={m.patternName}
+          className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+            m.relevantForHorizon === true
+              ? 'bg-success/10 text-success'
+              : m.relevantForHorizon === false
+                ? 'bg-danger/10 text-danger'
+                : 'bg-text-muted/10 text-text-muted'
+          }`}
+        >
+          {m.patternName}
+        </span>
+      ))}
+    </div>
   );
 }
 

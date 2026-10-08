@@ -8,7 +8,7 @@
 
 import { pool } from '../db/pool';
 import * as candlestickQuestionAnswer from './candlestickQuestionAnswer.service';
-import type { Horizon, PatternMetadataMatch } from './candlestickQuestionAnswer.service';
+import type { PatternMetadataMatch } from './candlestickQuestionAnswer.service';
 
 export type ResponseMode = 'single' | 'list';
 
@@ -87,7 +87,7 @@ export async function setTemplateStatus(id: string, status: 'active' | 'inactive
 // question at all. The caller (askQuestion) treats either an empty-matches result or a null
 // result as 'unable_to_answer' - there's no further deterministic fallback once templates are
 // the last resort for a role.
-export async function matchTemplate(question: string, horizon: Horizon): Promise<TemplateMatchResult | null> {
+export async function matchTemplate(question: string): Promise<TemplateMatchResult | null> {
   const templates = await pool.query<{
     id: string; regex_pattern: string; response_mode: string;
     filter_mapping: { fixedFilters: Record<string, string | boolean>; groupFilters: Record<string, string> };
@@ -103,7 +103,7 @@ export async function matchTemplate(question: string, horizon: Horizon): Promise
     // typo'd field name here is simply ignored by filterPatternsByMetadata's own named
     // parameters, not a security concern, just a silently-ineffective template worth fixing in
     // the Admin Console if it ever under-matches.
-    const filters: Record<string, unknown> = { ...template.filter_mapping.fixedFilters, horizon };
+    const filters: Record<string, unknown> = { ...template.filter_mapping.fixedFilters };
     for (const [groupIndexStr, fieldName] of Object.entries(template.filter_mapping.groupFilters)) {
       const value = execResult[Number(groupIndexStr)];
       if (value !== undefined) filters[fieldName] = value.trim();

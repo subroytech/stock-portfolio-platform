@@ -5,8 +5,10 @@ import { pool } from '../db/pool';
 
 // Matches frontend/src/lib/candlestickIndicators.ts's HorizonId exactly, by convention (no
 // shared-schema codegen in this repo - same "keep in sync by hand" precedent as
-// analysisService.ts's own field-for-field comment).
-export type Horizon = 'dayTrading' | 'mediumTerm' | 'longTerm';
+// analysisService.ts's own field-for-field comment). 'all' (2026-10-08) is deliberately NOT part
+// of that shared mirror - it's a Q&A-only concept (frontend's own AskHorizon type), since
+// HorizonId is also used by the unrelated Candlestick Charts feature.
+export type Horizon = 'dayTrading' | 'mediumTerm' | 'longTerm' | 'all';
 export type Tier = 101 | 201 | 301;
 export type EntryStatus = 'Pending Approval' | 'Approved' | 'Rejected';
 // Fixed, difficulty-ordered sequence (2026-09-26) - Definition/Interpretation are tier 101;
@@ -26,13 +28,6 @@ export type Category = 'Definition' | 'Interpretation' | 'Reliability' | 'How to
 // (7 chars) already fits the existing column width.
 export type ComplexityTier = 'Simple' | 'Composite' | 'Advanced' | 'Complex';
 export const COMPLEXITY_TIERS: ComplexityTier[] = ['Simple', 'Composite', 'Advanced', 'Complex'];
-
-// Maps a Horizon to the boolean column on m_candlestick_pattern that stores it (migration 048) -
-// safe to interpolate directly into SQL since callers only ever pass a Horizon already validated
-// by the controller's parseHorizon(), never raw user input.
-const HORIZON_COLUMN: Record<Horizon, string> = {
-  dayTrading: 'is_day_trading', mediumTerm: 'is_medium_term', longTerm: 'is_long_term',
-};
 
 const UNIQUE_VIOLATION = '23505';
 
@@ -162,21 +157,19 @@ export async function createPattern(input: {
 }
 
 // The curated picker's browse/search query AND the LLM's own search_question_answer_entries
-// tool call both route through here. `horizon`/`tier`/`query` are all optional filters - the
-// browse UI lets a user narrow by any combination, while the LLM tool always supplies `horizon`
-// (the ask form's own explicit selector) but may omit `tier`. Only ever returns 'Approved' rows
-// - Pending Approval / Rejected content is never visible outside the admin management screen.
+// tool call both route through here. `tier`/`query` are optional filters - the browse UI lets a
+// user narrow by either. Only ever returns 'Approved' rows - Pending Approval / Rejected content
+// is never visible outside the admin management screen.
 //
-// horizon is resolved via the PATTERN's own boolean columns (migration 048), not a column on the
-// entry itself - HORIZON_COLUMN's value is one of exactly 3 hardcoded strings, safe to interpolate
-// directly since opts.horizon is always pre-validated by the controller's parseHorizon().
-export async function searchEntries(opts: { query?: string; horizon?: Horizon; tier?: Tier } = {}): Promise<QuestionAnswerEntry[]> {
+// horizon used to be a third filter here (excluding entries whose pattern wasn't tagged relevant
+// for it), removed 2026-10-08 - it's informational now, not exclusionary, handled uniformly by
+// getPatternHorizonRelevance() after a match is already resolved, not baked into this query.
+// Browse Curated Questions never actually sent horizon even before this change, so this has zero
+// visible effect there; it only mattered for the LLM's own search tool.
+export async function searchEntries(opts: { query?: string; tier?: Tier } = {}): Promise<QuestionAnswerEntry[]> {
   const conditions: string[] = [`e.status = 'Approved'`];
   const params: unknown[] = [];
 
-  if (opts.horizon) {
-    conditions.push(`p.${HORIZON_COLUMN[opts.horizon]} = true`);
-  }
   if (opts.tier) {
     params.push(opts.tier);
     conditions.push(`e.tier = $${params.length}`);
@@ -233,7 +226,6 @@ export async function filterPatternsByMetadata(filters: {
   complexityTier?: ComplexityTier;
   requiresGap?: boolean;
   trendContext?: TrendContext;
-  horizon?: Horizon;
 } = {}): Promise<PatternMetadataMatch[]> {
   const conditions: string[] = [`p.status = 'active'`];
   const params: unknown[] = [];
@@ -269,10 +261,6 @@ export async function filterPatternsByMetadata(filters: {
     params.push(filters.trendContext);
     conditions.push(`p.trend_context = $${params.length}`);
   }
-  if (filters.horizon) {
-    anyFilterGiven = true;
-    conditions.push(`p.${HORIZON_COLUMN[filters.horizon]} = true`);
-  }
 
   if (!anyFilterGiven) {
     throw new NoFilterCriteriaError('At least one filter must be given (e.g. signalType, directionalBias, requiresGap).');
@@ -288,6 +276,41 @@ export async function filterPatternsByMetadata(filters: {
     params,
   );
   return rows.map(toPatternMetadataMatch);
+}
+
+// The single enrichment point for "is this matched pattern actually relevant to the horizon the
+// user asked about" (2026-10-08) - called once by the controller, after a match is already
+// resolved via whichever path produced it (cache replay, a template, or the LLM), rather than
+// duplicated filtering logic inside searchEntries()/filterPatternsByMetadata() themselves.
+// 'all' (no specific horizon preference) maps every name to null - there's nothing to compare
+// against, so the frontend renders a neutral badge instead of green/red. A name with no matching
+// row (shouldn't normally happen - these are patterns an answer just resolved) also maps to null,
+// the same "nothing to say" treatment.
+export async function getPatternHorizonRelevance(
+  patternNames: string[], horizon: Horizon,
+): Promise<Record<string, boolean | null>> {
+  if (horizon === 'all' || patternNames.length === 0) {
+    return Object.fromEntries(patternNames.map((name) => [name, null]));
+  }
+
+  const { rows } = await pool.query<{
+    pattern_name: string; is_day_trading: boolean; is_medium_term: boolean; is_long_term: boolean;
+  }>(
+    `SELECT pattern_name, is_day_trading, is_medium_term, is_long_term
+     FROM m_candlestick_pattern WHERE pattern_name = ANY($1)`,
+    [patternNames],
+  );
+  const resolvedHorizon = horizon;
+  const byName = new Map(rows.map((row) => [row.pattern_name, row]));
+
+  return Object.fromEntries(patternNames.map((name) => {
+    const row = byName.get(name);
+    if (!row) return [name, null];
+    const value = resolvedHorizon === 'dayTrading' ? row.is_day_trading
+      : resolvedHorizon === 'mediumTerm' ? row.is_medium_term
+      : row.is_long_term;
+    return [name, value];
+  }));
 }
 
 // Admin content management only - returns entries of every status (not just 'Approved'), so the

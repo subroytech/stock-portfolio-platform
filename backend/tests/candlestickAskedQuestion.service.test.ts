@@ -30,14 +30,14 @@ describe('findCachedAnswer', () => {
     expect(params).toEqual(['what is a hammer', 'dayTrading']);
   });
 
-  test('on a hit, returns the pre-existing answer and pattern names (first answer always wins)', async () => {
+  test('on a hit, returns the pre-existing answer and enriched pattern names (first answer always wins)', async () => {
     mockQuery.mockResolvedValueOnce({
-      rows: [{ answer_text: 'A Hammer is bullish.', matched_pattern_names: ['Hammer'] }],
+      rows: [{ answer_text: 'A Hammer is bullish.', matched_pattern_names: [{ patternName: 'Hammer', relevantForHorizon: true }] }],
     });
 
     const result = await svc.findCachedAnswer('What is a Hammer?', 'dayTrading');
 
-    expect(result).toEqual({ answerText: 'A Hammer is bullish.', matchedPatternNames: ['Hammer'] });
+    expect(result).toEqual({ answerText: 'A Hammer is bullish.', matchedPatternNames: [{ patternName: 'Hammer', relevantForHorizon: true }] });
   });
 
   test('a null matched_pattern_names column maps to an empty array', async () => {
@@ -63,16 +63,17 @@ describe('recordAskedQuestion', () => {
   test('inserts a new row with the normalized text, JSON-stringifying matchedPatternNames', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
 
+    const matchedPatternNames = [{ patternName: 'Hammer', relevantForHorizon: true }];
     await svc.recordAskedQuestion({
       questionText: 'What is a Hammer?', horizon: 'dayTrading', answerText: 'A Hammer is bullish.',
-      matchedPatternNames: ['Hammer'], status: 'Answered',
+      matchedPatternNames, status: 'Answered',
     });
 
     const [sql, params] = mockQuery.mock.calls[0];
     expect(sql).toContain('INSERT INTO m_candlestick_asked_question');
     expect(sql).toContain('ON CONFLICT (normalized_question_text, horizon)');
     expect(params).toEqual([
-      'What is a Hammer?', 'what is a hammer', 'dayTrading', 'A Hammer is bullish.', JSON.stringify(['Hammer']), 'Answered',
+      'What is a Hammer?', 'what is a hammer', 'dayTrading', 'A Hammer is bullish.', JSON.stringify(matchedPatternNames), 'Answered',
     ]);
   });
 
@@ -95,7 +96,7 @@ describe('listTopQuestions', () => {
     mockQuery.mockResolvedValueOnce({
       rows: [{
         question_text: 'What is a Hammer?', answer_text: 'A Hammer is bullish.',
-        matched_pattern_names: ['Hammer'], question_asked_count: '42', last_asked_at: 't1',
+        matched_pattern_names: [{ patternName: 'Hammer', relevantForHorizon: true }], question_asked_count: '42', last_asked_at: 't1',
       }],
     });
 
@@ -107,7 +108,7 @@ describe('listTopQuestions', () => {
     expect(params).toEqual([100]);
     expect(result).toEqual([{
       questionText: 'What is a Hammer?', answerText: 'A Hammer is bullish.',
-      matchedPatternNames: ['Hammer'], questionAskedCount: 42, lastAskedAt: 't1',
+      matchedPatternNames: [{ patternName: 'Hammer', relevantForHorizon: true }], questionAskedCount: 42, lastAskedAt: 't1',
     }]);
   });
 

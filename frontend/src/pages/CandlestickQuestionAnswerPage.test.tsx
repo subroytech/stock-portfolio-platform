@@ -19,8 +19,8 @@ const ENTRIES = [
 ];
 
 const TOP_QUESTIONS = [
-  { questionText: 'Is Doji bullish or bearish?', answerText: 'Doji is neutral.', matchedPatternNames: ['Doji'], questionAskedCount: 12, lastAskedAt: 't1' },
-  { questionText: 'Is Hammer bullish or bearish?', answerText: 'Hammer is bullish.', matchedPatternNames: ['Hammer'], questionAskedCount: 5, lastAskedAt: 't1' },
+  { questionText: 'Is Doji bullish or bearish?', answerText: 'Doji is neutral.', matchedPatternNames: [{ patternName: 'Doji', relevantForHorizon: null }], questionAskedCount: 12, lastAskedAt: 't1' },
+  { questionText: 'Is Hammer bullish or bearish?', answerText: 'Hammer is bullish.', matchedPatternNames: [{ patternName: 'Hammer', relevantForHorizon: null }], questionAskedCount: 5, lastAskedAt: 't1' },
 ];
 
 function renderPage() {
@@ -256,7 +256,7 @@ describe('CandlestickQuestionAnswerPage', () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((path: string, init?: RequestInit) => {
       if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
       if (path === '/candlestick-question-answer/ask' && init?.method === 'POST') {
-        return Promise.resolve({ outcome: 'answered_from_kb', answer: 'A Doji signals indecision.', matchedEntryIds: ['e1'], matchedPatterns: ['Doji'], reason: null });
+        return Promise.resolve({ outcome: 'answered_from_kb', answer: 'A Doji signals indecision.', matchedEntryIds: ['e1'], matchedPatterns: [{ patternName: 'Doji', relevantForHorizon: null }], reason: null });
       }
       return Promise.resolve({});
     });
@@ -302,6 +302,46 @@ describe('CandlestickQuestionAnswerPage', () => {
     await userEvent.click(screen.getByTestId('candlestick-qa-ask-button'));
 
     expect(await screen.findByTestId('candlestick-qa-ask-error')).toHaveTextContent(/reached the limit of 10 questions/);
+  });
+
+  test('"All" is a selectable option in the Trading Horizon dropdown', async () => {
+    vi.spyOn(client, 'apiFetch').mockResolvedValue({ entries: [] });
+    renderPage();
+
+    const select = await screen.findByTestId('candlestick-qa-horizon-select');
+    expect(within(select).getByText('All')).toBeInTheDocument();
+  });
+
+  test('matched patterns render a colored horizon-relevance badge - green when relevant, red when not, neutral when horizon is "All"', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((path: string, init?: RequestInit) => {
+      if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+      if (path === '/candlestick-question-answer/ask' && init?.method === 'POST') {
+        return Promise.resolve({
+          outcome: 'answered_from_kb',
+          answer: 'Three Inside Up is bullish.',
+          matchedEntryIds: ['e1'],
+          matchedPatterns: [
+            { patternName: 'Three Inside Up', relevantForHorizon: false },
+            { patternName: 'Hammer', relevantForHorizon: true },
+            { patternName: 'Doji', relevantForHorizon: null },
+          ],
+          reason: null,
+        });
+      }
+      return Promise.resolve({});
+    });
+    renderPage();
+
+    await userEvent.type(await screen.findByTestId('candlestick-qa-question-input'), 'Does this match?');
+    await userEvent.click(screen.getByTestId('candlestick-qa-ask-button'));
+    await screen.findByTestId('candlestick-qa-answer');
+
+    const notRelevant = screen.getByText('Three Inside Up');
+    expect(notRelevant).toHaveClass('bg-danger/10', 'text-danger');
+    const relevant = screen.getByText('Hammer');
+    expect(relevant).toHaveClass('bg-success/10', 'text-success');
+    const neutral = screen.getByText('Doji');
+    expect(neutral).toHaveClass('bg-text-muted/10', 'text-text-muted');
   });
 
   test('the Ask button is disabled while the question field is empty', async () => {
@@ -366,6 +406,24 @@ describe('CandlestickQuestionAnswerPage', () => {
 
       await userEvent.click(row);
       expect(screen.queryByTestId('candlestick-qa-top-question-answer-0')).not.toBeInTheDocument();
+    });
+
+    test('an expanded row renders its own horizon-relevance badge for each matched pattern', async () => {
+      const questions = [
+        { questionText: 'Is Three Inside Up bullish?', answerText: 'Yes, bullish.', matchedPatternNames: [{ patternName: 'Three Inside Up', relevantForHorizon: false }], questionAskedCount: 3, lastAskedAt: 't1' },
+      ];
+      vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+        if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+        if (path === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions });
+        return Promise.resolve({});
+      });
+      renderPage();
+      const row = await screen.findByTestId('candlestick-qa-top-question-0');
+
+      await userEvent.click(row);
+
+      const badge = screen.getByText('Three Inside Up');
+      expect(badge).toHaveClass('bg-danger/10', 'text-danger');
     });
 
     test('shows a friendly empty state when no questions have been asked yet', async () => {

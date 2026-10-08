@@ -31,7 +31,7 @@ export interface AskResult {
 
 const SEARCH_TOOL: Anthropic.Tool = {
   name: 'search_question_answer_entries',
-  description: "Search the curated candlestick-pattern knowledge base for entries relevant to the user's question, scoped to their chosen trading horizon. Call this one or more times with different search terms before deciding whether you can answer.",
+  description: "Search the curated candlestick-pattern knowledge base for entries relevant to the user's question. Call this one or more times with different search terms before deciding whether you can answer.",
   input_schema: {
     type: 'object',
     properties: {
@@ -88,12 +88,13 @@ const UNABLE_TO_ANSWER_TOOL: Anthropic.Tool = {
 // or a buy/sell call on a specific stock) - Architecture.md's Platform Objective posture
 // ("never gives personalized financial advice") applied to this feature specifically, since an
 // open-ended LLM is a materially higher drift risk than this app's existing static content.
-const SYSTEM_PROMPT = `You are a candlestick pattern education assistant for a self-directed retail stock investing platform. You answer questions ONLY about candlestick chart pattern recognition and interpretation (e.g. Doji, Hammer, Engulfing) - never personalized financial advice, and never a recommendation to buy or sell any specific stock. You must answer strictly using tool results, scoped to the user's chosen trading horizon (dayTrading, mediumTerm, or longTerm) - never from your own general knowledge. You have two tools for finding information: filter_patterns_by_metadata for structural/factual questions about which patterns match given properties (signal type, directional bias, gap requirement, trend context, name/alias), and search_question_answer_entries for interpretive questions about a specific pattern's meaning, reliability, or usage. Use either or both as needed before calling a terminal tool. If the question is not about candlestick patterns at all, or neither tool turns up a good answer, call unable_to_answer rather than guessing.`;
+const SYSTEM_PROMPT = `You are a candlestick pattern education assistant for a self-directed retail stock investing platform. You answer questions ONLY about candlestick chart pattern recognition and interpretation (e.g. Doji, Hammer, Engulfing) - never personalized financial advice, and never a recommendation to buy or sell any specific stock. You must answer strictly using tool results - never from your own general knowledge. The user has indicated a trading-horizon preference (dayTrading, mediumTerm, longTerm, or no particular preference) for context - you may mention it if relevant, but never use it to exclude an otherwise-correct pattern from your answer; every pattern the tools return is a valid answer regardless of horizon. You have two tools for finding information: filter_patterns_by_metadata for structural/factual questions about which patterns match given properties (signal type, directional bias, gap requirement, trend context, name/alias), and search_question_answer_entries for interpretive questions about a specific pattern's meaning, reliability, or usage. Use either or both as needed before calling a terminal tool. If the question is not about candlestick patterns at all, or neither tool turns up a good answer, call unable_to_answer rather than guessing.`;
 
 export async function ask(question: string, horizon: Horizon, apiKey: string): Promise<AskResult> {
   const model = (await getConfigValue('candlestick_question_answer_llm_model')) ?? DEFAULT_MODEL;
+  const horizonForPrompt = horizon === 'all' ? 'no particular preference' : horizon;
   const messages: Anthropic.MessageParam[] = [
-    { role: 'user', content: `Trading horizon: ${horizon}\n\nQuestion: ${question}` },
+    { role: 'user', content: `Trading horizon: ${horizonForPrompt}\n\nQuestion: ${question}` },
   ];
 
   let totalInputTokens = 0;
@@ -169,7 +170,6 @@ export async function ask(question: string, horizon: Horizon, apiKey: string): P
             complexityTier: input.complexity_tier as ComplexityTier | undefined,
             requiresGap: input.requires_gap,
             trendContext: input.trend_context as TrendContext | undefined,
-            horizon,
           });
           toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(results) });
         } catch (err) {
@@ -187,7 +187,6 @@ export async function ask(question: string, horizon: Horizon, apiKey: string): P
       const input = block.input as { query?: string; tier?: number };
       const results = await candlestickQuestionAnswer.searchEntries({
         query: input.query,
-        horizon,
         tier: input.tier as Tier | undefined,
       });
       toolResults.push({

@@ -17,6 +17,7 @@ jest.mock('../src/services/candlestickQuestionAnswer.service', () => ({
   createEntry: jest.fn(),
   setEntryStatus: jest.fn(),
   getEntryById: jest.fn(),
+  getPatternHorizonRelevance: jest.fn(),
 }));
 jest.mock('../src/services/candlestickQuestionAnswerAsk.service', () => ({ ask: jest.fn() }));
 jest.mock('../src/services/candlestickQuestionAnswerRateLimit.service', () => ({
@@ -64,6 +65,7 @@ const mockCreatePattern = candlestickQuestionAnswer.createPattern as jest.Mock;
 const mockCreateEntry = candlestickQuestionAnswer.createEntry as jest.Mock;
 const mockSetEntryStatus = candlestickQuestionAnswer.setEntryStatus as jest.Mock;
 const mockGetEntryById = candlestickQuestionAnswer.getEntryById as jest.Mock;
+const mockGetPatternHorizonRelevance = candlestickQuestionAnswer.getPatternHorizonRelevance as jest.Mock;
 const mockAsk = askService.ask as jest.Mock;
 const mockCheckRateLimit = rateLimitService.checkRateLimit as jest.Mock;
 const mockRecordRateLimitedCall = rateLimitService.recordRateLimitedCall as jest.Mock;
@@ -90,6 +92,10 @@ beforeEach(() => {
   mockCreateEntry.mockReset();
   mockSetEntryStatus.mockReset();
   mockGetEntryById.mockReset();
+  // Default: every pattern name maps to "nothing to say" (null) unless a test configures a real
+  // relevance map - matches getPatternHorizonRelevance's own real behavior for an unrecognized
+  // name, and keeps tests that don't care about relevance values uncluttered.
+  mockGetPatternHorizonRelevance.mockReset().mockResolvedValue({});
   mockAsk.mockReset();
   mockCheckRateLimit.mockReset();
   mockRecordRateLimitedCall.mockReset().mockResolvedValue(undefined);
@@ -116,16 +122,10 @@ describe('GET /candlestick-question-answer/entries', () => {
   test('200 with the permission, returning curated entries', async () => {
     grantPermission();
     mockSearchEntries.mockResolvedValueOnce([{ id: 'e1', questionText: 'Q' }]);
-    const res = await request(app).get('/candlestick-question-answer/entries?horizon=dayTrading').set('Cookie', authCookie);
+    const res = await request(app).get('/candlestick-question-answer/entries?query=doji').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(res.body.entries).toEqual([{ id: 'e1', questionText: 'Q' }]);
-    expect(mockSearchEntries).toHaveBeenCalledWith(expect.objectContaining({ horizon: 'dayTrading' }));
-  });
-
-  test('400 on an invalid horizon value', async () => {
-    grantPermission();
-    const res = await request(app).get('/candlestick-question-answer/entries?horizon=nonsense').set('Cookie', authCookie);
-    expect(res.status).toBe(400);
+    expect(mockSearchEntries).toHaveBeenCalledWith({ query: 'doji', tier: undefined });
   });
 });
 
@@ -143,21 +143,27 @@ describe('POST /candlestick-question-answer/ask', () => {
     expect(res.status).toBe(400);
   });
 
-  test('a cache hit answers directly - no permission check, no rate limit, no LLM, no template', async () => {
+  test('a cache hit answers directly - no permission check, no rate limit, no LLM, no template, no re-enrichment', async () => {
     grantPermission();
-    mockFindCachedAnswer.mockResolvedValueOnce({ answerText: 'A Doji signals indecision.', matchedPatternNames: ['Doji'] });
+    // The cache row already carries its enriched shape from when it was first written - a hit
+    // replays it verbatim, never re-calling getPatternHorizonRelevance.
+    mockFindCachedAnswer.mockResolvedValueOnce({
+      answerText: 'A Doji signals indecision.', matchedPatternNames: [{ patternName: 'Doji', relevantForHorizon: true }],
+    });
 
     const res = await request(app).post('/candlestick-question-answer/ask').set('Cookie', authCookie).send({ question: 'What is a Doji?', horizon: 'dayTrading' });
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      outcome: 'answered_from_kb', answer: 'A Doji signals indecision.', matchedEntryIds: [], matchedPatterns: ['Doji'], reason: null,
+      outcome: 'answered_from_kb', answer: 'A Doji signals indecision.', matchedEntryIds: [],
+      matchedPatterns: [{ patternName: 'Doji', relevantForHorizon: true }], reason: null,
     });
     expect(mockGetUserPermissions).not.toHaveBeenCalled();
     expect(mockCheckRateLimit).not.toHaveBeenCalled();
     expect(mockAsk).not.toHaveBeenCalled();
     expect(mockMatchTemplate).not.toHaveBeenCalled();
     expect(mockRecordAskedQuestion).not.toHaveBeenCalled();
+    expect(mockGetPatternHorizonRelevance).not.toHaveBeenCalled();
   });
 
   describe('when llm_calling is granted', () => {
@@ -178,17 +184,20 @@ describe('POST /candlestick-question-answer/ask', () => {
         llmCallDetails: { llm_tokens_in: 100, llm_tokens_out: 20 },
       });
       mockGetEntryById.mockResolvedValueOnce({ id: 'e1', patternName: 'Doji' });
+      mockGetPatternHorizonRelevance.mockResolvedValueOnce({ Doji: false });
 
       const res = await request(app).post('/candlestick-question-answer/ask').set('Cookie', authCookie).send({ question: 'What is a Doji?', horizon: 'dayTrading' });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        outcome: 'answered_from_kb', answer: 'A Doji signals indecision.', matchedEntryIds: ['e1'], matchedPatterns: ['Doji'], reason: null,
+        outcome: 'answered_from_kb', answer: 'A Doji signals indecision.', matchedEntryIds: ['e1'],
+        matchedPatterns: [{ patternName: 'Doji', relevantForHorizon: false }], reason: null,
       });
+      expect(mockGetPatternHorizonRelevance).toHaveBeenCalledWith(['Doji'], 'dayTrading');
       expect(mockRecordRateLimitedCall).toHaveBeenCalledWith('user-1');
       expect(mockRecordAskedQuestion).toHaveBeenCalledWith(expect.objectContaining({
         questionText: 'What is a Doji?', horizon: 'dayTrading', answerText: 'A Doji signals indecision.',
-        matchedPatternNames: ['Doji'], status: 'Answered',
+        matchedPatternNames: [{ patternName: 'Doji', relevantForHorizon: false }], status: 'Answered',
       }));
       expect(mockGetDecryptedKey).toHaveBeenCalledWith('user-1', 'anthropic');
       expect(mockAsk).toHaveBeenCalledWith('What is a Doji?', 'dayTrading', 'test-anthropic-key');
@@ -219,10 +228,12 @@ describe('POST /candlestick-question-answer/ask', () => {
         llmCallDetails: { llm_tokens_in: 100, llm_tokens_out: 20 },
       });
 
+      mockGetPatternHorizonRelevance.mockResolvedValueOnce({ 'Upside Tasuki Gap': true });
+
       const res = await request(app).post('/candlestick-question-answer/ask').set('Cookie', authCookie).send({ question: 'Which bullish continuation pattern needs a gap?', horizon: 'mediumTerm' });
 
       expect(res.status).toBe(200);
-      expect(res.body.matchedPatterns).toEqual(['Upside Tasuki Gap']);
+      expect(res.body.matchedPatterns).toEqual([{ patternName: 'Upside Tasuki Gap', relevantForHorizon: true }]);
       // No entry ids resolved, so getEntryById is never called.
       expect(mockGetEntryById).not.toHaveBeenCalled();
     });
@@ -252,17 +263,23 @@ describe('POST /candlestick-question-answer/ask', () => {
         requiresGap: false, trendContext: 'prior-downtrend', mirrorPatternName: 'Shooting Star',
       };
       mockMatchTemplate.mockResolvedValueOnce({ matches: [hammerMatch], responseMode: 'single', answerTemplate: '{patternName} is {directionalBias}.' });
+      mockGetPatternHorizonRelevance.mockResolvedValueOnce({ Hammer: true });
 
       const res = await request(app).post('/candlestick-question-answer/ask').set('Cookie', authCookie).send({ question: 'Is Hammer bullish or bearish?', horizon: 'dayTrading' });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        outcome: 'answered_from_kb', answer: 'Hammer is bullish.', matchedEntryIds: [], matchedPatterns: ['Hammer'], reason: null,
+        outcome: 'answered_from_kb', answer: 'Hammer is bullish.', matchedEntryIds: [],
+        matchedPatterns: [{ patternName: 'Hammer', relevantForHorizon: true }], reason: null,
       });
+      expect(mockGetPatternHorizonRelevance).toHaveBeenCalledWith(['Hammer'], 'dayTrading');
       expect(mockCheckRateLimit).not.toHaveBeenCalled();
       expect(mockAsk).not.toHaveBeenCalled();
       expect(mockRecordRateLimitedCall).not.toHaveBeenCalled();
-      expect(mockRecordAskedQuestion).toHaveBeenCalledWith(expect.objectContaining({ status: 'Answered', answerText: 'Hammer is bullish.' }));
+      expect(mockRecordAskedQuestion).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'Answered', answerText: 'Hammer is bullish.',
+        matchedPatternNames: [{ patternName: 'Hammer', relevantForHorizon: true }],
+      }));
     });
 
     test('no template match at all results in unable_to_answer, still cached as Unable_To_Answer', async () => {
@@ -402,7 +419,7 @@ describe('GET /candlestick-question-answer/top-questions', () => {
   test('200 with the permission, returning the ranked list', async () => {
     grantPermission();
     mockListTopQuestions.mockResolvedValueOnce([
-      { questionText: 'What is a Hammer?', answerText: 'A Hammer is bullish.', matchedPatternNames: ['Hammer'], questionAskedCount: 42, lastAskedAt: 't1' },
+      { questionText: 'What is a Hammer?', answerText: 'A Hammer is bullish.', matchedPatternNames: [{ patternName: 'Hammer', relevantForHorizon: true }], questionAskedCount: 42, lastAskedAt: 't1' },
     ]);
     const res = await request(app).get('/candlestick-question-answer/top-questions').set('Cookie', authCookie);
     expect(res.status).toBe(200);

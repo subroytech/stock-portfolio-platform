@@ -63,8 +63,10 @@ describe('ask', () => {
       reason: null,
       llmCallDetails: { llm_tokens_in: 250, llm_tokens_out: 50 }, // summed across both turns
     });
-    // search_question_answer_entries scopes to the caller's chosen horizon automatically.
-    expect(mockSearchEntries).toHaveBeenCalledWith({ query: 'doji', horizon: 'dayTrading', tier: undefined });
+    // horizon is no longer passed to searchEntries (2026-10-08) - it stopped being an
+    // exclusionary filter; horizon relevance is now computed separately, after an answer
+    // resolves, not baked into the search itself.
+    expect(mockSearchEntries).toHaveBeenCalledWith({ query: 'doji', tier: undefined });
   });
 
   test('resolves a structural question via filter_patterns_by_metadata alone, surfacing matched_pattern_names with no entry_ids', async () => {
@@ -93,7 +95,7 @@ describe('ask', () => {
     });
     expect(mockFilterPatternsByMetadata).toHaveBeenCalledWith({
       patternNameOrSynonym: undefined, signalType: 'continuation', directionalBias: undefined,
-      complexityTier: undefined, requiresGap: true, trendContext: undefined, horizon: 'mediumTerm',
+      complexityTier: undefined, requiresGap: true, trendContext: undefined,
     });
     expect(mockSearchEntries).not.toHaveBeenCalled();
   });
@@ -203,5 +205,18 @@ describe('ask', () => {
     await ask('Q', 'dayTrading', 'test-anthropic-key');
 
     expect(mockCreateMessage.mock.calls[0][1].model).toBe('claude-opus-5');
+  });
+
+  test('"all" horizon is phrased as "no particular preference" in the first message, not sent literally', async () => {
+    mockCreateMessage.mockResolvedValueOnce({
+      content: [{ type: 'tool_use', id: 't1', name: 'unable_to_answer', input: { reason: 'n/a' } }],
+      usage: usage(5, 5),
+    });
+
+    await ask('Q', 'all', 'test-anthropic-key');
+
+    const firstMessage = mockCreateMessage.mock.calls[0][1].messages[0].content;
+    expect(firstMessage).toContain('no particular preference');
+    expect(firstMessage).not.toContain('Trading horizon: all');
   });
 });

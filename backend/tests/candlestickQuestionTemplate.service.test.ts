@@ -37,19 +37,22 @@ describe('matchTemplate', () => {
   test('returns null when no active template regex matches the question at all', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [BIAS_LOOKUP_ROW] });
 
-    const result = await svc.matchTemplate('What is the weather today?', 'dayTrading');
+    const result = await svc.matchTemplate('What is the weather today?');
 
     expect(result).toBeNull();
     expect(mockFilterPatternsByMetadata).not.toHaveBeenCalled();
   });
 
-  test('a matching template extracts the capture group and calls filterPatternsByMetadata with it plus horizon', async () => {
+  // horizon is no longer passed to filterPatternsByMetadata (2026-10-08) - it stopped being an
+  // exclusionary filter; the controller annotates horizon relevance separately, after a match is
+  // already resolved, via getPatternHorizonRelevance().
+  test('a matching template extracts the capture group and calls filterPatternsByMetadata with it, without horizon', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [BIAS_LOOKUP_ROW] });
     mockFilterPatternsByMetadata.mockResolvedValueOnce([HAMMER_MATCH]);
 
-    const result = await svc.matchTemplate('Is Hammer bullish or bearish?', 'mediumTerm');
+    const result = await svc.matchTemplate('Is Hammer bullish or bearish?');
 
-    expect(mockFilterPatternsByMetadata).toHaveBeenCalledWith({ patternNameOrSynonym: 'Hammer', horizon: 'mediumTerm' });
+    expect(mockFilterPatternsByMetadata).toHaveBeenCalledWith({ patternNameOrSynonym: 'Hammer' });
     expect(result).toEqual({ matches: [HAMMER_MATCH], responseMode: 'single', answerTemplate: '{patternName} is {directionalBias}.' });
   });
 
@@ -57,16 +60,16 @@ describe('matchTemplate', () => {
     mockQuery.mockResolvedValueOnce({ rows: [BIAS_LOOKUP_ROW] });
     mockFilterPatternsByMetadata.mockResolvedValueOnce([HAMMER_MATCH]);
 
-    await svc.matchTemplate('IS HAMMER BULLISH OR BEARISH', 'dayTrading');
+    await svc.matchTemplate('IS HAMMER BULLISH OR BEARISH');
 
-    expect(mockFilterPatternsByMetadata).toHaveBeenCalledWith({ patternNameOrSynonym: 'HAMMER', horizon: 'dayTrading' });
+    expect(mockFilterPatternsByMetadata).toHaveBeenCalledWith({ patternNameOrSynonym: 'HAMMER' });
   });
 
   test('a regex match whose resolved filters find zero patterns still returns a (empty) result, not null', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [BIAS_LOOKUP_ROW] });
     mockFilterPatternsByMetadata.mockResolvedValueOnce([]);
 
-    const result = await svc.matchTemplate('Is Hamerr bullish or bearish?', 'dayTrading');
+    const result = await svc.matchTemplate('Is Hamerr bullish or bearish?');
 
     expect(result).toEqual({ matches: [], responseMode: 'single', answerTemplate: '{patternName} is {directionalBias}.' });
   });
@@ -75,15 +78,15 @@ describe('matchTemplate', () => {
     mockQuery.mockResolvedValueOnce({ rows: [SIGNAL_TYPE_LIST_ROW] });
     mockFilterPatternsByMetadata.mockResolvedValueOnce([HAMMER_MATCH]);
 
-    await svc.matchTemplate('Which patterns are reversal signals?', 'longTerm');
+    await svc.matchTemplate('Which patterns are reversal signals?');
 
-    expect(mockFilterPatternsByMetadata).toHaveBeenCalledWith({ signalType: 'reversal', horizon: 'longTerm' });
+    expect(mockFilterPatternsByMetadata).toHaveBeenCalledWith({ signalType: 'reversal' });
   });
 
   test('only tests templates with status active', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [BIAS_LOOKUP_ROW] });
 
-    await svc.matchTemplate('anything', 'dayTrading');
+    await svc.matchTemplate('anything');
 
     const [sql] = mockQuery.mock.calls[0];
     expect(sql).toContain(`status = 'active'`);
@@ -101,7 +104,7 @@ describe('matchTemplate', () => {
       mockQuery.mockResolvedValueOnce({ rows: [BIAS_LOOKUP_ROW] });
       mockFilterPatternsByMetadata.mockResolvedValueOnce([DOJI, DOJI_DRAGONFLY]);
 
-      const result = await svc.matchTemplate('Is doji bullish or bearish?', 'dayTrading');
+      const result = await svc.matchTemplate('Is doji bullish or bearish?');
 
       expect(result).toEqual({ matches: [DOJI], responseMode: 'single', answerTemplate: '{patternName} is {directionalBias}.' });
     });
@@ -110,7 +113,7 @@ describe('matchTemplate', () => {
       mockQuery.mockResolvedValueOnce({ rows: [BIAS_LOOKUP_ROW] });
       mockFilterPatternsByMetadata.mockResolvedValueOnce([DOJI_DRAGONFLY, { ...HAMMER_MATCH, patternName: 'Doji-Gravestone' }]);
 
-      const result = await svc.matchTemplate('Is doji bullish or bearish?', 'dayTrading');
+      const result = await svc.matchTemplate('Is doji bullish or bearish?');
 
       expect(result!.matches).toHaveLength(2);
     });
@@ -119,7 +122,7 @@ describe('matchTemplate', () => {
       mockQuery.mockResolvedValueOnce({ rows: [SIGNAL_TYPE_LIST_ROW] });
       mockFilterPatternsByMetadata.mockResolvedValueOnce([DOJI, DOJI_DRAGONFLY]);
 
-      const result = await svc.matchTemplate('Which patterns are reversal signals?', 'dayTrading');
+      const result = await svc.matchTemplate('Which patterns are reversal signals?');
 
       expect(result!.matches).toHaveLength(2);
     });
