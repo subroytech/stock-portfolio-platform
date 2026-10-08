@@ -2115,17 +2115,37 @@ Phase 1/2 build logs above.
   `m_question_template` list), so a user on a role without `llm_calling` has some discoverability
   into what the deterministic cascade can actually answer instead of guessing phrasings. Explicitly
   scoped out of that round to land the template additions first.
-- **E2E suite's signup step is out of date with the real Self-Registration form — identified
-  2026-10-08, not yet fixed.** `e2e/steps/auth.steps.ts`'s signup step only fills
+- **E2E suite's signup step was out of date with the real Self-Registration form — identified
+  2026-10-08, fixed same day.** `e2e/steps/auth.steps.ts`'s signup step only filled
   `signup-email`/`signup-password`, but the real `SignupPage.tsx` (see "Self-Registration,
   Password Policy & Security-Question Recovery" above) also requires first/last name, a
-  7-rule-compliant password, and 5 distinct security-question picks before `signup-submit`
+  policy-compliant password, and 5 distinct security-question picks before `signup-submit`
   ever enables — so every e2e scenario that starts from signup (`golden-path`,
-  `tab-navigation`'s both scenarios) times out waiting for a button that can never become
-  clickable. Not caught earlier because `e2e`'s CI job has been `continue-on-error: true` this
-  whole time ("non-blocking until proven stable") — confirmed via a real CI run that `backend`/
-  `analysis-service` are unaffected and the overall PR status is still green. Fix needs the
-  signup step updated to fill every mandatory field the current form actually requires.
+  `tab-navigation`'s both scenarios) timed out waiting for a button that could never become
+  clickable. Fixed by filling every mandatory field (`testUser` fixture gained `firstName`/
+  `lastName` chosen to not overlap any substring of its own password; security-question slots
+  filled by selecting each dropdown's first available option in turn, which always lands on 5
+  distinct questions since each slot narrows to exclude ones already picked elsewhere) and
+  waiting for the post-submit `navigate('/')` to actually land before proceeding. **A second,
+  non-obvious issue surfaced fixing the first**: a freshly self-registered account is created
+  `'pending'`/roleless (per the same feature) and would still "land" at `/` — just rendering
+  `PendingReviewPage` there instead of the dashboard, since both share that route under
+  `ProtectedRoute` — so the old URL-only assertion in the `Then` step was a latent false-pass
+  waiting to happen the moment signup-submit itself got unstuck. Fixed with a new
+  `e2e/scripts/activate-user.ts` (same direct-`Pool` pattern as `cleanup-user.ts`/
+  `grant-role.ts`) that sets `status = 'active'` and assigns the real migration-seeded `'user'`
+  role (not a throwaway E2E-only one, since the golden path needs `'user'`'s real default
+  `portfolio_upload:legacy` grant) immediately after signup, followed by a hard `page.reload()`
+  (`useSession()` has `staleTime: Infinity`, so only a reload — not a refetch — picks up the
+  DB-side change); the `Then` step also now asserts `pending-review-banner` is not visible, as a
+  direct regression guard against the same false-pass class. Not caught earlier because `e2e`'s
+  CI job has been `continue-on-error: true` this whole time. **Verification note**: a full local
+  `npm test` run was blocked by this machine's own already-running dev servers on ports
+  3000/4000 (Playwright's `reuseExistingServer` reused them, but they're bound to the regular
+  dev database, not `.env.e2e`'s dedicated test database, so `activate-user.ts` couldn't find
+  the user signup had just created there) — deliberately not killed, since they weren't started
+  this session and might be in active use. `tsc --noEmit` is clean; real confirmation is the
+  next CI run on this branch, which boots fresh servers with no such conflict.
 - **Candlestick pattern backlog — fully closed, 2026-10-03.** Every item identified in
   `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md` Section 13 (Tweezer Bottom/Top,
   Bullish/Bearish Kicking, Bullish/Bearish Abandoned Baby, Upside/Downside Tasuki Gap, and finally
