@@ -1981,8 +1981,69 @@ panel's button read "Tutorial →"; the page rendered as Browse Curated Question
 to Ask Your Own Question above Popular Questions (column 2). Throwaway account cleaned up
 afterward.
 
+## Question Templates — 7 More + a Substring-Collision Fix ✅ Done
+
+Built 2026-10-08, closing a real usability report: a role without `candlestick_question_answer
+:llm_calling` got "unable to answer" for almost every question, since the original 3 templates
+(Phase 2) only matched 3 very specific phrasings. Confirmed live before building anything -
+replayed the 3 existing templates against their own exact phrasing (all worked) vs. close
+variants like "What does Hammer mean?"/"Hammer bullish or bearish" (both failed, by design, not
+a bug) - the real gap was coverage, not correctness.
+
+**A second, genuinely separate bug found during that same investigation**: `patternNameOrSynonym`
+matches via `ILIKE '%...%'` (correct for the LLM tool's own fuzzy search), so "Doji" also matches
+"Doji-Dragonfly"/"Doji-Gravestone"/"Doji-LongLegged" - 4 rows where `single` mode needs exactly
+1, silently failing a perfectly well-formed question ("Is Doji bullish or bearish?"). Fixed in
+`matchTemplate()`: when a `single`-mode match returns more than one row, narrow to an exact
+case-insensitive pattern-name match among them before giving up - scoped to templates only, the
+LLM tool's own broader substring matching is untouched. "Doji" is the only colliding name in the
+current pattern set, confirmed via a full pairwise scan.
+
+**7 new templates** (migration `060`), reusing `filterPatternsByMetadata()`'s existing structural
+fields with zero new query logic: `pattern_description` ("what does X mean"/"describe X"/"tell
+me about X", one regex with 3 alternated capture groups all mapped to the same filter field),
+`signal_type_lookup`, `gap_requirement_lookup`, `trend_context_lookup` (three single-pattern
+lookups exposing `requiresGap`/`trendContext` for the first time), `bias_lookup_relaxed` (drops
+the original `bias_lookup`'s required "is"/"?"), and `bias_list`/`gap_required_list` (mirroring
+`signal_type_list`'s own list-mode shape for two more axes). 10 templates total.
+
+**Real bug caught live, not by unit tests, again**: the first migration write made the exact
+same dollar-quoting mistake migration `057`'s own header warns about - every new `regex_pattern`
+ended in a bare `$re$` closing tag with no literal `$` anchor before it (needed `\??$$re$`, not
+`\??$re$`), so all 7 templates silently lost their end-of-string anchor. Caught by inspecting the
+applied migration file directly before testing, not by the live tests themselves (which would
+likely still have passed for most phrasings, just with the same lazy-capture under-matching risk
+documented in `057`). Fixed in the migration file for future fresh environments, plus a
+corrective `UPDATE` against the already-applied live rows (same resolution pattern as `057`'s
+own live mirror_lookup fix).
+
+21 backend tests (3 new describe-block cases for the Doji-collision narrowing), 1030 backend
+tests total, `tsc` clean. **Live-verified against the real dev DB and running server** with a
+throwaway `user`-role account (holding `:ask` but not `:llm_calling`, the same real-world shape
+that surfaced the original report): all 7 new templates resolved correctly ("What does Hammer
+mean?" → a full description sentence; "Does Piercing Line require a gap?" → "does require a
+gap."; "Which patterns are bullish?" → 8 real pattern names; etc.), "Is Doji bullish or bearish?"
+now resolves instead of failing, and a deliberately horizon-mismatched question ("Tell me about
+Morning Star" under `dayTrading`, a medium/long-term-only pattern) correctly still returned
+`unable_to_answer` - confirming the existing per-request horizon filter (shared by every
+template, old and new) is working as designed, not broken by this round. Throwaway account and
+test cache rows cleaned up afterward.
+
+**Known minor cosmetic nit, not fixed**: `pattern_description`'s answer template reads "a
+Advanced-candle pattern" (should be "an") for patterns whose `complexityTier` starts with a
+vowel - pure grammar, not worth a schema change for.
+
+**Deferred, per explicit direction**: an "(i)" info popover next to the Ask form's own "Question"
+label, surfacing which question shapes are currently recognized - not built this round.
+
 ## Next Up
 
+- **Question Templates "(i)" info popover — deferred 2026-10-08, not yet built.** Per explicit
+  direction while scoping the 7-new-templates round above: an info icon next to the Ask form's
+  "Question" label, showing a pop-up of the currently-recognized question shapes (the growing
+  `m_question_template` list), so a user on a role without `llm_calling` has some discoverability
+  into what the deterministic cascade can actually answer instead of guessing phrasings. Explicitly
+  scoped out of that round to land the template additions first.
 - **E2E suite's signup step is out of date with the real Self-Registration form — identified
   2026-10-08, not yet fixed.** `e2e/steps/auth.steps.ts`'s signup step only fills
   `signup-email`/`signup-password`, but the real `SignupPage.tsx` (see "Self-Registration,

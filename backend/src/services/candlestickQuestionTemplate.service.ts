@@ -109,9 +109,24 @@ export async function matchTemplate(question: string, horizon: Horizon): Promise
       if (value !== undefined) filters[fieldName] = value.trim();
     }
 
-    const matches = await candlestickQuestionAnswer.filterPatternsByMetadata(
+    let matches = await candlestickQuestionAnswer.filterPatternsByMetadata(
       filters as Parameters<typeof candlestickQuestionAnswer.filterPatternsByMetadata>[0],
     );
+
+    // Real bug found live: patternNameOrSynonym matches via ILIKE '%...%' (correct for the LLM
+    // tool's own fuzzy search), so a name that's a substring of another pattern's name - e.g.
+    // "Doji" inside "Doji-Dragonfly"/"Doji-Gravestone"/"Doji-LongLegged" - returns multiple rows
+    // and silently fails 'single' mode's exactly-one-match requirement. Narrow to an exact
+    // case-insensitive name/synonym match when the raw extracted text names one unambiguously,
+    // rather than giving up just because the substring search was too broad. Only applies to
+    // 'single' mode - 'list' mode's whole point is returning every match, so an ambiguous
+    // substring there is still meaningful, not a defect.
+    if (template.response_mode === 'single' && matches.length > 1 && typeof filters.patternNameOrSynonym === 'string') {
+      const needle = filters.patternNameOrSynonym.toLowerCase();
+      const exact = matches.filter((m) => m.patternName.toLowerCase() === needle);
+      if (exact.length === 1) matches = exact;
+    }
+
     return { matches, responseMode: template.response_mode as ResponseMode, answerTemplate: template.answer_template };
   }
   return null;

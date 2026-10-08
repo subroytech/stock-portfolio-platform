@@ -88,6 +88,42 @@ describe('matchTemplate', () => {
     const [sql] = mockQuery.mock.calls[0];
     expect(sql).toContain(`status = 'active'`);
   });
+
+  // Real bug found live (2026-10-08): patternNameOrSynonym's ILIKE '%...%' substring match
+  // returns every pattern whose name CONTAINS the extracted text, not just an exact match - e.g.
+  // "Doji" also matches "Doji-Dragonfly"/"Doji-Gravestone"/"Doji-LongLegged", silently breaking
+  // 'single' mode's exactly-one-match requirement for a perfectly well-formed question.
+  describe('single-mode name-collision narrowing', () => {
+    const DOJI: PatternMetadataMatch = { ...HAMMER_MATCH, patternName: 'Doji' };
+    const DOJI_DRAGONFLY: PatternMetadataMatch = { ...HAMMER_MATCH, patternName: 'Doji-Dragonfly' };
+
+    test('narrows multiple substring matches down to the one exact (case-insensitive) name match', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [BIAS_LOOKUP_ROW] });
+      mockFilterPatternsByMetadata.mockResolvedValueOnce([DOJI, DOJI_DRAGONFLY]);
+
+      const result = await svc.matchTemplate('Is doji bullish or bearish?', 'dayTrading');
+
+      expect(result).toEqual({ matches: [DOJI], responseMode: 'single', answerTemplate: '{patternName} is {directionalBias}.' });
+    });
+
+    test('leaves multiple matches alone (still fails single mode) when none is an exact name match', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [BIAS_LOOKUP_ROW] });
+      mockFilterPatternsByMetadata.mockResolvedValueOnce([DOJI_DRAGONFLY, { ...HAMMER_MATCH, patternName: 'Doji-Gravestone' }]);
+
+      const result = await svc.matchTemplate('Is doji bullish or bearish?', 'dayTrading');
+
+      expect(result!.matches).toHaveLength(2);
+    });
+
+    test('does not narrow list-mode results, even when the question happened to extract a name-like value', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [SIGNAL_TYPE_LIST_ROW] });
+      mockFilterPatternsByMetadata.mockResolvedValueOnce([DOJI, DOJI_DRAGONFLY]);
+
+      const result = await svc.matchTemplate('Which patterns are reversal signals?', 'dayTrading');
+
+      expect(result!.matches).toHaveLength(2);
+    });
+  });
 });
 
 describe('formatTemplateAnswer', () => {
