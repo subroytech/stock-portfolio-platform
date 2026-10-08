@@ -1983,6 +1983,17 @@ afterward.
 
 ## Next Up
 
+- **E2E suite's signup step is out of date with the real Self-Registration form — identified
+  2026-10-08, not yet fixed.** `e2e/steps/auth.steps.ts`'s signup step only fills
+  `signup-email`/`signup-password`, but the real `SignupPage.tsx` (see "Self-Registration,
+  Password Policy & Security-Question Recovery" above) also requires first/last name, a
+  7-rule-compliant password, and 5 distinct security-question picks before `signup-submit`
+  ever enables — so every e2e scenario that starts from signup (`golden-path`,
+  `tab-navigation`'s both scenarios) times out waiting for a button that can never become
+  clickable. Not caught earlier because `e2e`'s CI job has been `continue-on-error: true` this
+  whole time ("non-blocking until proven stable") — confirmed via a real CI run that `backend`/
+  `analysis-service` are unaffected and the overall PR status is still green. Fix needs the
+  signup step updated to fill every mandatory field the current form actually requires.
 - **Candlestick pattern backlog — fully closed, 2026-10-03.** Every item identified in
   `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md` Section 13 (Tweezer Bottom/Top,
   Bullish/Bearish Kicking, Bullish/Bearish Abandoned Baby, Upside/Downside Tasuki Gap, and finally
