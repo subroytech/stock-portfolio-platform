@@ -3,5 +3,6 @@ node_modules/
 *.log
 .DS_Store
 dist/
+*.tsbuildinfo
 .claude/settings.local.json
 .claude/scheduled_tasks.lock

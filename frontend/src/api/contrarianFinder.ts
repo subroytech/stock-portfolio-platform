@@ -35,6 +35,14 @@ export interface BatchScanInput {
   maxBatches?: number;
   qualityPreset?: 'standard' | 'relaxed';
   scanDays?: number;
+  // "Run Scan (+ Mkt Cap)" - piggybacks a full ("all", not just missing)
+  // m_tickers name/sector/market-cap refresh onto this same scan/batch.
+  updateAllTickerData?: boolean;
+}
+
+interface TickerRefreshBatchResult {
+  updated: number;
+  skipped: number;
 }
 
 interface BatchScanResponse {
@@ -42,6 +50,18 @@ interface BatchScanResponse {
   totalBatches: number;
   universeSize: number;
   results: ScanResult[];
+  tickerRefresh?: TickerRefreshBatchResult;
+  // Id of the shared tx_shared_contrarian_run row this batch just started or appended to -
+  // threaded back into the next batch's request body so every batch of one run updates the same
+  // row (resilient incremental persistence, 2026-09-19). Undefined if the backend's own
+  // persistence step failed - the scan itself still succeeded, just without a durability write
+  // for that particular batch.
+  runRowId?: string;
+}
+
+export interface TickerRefreshProgress {
+  completed: number;
+  total: number;
 }
 
 // The parameters a scan actually ran with — captured once when the scan
@@ -63,6 +83,32 @@ export interface BatchScanData {
   scanned: number;
   results: ScanResult[];
   params: RunParams;
+  // ISO timestamp of when this run finished — set client-side the moment a
+  // locally-run scan reaches 'done', or sourced from the server record when
+  // populated via useLastScanFallback below. Optional only for backward
+  // compatibility with whatever's already sitting in a user's sessionStorage
+  // from before this field existed.
+  completedAt?: string;
+}
+
+// Mirrors the backend's LastScanRecord (contrarianFinder.service.ts) — the
+// shared, server-persisted "last completed scan," visible to every user
+// regardless of who ran it.
+export interface LastScanRecord {
+  completedAt: string;
+  universeSize: number;
+  scanned: number;
+  params: RunParams;
+  results: ScanResult[];
+}
+
+// A run's own intended total isn't the raw universe size - a deliberately-scoped smaller run
+// (e.g. maxBatches: 2) is just as "complete" once it covers what it set out to, not the whole
+// universe. Comparing scanned against this (not universeSize directly) is what lets "X of N"
+// tell partial and complete apart correctly, with no separate status column needed (2026-09-19).
+export function getRunCompleteness(params: RunParams, scanned: number, universeSize: number): { expectedTotal: number; isComplete: boolean } {
+  const expectedTotal = Math.min(universeSize, params.maxBatches * params.batchSize);
+  return { expectedTotal, isComplete: scanned >= expectedTotal };
 }
 
 export type BatchScanPhase = 'idle' | 'scanning' | 'waiting' | 'done';
@@ -135,6 +181,79 @@ function persistScanData(data: BatchScanData | undefined): void {
   }
 }
 
+interface LastScanResponse {
+  lastScan: LastScanRecord | null;
+}
+
+// GET /contrarian-finder/last-scan - the shared server-side result, checked
+// on every mount (2026-08-06: previously gated to only fire when the
+// session had no local data at all - found live that this let a viewer's
+// browser freeze on whatever the shared result happened to be the very
+// first time they ever visited, since a fallback-sourced result gets
+// persisted to sessionStorage/QueryClient cache exactly like a locally-run
+// one, permanently blocking any future refetch for that session even as an
+// admin ran newer scans since). Cheap, ungated GET - always safe to check;
+// useContrarianBatchScan's own effect below decides whether the response is
+// actually newer than what's currently shown before applying it.
+export function useLastScanFallback() {
+  return useQuery<LastScanResponse>({
+    queryKey: ['contrarianFinder', 'lastScanFallback'],
+    queryFn: () => apiFetch<LastScanResponse>('/contrarian-finder/last-scan'),
+  });
+}
+
+// Run History (2026-08-31) - gated by contrarian_finder:view_history at the
+// route level (a 403 here means the page should never have rendered the
+// entry point that triggers this in the first place). Metadata only, no
+// `results` blob - mirrors LastScanRecord minus results, plus an id to fetch
+// one specific run's full record via useRunHistoryDetail below.
+export interface RunHistoryListItem {
+  id: string;
+  completedAt: string;
+  universeSize: number;
+  scanned: number;
+  params: RunParams;
+}
+
+interface RunHistoryListResponse {
+  runs: RunHistoryListItem[];
+}
+
+// enabled: only fetched once the drawer is actually open - no need to pull
+// the list on every page load for an entry point most sessions won't have.
+export function useRunHistoryList(enabled: boolean) {
+  return useQuery<RunHistoryListResponse>({
+    queryKey: ['contrarianFinder', 'runHistory'],
+    queryFn: () => apiFetch<RunHistoryListResponse>('/contrarian-finder/run-history'),
+    enabled,
+  });
+}
+
+interface RunHistoryDetailResponse {
+  run: LastScanRecord;
+}
+
+// enabled: only fetched once a specific row has actually been clicked - the
+// ~150KB `results` blob per run is exactly what the list call above avoids
+// pulling in bulk.
+export function useRunHistoryDetail(id: string | null) {
+  return useQuery<RunHistoryDetailResponse>({
+    queryKey: ['contrarianFinder', 'runHistory', id],
+    queryFn: () => apiFetch<RunHistoryDetailResponse>(`/contrarian-finder/run-history/${id}`),
+    enabled: id != null,
+  });
+}
+
+// ISO 8601 timestamps compare correctly as plain strings. A missing
+// `candidate` is never an upgrade; a missing `current` means anything real
+// is (covers both "nothing shown yet" and pre-existing sessionStorage
+// entries from before `completedAt` existed).
+function isNewerCompletedAt(candidate: string | undefined, current: string | undefined): boolean {
+  if (!candidate) return false;
+  if (!current) return true;
+  return candidate > current;
+}
+
 // Orchestrates a full Contrarian Finder scan as a sequence of per-batch
 // requests (POST /contrarian-finder/scan-batch), rather than one long-held
 // request. Stops the moment the server-reported `totalBatches` is reached —
@@ -156,6 +275,9 @@ export function useContrarianBatchScan() {
   const [progress, setProgress] = useState<BatchScanProgress>({
     phase: 'idle', currentBatch: 0, totalBatches: null, waitRemaining: 0,
   });
+  // null for a normal "Run Scan" (no second progress bar shown); populated
+  // only for a "+ Mkt Cap" run, accumulating each batch's tickerRefresh count.
+  const [tickerRefreshProgress, setTickerRefreshProgress] = useState<TickerRefreshProgress | null>(null);
 
   const setData = useCallback((next: BatchScanData | undefined) => {
     setDataState(next);
@@ -169,13 +291,30 @@ export function useContrarianBatchScan() {
 
   useEffect(() => () => { runIdRef.current += 1; }, []);
 
+  // Always checked (see useLastScanFallback's own comment for why this used
+  // to be gated and isn't anymore) - applied only when it's actually newer
+  // than whatever's currently shown, and never while a run is in progress
+  // (isPending guard below), so this can't clobber this session's own
+  // in-flight scan with a stale shared result racing in behind it.
+  const fallback = useLastScanFallback();
+
+  useEffect(() => {
+    if (isPending) return;
+    const ls = fallback.data?.lastScan;
+    if (ls && isNewerCompletedAt(ls.completedAt, data?.completedAt)) {
+      setData({ universeSize: ls.universeSize, scanned: ls.scanned, results: ls.results, params: ls.params, completedAt: ls.completedAt });
+    }
+  }, [fallback.data, data, isPending, setData]);
+
   const run = useCallback(async (input: BatchScanInput) => {
     const myRunId = (runIdRef.current += 1);
     const isCancelled = () => runIdRef.current !== myRunId;
 
-    // threshold isn't part of the wire request (filtering is client-side),
-    // so it's split off here: wireInput goes over the network, params (which
-    // includes it) becomes the persisted read-only record of this run.
+    // threshold is never used for server-side filtering (that stays client-side), but the
+    // backend now needs it too, on batch 0, purely to store as part of this run's persisted
+    // params record (resilient incremental persistence, 2026-09-19 - see scanBatch/saveLastScan
+    // on the backend). wireInput goes over the network as-is; params (built from the same input)
+    // stays the client's own read-only record of this run.
     const { threshold, ...wireInput } = input;
     const params: RunParams = {
       threshold,
@@ -190,10 +329,18 @@ export function useContrarianBatchScan() {
     setError(null);
     setData(undefined);
     setProgress({ phase: 'scanning', currentBatch: 1, totalBatches: null, waitRemaining: 0 });
+    setTickerRefreshProgress(input.updateAllTickerData ? { completed: 0, total: 0 } : null);
 
     const allResults: ScanResult[] = [];
     let totalBatches = Infinity; // unknown until the first response tells us
     let batchIndex = 0;
+    let tickerRefreshTotal = 0;
+    let universeSize = 0;
+    // Id of the shared run row this scan is writing to - undefined until batch 0's response
+    // hands one back (or if that batch's persistence step itself failed). Threaded into every
+    // later batch's request body so they all update the same row instead of each batch
+    // (mistakenly) starting its own.
+    let runRowId: string | undefined;
 
     try {
       while (batchIndex < totalBatches) {
@@ -202,14 +349,20 @@ export function useContrarianBatchScan() {
 
         const res = await apiFetch<BatchScanResponse>('/contrarian-finder/scan-batch', {
           method: 'POST',
-          body: JSON.stringify({ ...wireInput, batchIndex }),
+          body: JSON.stringify({ ...wireInput, batchIndex, threshold, runRowId }),
         });
         if (isCancelled()) return;
 
+        runRowId = res.runRowId ?? runRowId;
         totalBatches = res.totalBatches;
+        universeSize = res.universeSize;
         allResults.push(...res.results);
-        setData({ universeSize: res.universeSize, scanned: allResults.length, results: [...allResults], params });
+        setData({ universeSize, scanned: allResults.length, results: [...allResults], params });
         setProgress((p) => ({ ...p, totalBatches, currentBatch: batchIndex + 1 }));
+        if (input.updateAllTickerData) {
+          tickerRefreshTotal += (res.tickerRefresh?.updated ?? 0) + (res.tickerRefresh?.skipped ?? 0);
+          setTickerRefreshProgress({ completed: tickerRefreshTotal, total: res.universeSize });
+        }
 
         batchIndex += 1;
         if (batchIndex < totalBatches) {
@@ -221,7 +374,17 @@ export function useContrarianBatchScan() {
           );
         }
       }
-      if (!isCancelled()) setProgress((p) => ({ ...p, phase: 'done', waitRemaining: 0 }));
+      if (!isCancelled()) {
+        const completedAt = new Date().toISOString();
+        setData({ universeSize, scanned: allResults.length, results: allResults, params, completedAt });
+        setProgress((p) => ({ ...p, phase: 'done', waitRemaining: 0 }));
+        // No separate "save the completed scan" call needed here anymore (2026-09-19) - each
+        // batch already persisted its own contribution to the shared run row as it completed
+        // (scanBatch/saveLastScan+appendRunProgress on the backend), so the last batch's own
+        // write already left that row in its finished state. This is also what makes the run
+        // resilient to being interrupted before reaching this point: whatever batches did
+        // complete are already durable, not lost just because the loop never got here.
+      }
     } catch (err) {
       if (!isCancelled()) { setIsError(true); setError(err); }
     } finally {
@@ -229,7 +392,7 @@ export function useContrarianBatchScan() {
     }
   }, [setData]);
 
-  return { run, isPending, isError, error, data, progress };
+  return { run, isPending, isError, error, data, progress, tickerRefreshProgress };
 }
 
 // Shared cache slot for the last scan's Strength List — ContrarianFinderPage
@@ -246,4 +409,130 @@ export function useStrengthListCache() {
     queryFn: () => Promise.resolve([]),
     enabled: false,
   });
+}
+
+export interface UniverseIndexInfo {
+  id: string;
+  description: string;
+}
+
+export interface UniverseStockRow {
+  symbol: string;
+  name: string | null;
+  sector: string | null;
+  marketCap: number | null;
+  indices: string[];
+}
+
+export interface UniverseTable {
+  indices: UniverseIndexInfo[];
+  stocks: UniverseStockRow[];
+}
+
+// GET /contrarian-finder/universe - read-only reference data (what a scan's
+// universe actually contains), not gated behind contrarian_finder:scan since
+// viewing it isn't an action. `enabled` lets the page defer the fetch until
+// the section is actually expanded, rather than firing on every page load.
+export function useStockUniverse(enabled: boolean) {
+  return useQuery<UniverseTable>({
+    queryKey: ['contrarianFinder', 'universe'],
+    queryFn: () => apiFetch<UniverseTable>('/contrarian-finder/universe'),
+    enabled,
+    staleTime: Infinity, // static reference data - doesn't change mid-session
+  });
+}
+
+interface TickerDataRefreshBatchResponse {
+  batchIndex: number;
+  totalBatches: number;
+  universeSize: number;
+  updated: number;
+  skipped: number;
+}
+
+export interface DeltaUpdateProgress {
+  phase: 'idle' | 'running' | 'waiting' | 'done';
+  currentBatch: number;
+  totalBatches: number | null;
+  waitRemaining: number;
+}
+
+export interface DeltaUpdateResult {
+  updated: number;
+  skipped: number;
+  universeSize: number;
+}
+
+// Admin Console "Master Data" Delta Update - the lighter, missing-only
+// sibling of "Run Scan (+ Mkt Cap)". Same batch/pacing shape as
+// useContrarianBatchScan() above (reusing WAIT_SECONDS/waitWithCountdown),
+// but simpler: no threshold/quality/scanDays, and each batch call hits
+// POST /contrarian-finder/ticker-data-refresh-batch instead of scan-batch.
+export function useTickerDataDeltaUpdate() {
+  const [isPending, setIsPending] = useState(false);
+  const [isError, setIsError] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [result, setResult] = useState<DeltaUpdateResult | null>(null);
+  const [progress, setProgress] = useState<DeltaUpdateProgress>({
+    phase: 'idle', currentBatch: 0, totalBatches: null, waitRemaining: 0,
+  });
+
+  const runIdRef = useRef(0);
+  useEffect(() => () => { runIdRef.current += 1; }, []);
+
+  const run = useCallback(async () => {
+    const myRunId = (runIdRef.current += 1);
+    const isCancelled = () => runIdRef.current !== myRunId;
+
+    setIsPending(true);
+    setIsError(false);
+    setError(null);
+    setResult(null);
+    setProgress({ phase: 'running', currentBatch: 1, totalBatches: null, waitRemaining: 0 });
+
+    let totalBatches = Infinity;
+    let batchIndex = 0;
+    let updated = 0;
+    let skipped = 0;
+    let universeSize = 0;
+
+    try {
+      while (batchIndex < totalBatches) {
+        if (isCancelled()) return;
+        setProgress((p) => ({ ...p, phase: 'running', currentBatch: batchIndex + 1 }));
+
+        const res = await apiFetch<TickerDataRefreshBatchResponse>('/contrarian-finder/ticker-data-refresh-batch', {
+          method: 'POST',
+          body: JSON.stringify({ batchIndex }),
+        });
+        if (isCancelled()) return;
+
+        totalBatches = res.totalBatches;
+        universeSize = res.universeSize;
+        updated += res.updated;
+        skipped += res.skipped;
+        setProgress((p) => ({ ...p, totalBatches, currentBatch: batchIndex + 1 }));
+
+        batchIndex += 1;
+        if (batchIndex < totalBatches) {
+          setProgress((p) => ({ ...p, phase: 'waiting' }));
+          await waitWithCountdown(
+            WAIT_SECONDS,
+            (remaining) => setProgress((p) => ({ ...p, waitRemaining: remaining })),
+            isCancelled,
+          );
+        }
+      }
+      if (!isCancelled()) {
+        setProgress((p) => ({ ...p, phase: 'done', waitRemaining: 0 }));
+        setResult({ updated, skipped, universeSize });
+      }
+    } catch (err) {
+      if (!isCancelled()) { setIsError(true); setError(err); }
+    } finally {
+      if (!isCancelled()) setIsPending(false);
+    }
+  }, []);
+
+  return { run, isPending, isError, error, result, progress };
 }

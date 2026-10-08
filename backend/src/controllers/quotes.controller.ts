@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import * as marketData from '../services/marketData.service';
 import * as userSubscription from '../services/userSubscription.service';
+import * as usageTracking from '../services/usageTracking.service';
 
 // This route sits behind requireAuth (see app.ts), so req.user is always
 // populated by the time this handler runs.
@@ -22,8 +23,13 @@ export async function getQuotes(req: Request, res: Response, next: NextFunction)
   }
 
   try {
-    const apiKey = await userSubscription.getDecryptedKey(getUserId(req), 'fmp');
-    const quotes = await marketData.getQuotes(symbols, apiKey);
+    const userId = getUserId(req);
+    const apiKey = await userSubscription.getDecryptedKey(userId, 'fmp');
+    const { quotes, realCalls } = await marketData.getQuotes(symbols, apiKey);
+    // getQuotes() now routes through the shared daily FMP cache (2026-09-12) - realCalls
+    // reflects only the symbols that weren't already cached today, not a flat per-symbol count.
+    usageTracking.logUsage(userId, 'quotes', { fmp_quote: realCalls })
+      .catch((e) => console.error('usage log failed', e));
     res.json({ quotes });
   } catch (err) {
     if (err instanceof userSubscription.MissingUserApiKeyError) {

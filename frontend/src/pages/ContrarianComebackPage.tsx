@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { useApiKeysModal } from '../lib/apiKeysModal';
 import { useIncomingTicker } from '../lib/tickerHandoff';
+import { useTickerHistory } from '../lib/tickerHistory';
+import TickerSubTabs from '../components/TickerSubTabs';
 import {
   useContrarianComebackGate,
   useContrarianComebackSubmit,
@@ -775,34 +777,73 @@ function ResultCard({ result }: { result: ContrarianComebackSubmitResult }) {
   );
 }
 
+// One history entry per symbol - the checklist answers + whichever stage of
+// the gate/checklist/submit workflow that symbol has reached, so revisiting
+// its sub-tab restores exactly where it was left, not just a final report.
+interface CcEntryState {
+  breakdownTypes: string[];
+  catalystAnswer: 'yes' | 'no' | '';
+  check3Override: boolean;
+  check3OverrideReason: string;
+  gateResult: ContrarianComebackGateResult;
+  submitResult: ContrarianComebackSubmitResult | null;
+}
+
 export default function ContrarianComebackPage() {
   const [ticker, setTicker] = useState('');
-  const [breakdownTypes, setBreakdownTypes] = useState<string[]>([]);
-  const [catalystAnswer, setCatalystAnswer] = useState<'yes' | 'no' | ''>('');
-  const [check3Override, setCheck3Override] = useState(false);
-  const [check3OverrideReason, setCheck3OverrideReason] = useState('');
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
+  const [pendingSymbol, setPendingSymbol] = useState<string | null>(null);
 
   const gate = useContrarianComebackGate();
   const submit = useContrarianComebackSubmit();
+  const history = useTickerHistory<CcEntryState>({ storageKey: 'contrarianComeback:history' });
+
+  const activeSymbol = history.activeSymbol;
+  const activeEntry = history.active;
+
+  function updateActive(patch: Partial<CcEntryState>) {
+    if (!activeSymbol || !activeEntry) return;
+    history.update(activeSymbol, { ...activeEntry, ...patch });
+  }
 
   function toggleBreakdownType(value: string) {
-    setBreakdownTypes((prev) => (prev.includes(value) ? prev.filter((t) => t !== value) : [...prev, value]));
+    if (!activeEntry) return;
+    const next = activeEntry.breakdownTypes.includes(value)
+      ? activeEntry.breakdownTypes.filter((t) => t !== value)
+      : [...activeEntry.breakdownTypes, value];
+    updateActive({ breakdownTypes: next });
+  }
+
+  // Case 2 - switching to an already-cached sub-tab. Also clears any stale
+  // gate/submit error from a previous failed lookup, which otherwise keeps
+  // showing over the newly-selected (valid) tab since neither mutation ever
+  // re-runs for it.
+  function selectExisting(symbol: string) {
+    gate.reset();
+    submit.reset();
+    history.select(symbol);
   }
 
   function runGate(symbol: string) {
-    setBreakdownTypes([]);
-    setCatalystAnswer('');
-    setCheck3Override(false);
-    setCheck3OverrideReason('');
-    submit.reset();
-    gate.mutate(symbol);
+    const upper = symbol.trim().toUpperCase();
+    if (!upper) return;
+    if (history.has(upper)) { selectExisting(upper); return; } // Case 2
+    setPendingSymbol(upper);
+    gate.mutate(upper, {
+      onSuccess: (gateResult) => {
+        history.insert(upper, {
+          breakdownTypes: [], catalystAnswer: '', check3Override: false, check3OverrideReason: '',
+          gateResult, submitResult: null,
+        }); // Case 1
+        setPendingSymbol(null);
+      },
+      onError: () => setPendingSymbol(null), // Case 3 - history untouched, error shown below
+    });
   }
 
   function handleCheckEligibility(e: FormEvent) {
     e.preventDefault();
-    if (!ticker.trim()) return;
-    runGate(ticker.trim().toUpperCase());
+    runGate(ticker);
   }
 
   useIncomingTicker('contrarian-comeback', (symbol) => {
@@ -812,13 +853,17 @@ export default function ContrarianComebackPage() {
 
   function handleConfirm(e: FormEvent) {
     e.preventDefault();
-    if (!gate.data || catalystAnswer === '') return;
+    if (!activeEntry || !activeSymbol || activeEntry.catalystAnswer === '') return;
     submit.mutate({
-      symbol: gate.data.symbol,
-      breakdownTypes,
-      catalystAnswer,
-      check3Override,
-      check3OverrideReason: check3OverrideReason || undefined,
+      symbol: activeEntry.gateResult.symbol,
+      breakdownTypes: activeEntry.breakdownTypes,
+      catalystAnswer: activeEntry.catalystAnswer,
+      check3Override: activeEntry.check3Override,
+      check3OverrideReason: activeEntry.check3OverrideReason || undefined,
+    }, {
+      onSuccess: (submitResult) => {
+        history.update(activeSymbol, { ...activeEntry, submitResult });
+      },
     });
   }
 
@@ -829,6 +874,14 @@ export default function ContrarianComebackPage() {
   return (
     <>
       <main className="flex flex-col gap-6 p-4 sm:p-6">
+        <TickerSubTabs
+          symbols={history.entries.map((e) => e.symbol)}
+          activeSymbol={history.activeSymbol}
+          pendingSymbol={pendingSymbol}
+          onSelect={selectExisting}
+          onClose={history.close}
+        />
+
         {/* Ticker entry + header stats, side by side once a result exists -
             matches Long-Term Analysis's top-card layout (form + summary in
             one card instead of two stacked ones). */}
@@ -852,10 +905,10 @@ export default function ContrarianComebackPage() {
             </button>
           </form>
 
-          {submit.data && submit.data.format === 'A' && <HeaderStats result={submit.data} />}
+          {activeEntry?.submitResult && activeEntry.submitResult.format === 'A' && <HeaderStats result={activeEntry.submitResult} />}
         </div>
 
-        {!gate.data && !gate.isPending && !gate.isError && (
+        {!activeEntry?.gateResult && !gate.isPending && !gate.isError && (
           <div className="rounded-card bg-bg-card p-4 shadow-card text-sm text-text-secondary">
             <p>
               Screens a stock against a 5-check hard gate (drawdown severity, breakdown type, sector health,
@@ -869,7 +922,8 @@ export default function ContrarianComebackPage() {
         {(gate.isError || submit.isError) && (
           <div className="text-sm text-danger">
             <p>
-              {gate.isError && gate.error instanceof ApiError ? gate.error.message
+              {gate.isError && gate.error instanceof ApiError
+                ? (gate.error.status === 404 ? 'Invalid Stock ticker' : gate.error.message)
                 : submit.isError && submit.error instanceof ApiError ? submit.error.message
                 : 'Analysis failed.'}
             </p>
@@ -881,34 +935,36 @@ export default function ContrarianComebackPage() {
           </div>
         )}
 
-        {gate.data && gate.data.failedCheck && <RejectionCard failedCheck={gate.data.failedCheck} reason={gate.data.reason} route={gate.data.route} />}
+        {activeEntry?.gateResult && activeEntry.gateResult.failedCheck && (
+          <RejectionCard failedCheck={activeEntry.gateResult.failedCheck} reason={activeEntry.gateResult.reason} route={activeEntry.gateResult.route} />
+        )}
 
-        {gate.data && !gate.data.failedCheck && !submit.data && (
+        {activeEntry?.gateResult && !activeEntry.gateResult.failedCheck && !activeEntry.submitResult && (
           <GateForm
-            gate={gate.data}
-            breakdownTypes={breakdownTypes}
+            gate={activeEntry.gateResult}
+            breakdownTypes={activeEntry.breakdownTypes}
             onToggleBreakdownType={toggleBreakdownType}
-            catalystAnswer={catalystAnswer}
-            onCatalystAnswer={setCatalystAnswer}
-            check3Override={check3Override}
-            onCheck3Override={setCheck3Override}
-            check3OverrideReason={check3OverrideReason}
-            onCheck3OverrideReason={setCheck3OverrideReason}
+            catalystAnswer={activeEntry.catalystAnswer}
+            onCatalystAnswer={(value) => updateActive({ catalystAnswer: value })}
+            check3Override={activeEntry.check3Override}
+            onCheck3Override={(value) => updateActive({ check3Override: value })}
+            check3OverrideReason={activeEntry.check3OverrideReason}
+            onCheck3OverrideReason={(value) => updateActive({ check3OverrideReason: value })}
             onConfirm={handleConfirm}
             isPending={submit.isPending}
           />
         )}
 
-        {submit.data && (
+        {activeEntry?.submitResult && (
           <>
             <button
               type="button"
-              onClick={() => setPreviewSymbol(submit.data!.symbol)}
+              onClick={() => setPreviewSymbol(activeEntry.submitResult!.symbol)}
               className="self-start text-sm text-accent hover:underline"
             >
               View price chart
             </button>
-            <ResultCard key={submit.data.symbol} result={submit.data} />
+            <ResultCard key={activeEntry.submitResult.symbol} result={activeEntry.submitResult} />
           </>
         )}
       </main>

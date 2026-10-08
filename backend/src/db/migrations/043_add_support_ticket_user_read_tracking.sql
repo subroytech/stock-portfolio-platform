@@ -1,0 +1,16 @@
+-- Support Tickets: per-user "unread" tracking, mirroring status='new' being the admin-side
+-- unread flag (see 037_create_support_tickets.sql). A ticket's status can't double as this for
+-- the owner - it can land on any of 3 admin-owned resting states (open/on_hold/closed) and the
+-- owner still needs a "you haven't seen this reply yet" signal regardless of which one - so this
+-- needs its own orthogonal column, not a reused status value.
+--
+-- Unread-by-owner is derived, not stored, as `user_last_read_at < updated_at`:
+--   - created + owner replies: application code stamps both updated_at and user_last_read_at
+--     with the same now() in one UPDATE/INSERT, so they land equal (read).
+--   - admin replies: only updated_at moves forward, so this ticket now reads as unread.
+--   - owner opens the ticket: markOpenedByUser() stamps user_last_read_at = now(), clearing it.
+--
+-- DEFAULT now() (not NULL) means any ticket with a genuinely-unread admin reply already sitting
+-- in it *before* this migration runs will read as "read" once deployed - an accepted, one-time
+-- rollout gap for a handful of dev-stage tickets, not worth a conditional backfill.
+ALTER TABLE users_support_tickets ADD COLUMN user_last_read_at TIMESTAMPTZ NOT NULL DEFAULT now();

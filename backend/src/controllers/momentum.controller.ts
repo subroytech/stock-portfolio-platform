@@ -1,7 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import * as marketData from '../services/marketData.service';
-import * as momentum from '../services/momentum.service';
+import * as analysisService from '../services/analysisService';
 import * as userSubscription from '../services/userSubscription.service';
+import * as usageTracking from '../services/usageTracking.service';
+import { checkFmpRateLimit, FmpRateLimitExceededError } from '../services/fmpRateLimit.service';
 
 // This route sits behind requireAuth (see app.ts), so req.user is always
 // populated by the time this handler runs.
@@ -19,7 +21,15 @@ export async function analyze(req: Request, res: Response, next: NextFunction): 
   }
 
   try {
-    const key = await userSubscription.getDecryptedKey(getUserId(req), 'fmp');
+    const userId = getUserId(req);
+    const rateLimit = await checkFmpRateLimit(userId);
+    if (!rateLimit.allowed) {
+      throw new FmpRateLimitExceededError(
+        `You've reached the limit of ${rateLimit.limit} new requests per ${rateLimit.windowMinutes} minutes. Please try again shortly.`,
+      );
+    }
+
+    const key = await userSubscription.getDecryptedKey(userId, 'fmp');
 
     const [histResult, quoteResult] = await Promise.allSettled([
       marketData.getHistorical(symbol, key, 130),
@@ -27,7 +37,7 @@ export async function analyze(req: Request, res: Response, next: NextFunction): 
     ]);
 
     if (histResult.status === 'rejected') throw histResult.reason;
-    const hist = [...histResult.value].sort(
+    const hist = [...histResult.value.bars].sort(
       (a, b) => new Date(String(b.date)).getTime() - new Date(String(a.date)).getTime(),
     );
 
@@ -41,13 +51,28 @@ export async function analyze(req: Request, res: Response, next: NextFunction): 
     }
 
     // Live quote is best-effort — a failure here shouldn't block the analysis.
-    const quote = quoteResult.status === 'fulfilled' ? quoteResult.value[symbol] : undefined;
+    const quote = quoteResult.status === 'fulfilled' ? quoteResult.value.quotes[symbol] : undefined;
     const price = quote?.price ?? closes[0];
 
-    const analysis = momentum.assembleMomentumAnalysis(closes, lows, volumes, price);
+    const analysis = await analysisService.computeMomentumAnalysis({ closes, lows, volumes, price });
+    // histResult is guaranteed fulfilled here (a rejection already threw, above) - a real vs.
+    // cached call is reported by getHistorical()/getQuotes() themselves, same "an attempt is a
+    // real cost" principle used everywhere else this shared day-cache is read.
+    usageTracking.logUsage(userId, 'momentum', {
+      fmp_historical: histResult.value.realCalls,
+      fmp_quote: quoteResult.status === 'fulfilled' ? quoteResult.value.realCalls : 1,
+    }).catch((e) => console.error('usage log failed', e));
     res.json({ symbol, name: quote?.name ?? null, analysis });
   } catch (err) {
+    if (err instanceof FmpRateLimitExceededError) {
+      res.status(429).json({ error: err.message });
+      return;
+    }
     if (err instanceof userSubscription.MissingUserApiKeyError) {
+      res.status(503).json({ error: err.message });
+      return;
+    }
+    if (err instanceof analysisService.AnalysisServiceError) {
       res.status(503).json({ error: err.message });
       return;
     }

@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, test, vi } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import * as client from '../api/client';
 import { ApiError } from '../api/client';
 import ContrarianComebackPage from './ContrarianComebackPage';
@@ -151,6 +151,15 @@ function baseSubmit(overrides: Partial<ContrarianComebackSubmitResult> = {}): Co
 }
 
 describe('ContrarianComebackPage', () => {
+  // The sub-tab history persists to sessionStorage (see lib/tickerHistory.ts) -
+  // clear it between tests so one test's inserted ticker doesn't leak into
+  // the next as an already-cached sub-tab. Mocks are restored too, since
+  // several tests below rely on a fresh call count / clean apiFetch mock.
+  beforeEach(() => {
+    sessionStorage.clear();
+    vi.restoreAllMocks();
+  });
+
   test('checking eligibility renders the gate summary and the checkbox form when no auto-check fails', async () => {
     vi.spyOn(client, 'apiFetch').mockResolvedValue(baseGate());
     renderPage();
@@ -399,7 +408,7 @@ describe('ContrarianComebackPage', () => {
   test('header stats render next to the ticker form once a Format A result exists', async () => {
     await runToFormatAResult();
     expect(screen.getByText('Current Price')).toBeInTheDocument();
-    expect(screen.getByText('AAPL')).toBeInTheDocument();
+    expect(screen.getAllByText('AAPL').length).toBeGreaterThan(0); // header stats + its own sub-tab
   });
 
   test('Contrarian Score shows a "why" hint line under each factor', async () => {
@@ -457,5 +466,84 @@ describe('ContrarianComebackPage', () => {
 
     expect(screen.getByText('M-Exempt')).toHaveAttribute('title', expect.stringContaining('Exercise of a previously granted option'));
     expect(screen.getByText('F-InKind')).toHaveAttribute('title', expect.stringContaining('withheld "in kind"'));
+  });
+
+  test('a 404 shows "Invalid Stock ticker" and creates no sub-tab', async () => {
+    vi.spyOn(client, 'apiFetch').mockRejectedValue(new ApiError(404, 'No data returned for ZZZZ.', null));
+    renderPage();
+
+    await userEvent.type(screen.getByLabelText('Ticker'), 'ZZZZ');
+    await userEvent.click(screen.getByRole('button', { name: /check eligibility/i }));
+
+    expect(await screen.findByText('Invalid Stock ticker')).toBeInTheDocument();
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument();
+  });
+
+  test('re-checking an already-gated ticker shows its cached checklist state without re-fetching', async () => {
+    const fetchSpy = vi.spyOn(client, 'apiFetch').mockImplementation((url: string) =>
+      (url.endsWith('/gate') ? Promise.resolve(baseGate()) : Promise.resolve(baseSubmit())),
+    );
+    renderPage();
+
+    await userEvent.type(screen.getByLabelText('Ticker'), 'AAPL');
+    await userEvent.click(screen.getByRole('button', { name: /check eligibility/i }));
+    await screen.findByText('Event-Driven');
+    await userEvent.click(screen.getByText('Event-Driven')); // start filling out the checklist
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // Re-check the same ticker — should hit the cached sub-tab (with the
+    // Event-Driven selection preserved), not re-run the gate call.
+    await userEvent.clear(screen.getByLabelText('Ticker'));
+    await userEvent.type(screen.getByLabelText('Ticker'), 'AAPL');
+    await userEvent.click(screen.getByRole('button', { name: /check eligibility/i }));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const checkbox = screen.getByText('Event-Driven').closest('label')?.querySelector('input[type="checkbox"]');
+    expect(checkbox).toBeChecked();
+  });
+
+  test('a 16th new ticker evicts the oldest sub-tab, keeping the list capped at 15', async () => {
+    const seededEntries = Array.from({ length: 15 }, (_, i) => ({
+      symbol: `SYM${i}`,
+      data: {
+        breakdownTypes: [], catalystAnswer: '', check3Override: false, check3OverrideReason: '',
+        gateResult: baseGate({ symbol: `SYM${i}` }), submitResult: null,
+      },
+    }));
+    sessionStorage.setItem('contrarianComeback:history', JSON.stringify({ entries: seededEntries, activeSymbol: 'SYM0' }));
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) =>
+      (url.endsWith('/gate') ? Promise.resolve(baseGate({ symbol: 'NEWCO' })) : Promise.resolve(baseSubmit({ symbol: 'NEWCO' }))),
+    );
+    renderPage();
+
+    expect(screen.getAllByRole('tab')).toHaveLength(15);
+    expect(screen.getByText('SYM14')).toBeInTheDocument(); // the oldest, still present before the new insert
+
+    await userEvent.type(screen.getByLabelText('Ticker'), 'NEWCO');
+    await userEvent.click(screen.getByRole('button', { name: /check eligibility/i }));
+    await screen.findByText('Event-Driven');
+
+    expect(screen.getAllByRole('tab')).toHaveLength(15);
+    expect(screen.queryByText('SYM14')).not.toBeInTheDocument(); // evicted
+  });
+
+  test('closing a sub-tab removes it with no gap left in the remaining list', async () => {
+    const entryFor = (symbol: string) => ({
+      breakdownTypes: [], catalystAnswer: '' as const, check3Override: false, check3OverrideReason: '',
+      gateResult: baseGate({ symbol }), submitResult: null,
+    });
+    const seededEntries = [
+      { symbol: 'AAA', data: entryFor('AAA') },
+      { symbol: 'BBB', data: entryFor('BBB') },
+      { symbol: 'CCC', data: entryFor('CCC') },
+    ];
+    sessionStorage.setItem('contrarianComeback:history', JSON.stringify({ entries: seededEntries, activeSymbol: 'AAA' }));
+    renderPage();
+
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
+    await userEvent.click(screen.getByRole('button', { name: 'Close BBB' }));
+
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
+    expect(screen.queryByText('BBB')).not.toBeInTheDocument();
   });
 });

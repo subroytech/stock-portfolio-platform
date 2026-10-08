@@ -12,6 +12,17 @@ if (!env.databaseUrl) {
 
 export const pool = new Pool({ connectionString: env.databaseUrl });
 
+// An idle client's connection can drop for reasons outside our control (network blip, DNS
+// hiccup, DB-side restart) - node-postgres reports that as an 'error' event on the pool
+// rather than throwing at the query call site. An EventEmitter with no listener for 'error'
+// crashes the whole Node process on the next such event - exactly what took the backend down
+// on 2026-09-12 (a stray ECONNREFUSED to a bogus local IP, not a real CockroachDB outage).
+// Logging and swallowing it here is safe: the pool discards the broken idle client and opens
+// a fresh one on the next actual query.
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle PostgreSQL client:', err);
+});
+
 export async function query<T extends QueryResultRow = QueryResultRow>(
   text: string,
   params?: unknown[],

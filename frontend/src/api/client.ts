@@ -1,3 +1,5 @@
+import { clearSession, queryClient } from '../lib/queryClient';
+
 // Every call goes through here so credentials:'include' (the httpOnly
 // auth_token cookie) and JSON handling are never duplicated per-call-site.
 // Backend defaults to localhost:4000 (backend/src/config/env.ts); override
@@ -30,6 +32,11 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
 
   if (!res.ok) {
     const message = (body as { error?: string } | null)?.error ?? `Request failed with status ${res.status}`;
+    // 401 = requireAuth's own contract: missing/invalid/expired token, never "valid session,
+    // wrong permission" (that's a 403, untouched here). Self-heals a stale cached session
+    // (see clearSession's own comment) instead of leaving the app silently failing until a
+    // manual refresh.
+    if (res.status === 401) clearSession(queryClient, { markExpired: true });
     throw new ApiError(res.status, message, body);
   }
 

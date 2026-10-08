@@ -11,6 +11,10 @@ Before editing, creating, or deleting any file:
 
 # What This Repo Is
 
+**Platform Objective**: a self-directed stock investing platform for retail investors — see
+`Architecture.md`'s own "Platform Objective" section for the full statement. Everything below
+(the rebuild, the architecture) is in service of that product mission, not an end in itself.
+
 This is the **rebuild** of the stock portfolio dashboard — a ground-up rewrite turning a
 single-user, client-side-only app into a scalable multi-user platform with a real backend,
 database, and auth.
@@ -46,7 +50,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 07-26)
+# Current Build State (as of 10-08)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -138,16 +142,21 @@ is **not** kept in sync with this one.
   writes — confirmed via direct row-count checks) + a new `/portfolios/:id/import-preview`
   page. Surfaces the parser's per-row `errors` to a user for the first time ever.
 
-## Section 3 Backlog — reordered 2026-07-21, item 1 scaffolded
-Section 3 of `Architecture.md` now opens with a new item 1: a Playwright + Cucumber
-(`playwright-bdd`) E2E pilot suite, inserted ahead of Long-Term Analysis/Contrarian Comeback
-Analysis/the Python extraction items so it's in place as a regression net before that riskier
-work. New `e2e/` project scaffolded (config, feature file, step definitions, `data-testid`
-additions to 6 frontend files) — verified locally that `bddgen` generates the single scenario
-correctly and Playwright's test list resolves all 8 Gherkin steps. **Not yet done**:
-provisioning the dedicated CockroachDB Cloud test database, running the suite against a real
-DB, and wiring the CI job + `E2E_DATABASE_URL` secret — all need the user's cloud console /
-GitHub repo admin access. See Architecture.md Section 3 item 1 for full detail.
+## Section 3 Backlog Item 1 — E2E pilot suite ✅ Done
+Scaffolded 2026-07-21 (Playwright + Cucumber `playwright-bdd`, single golden-path scenario:
+Signup→Login→Portfolio→Import→Dashboard KPIs), positioned ahead of Long-Term
+Analysis/Contrarian Comeback/the Python extraction items so it's a regression net through
+that riskier work. **Confirmed fully done 2026-07-29**: the dedicated CockroachDB Cloud test
+database and `E2E_DATABASE_URL` GitHub secret are both provisioned and working — verified via
+GitHub Actions history (the `e2e` job, which fails fast on a missing `DATABASE_URL`, has
+passed on every run since at least 2026-07-23). **Tab-shell mechanics now covered too,
+2026-07-29**: new `e2e/features/tab-navigation.feature` (2 scenarios — tab-switch state
+preservation, API Keys modal open/close), reusing `TabShell.tsx`'s existing `data-testid`s
+(zero new ones needed). All 3 scenarios verified live against the real test DB. **Still
+deliberately deferred**: the actual analysis tools (Momentum/Contrarian Finder/Long-Term
+Analysis/Contrarian Comeback) and the cross-tab launchers need either a live FMP test key in
+CI or Playwright route-mocking to exercise meaningfully — neither decided yet. See
+Architecture.md Section 3 item 1.
 
 ## Python Service Scaffolding — analysis-service ✅ Done
 Built 2026-07-24 — Section 2's "Next Step" is now landed. New `analysis-service/` (FastAPI,
@@ -161,6 +170,17 @@ killing the Python process degrades to a clean 503 rather than a crash. 158 back
 machine this was built on, so the `Dockerfile` is unverified by an actual build/run — only
 the direct `poetry run uvicorn` path was live-tested. Full detail in `Architecture.md`
 Section 1.
+
+**2026-08-14 — Python version pin bumped 3.12 → 3.14**: local dev only ever had Python 3.14
+installed (no 3.12 anywhere on the machine), so Poetry had been silently resolving the
+`^3.12` constraint against 3.14 all along — the "tested" version was actually 3.14, not the
+3.12 the `Dockerfile`/CI claimed. Repinned all three to `3.14` for consistency
+(`analysis-service/pyproject.toml`, `analysis-service/Dockerfile`'s `python:3.14-slim` base,
+and `.github/workflows/ci.yml`'s `actions/setup-python` step) and regenerated
+`poetry.lock` — `poetry install` + all 149 Python tests verified passing under the new lock.
+**Known gap unchanged and now also covers this**: since Docker still isn't installed on this
+machine, `python:3.14-slim` actually pulling/building has *not* been verified — only the
+constraint/lock/local-venv side of this change is confirmed.
 
 ## Long-Term Analysis (Section 3 item 2) ✅ Done
 Built 2026-07-26 — the first real business logic in `analysis-service` and the first full
@@ -188,11 +208,1977 @@ peer P/E was always null (`/stable/quote` has no `pe` field — fixed by derivin
 `1/earningsYield`, already fetched via `key-metrics`). **Confirmed real, not a bug**:
 Forward P/E stays `null` because `/stable/financial-estimates` returns `[]` on this
 account's plan tier — degrades gracefully exactly as designed. Full detail in
-`Architecture.md` Section 1. Section 2 is now an open placeholder — next Section 3 item is
-item 3 (Contrarian Comeback Analysis), TBD-scoped via `/plan`.
+`Architecture.md` Section 1.
 
-## Phases 4–6 — Not Started
-- Phase 4: Shared quote cache (Redis / Postgres TTL table)
+## Contrarian Comeback Analysis (Section 3 item 3) ✅ Done
+Built 2026-07-28 across 3 formally-planned phases (gate/auto-checks + 5-factor score +
+verdict; Fundamental Health + Catalyst Pipeline; Staged Entry + Recovery Targets + Thesis
+Invalidation) — greenfield in Python, ported from the source app's `contrarian-analysis.html`
+(re-read verbatim, not assumed from the earlier Phase-3 scoping note). Stateless two-endpoint
+pattern (`POST /contrarian-comeback/gate` preview, `POST /contrarian-comeback` full submit).
+New `ContrarianComebackPage.tsx`. Real bug found+fixed live: `/v4/insider-trading` is a
+retired FMP legacy endpoint (403 on accounts created after 2025-08-31) — switched to
+`/stable/insider-trading/search`. Merged via PR #3. Full detail in `Architecture.md` Section 1.
+
+## Top-Level UI Restructure, Cross-Tab Launchers, and Data Fixes ✅ Done
+Built 2026-07-29. Persistent-tabs restructure: the 5 tools collapsed into one always-mounted
+`TabShell.tsx` (single `path="/*"` route) so switching tabs no longer resets in-progress
+state; API Keys became a modal instead of its own route. New `frontend/src/lib/
+tickerHandoff.ts` context lets Contrarian Finder/Momentum rows launch Long-Term Analysis or
+Contrarian Comeback directly for a symbol (own table column, not inline with the symbol).
+Contrarian Comeback fixes: trailing P/E was always `null` (same FMP `/stable` `pe`-field gap
+Long-Term Analysis hit — fixed via price/EPS derivation), added Volume Ratio %/Volume Climax
+detection, compact (M/B/T) Free Cash Flow formatting, context-aware tooltips. Merged via
+PR #4. Full detail in `Architecture.md` Section 1.
+
+## Momentum Analysis extraction (Section 3 item 4) ✅ Done
+Built 2026-07-29 — the first **extraction** (not greenfield build) of the Python
+microservices work. `momentum.service.ts`'s pure math (SMA/EMA/RSI/MACD/Bollinger Bands, the
+5-factor score) ported to `analysis-service/app/scoring/momentum.py` as a faithful
+line-for-line transliteration (TS/Python floats are both IEEE 754 doubles, so exact operation
+order is what makes parity possible). `calcKellySizing` NOT ported — stays client-side only
+(`frontend/src/lib/kelly.ts`). Shadow-test discipline: the relevant Jest fixtures ported 1:1
+into `test_momentum_scoring.py` (17 new Python tests, 139 total), same inputs/expected
+outputs, rather than a live dual-engine comparison (no real production traffic to shadow at
+this project's scale). Zero frontend/route changes — `GET /momentum/:symbol`'s response
+shape is byte-identical; only `momentum.controller.ts` internally swapped to
+`analysisService.computeMomentumAnalysis()`. `momentum.service.ts`/its 22-test Jest file stay
+in the repo undeleted as the rollback path. 1 new backend test (201 total), `tsc`/lint clean.
+Verified live against a real FMP account. Full detail in `Architecture.md` Section 1.
+
+**Correction discovered same day**: `contrarianFinder.service.ts` imports `mwSMA`/`mwRSI`/
+`mwBB` directly from `momentum.service.ts` for its own Strength List scoring — that file was
+never fully dead code even before its own extraction below, so "delete momentum.service.ts
+once confident" (mentioned above) would only ever be a partial trim (`assembleMomentumAnalysis`/
+`calcKellySizing` only), never a whole-file deletion.
+
+## Contrarian Finder extraction (Section 3 item 4) ✅ Done
+Built 2026-07-29 — the last Section 3 backlog item. Data-ownership decision (pros/cons
+comparison): Node stays the sole DB owner — `assembleUniverse()`/`fetchSectorMap()`'s two
+read-only `SELECT`s against static reference data were too small to justify Python getting its
+own CockroachDB connection for the first time. Real complexity vs. Momentum: `scanStock()`
+interleaved the FMP fetch and scoring in one function, so this extraction had to introduce
+the fetch/compute split, not just relocate an already-separated function — new
+`fetchStockData()`/`assembleScanBatch()` in `contrarianFinder.service.ts`, new
+`analysis-service/app/scoring/contrarian_finder.py` **reusing `mw_sma`/`mw_rsi`/`mw_bb` from
+the already-ported `momentum.py`** (the direct payoff of doing Momentum first). Today's
+`scanStock()`/`scanBatch()`/`filterCandidates()` stay undeleted as the rollback path.
+Shadow-test: 6 relevant Jest cases + 1 new null-quote case ported to pytest (149 Python tests
+total). 8 new backend tests (209 total, including a design fix — an initial dead
+`Promise.allSettled` error-branch was simplified out after discovering `fetchStockData` can
+never actually reject). `tsc`/lint clean. Verified live: a real 15-symbol batch scan through
+the new path returned correct sector overlays, pricing, and strength scoring. Full detail in
+`Architecture.md` Section 1. **No more Python extractions remain in Section 3.**
+
+## Functional Authorization (RBAC) + Admin Console ✅ Done
+Built across 8 phases, 2026-07-31–08-02. Full RBAC schema (`m_roles`/`m_role_permissions`/
+`m_function_master`/`users_roles`, migrations 015–018), `requirePermission` middleware
+(DB-backed, no hardcoded role-name checks), `GET /auth/me` now returns resolved
+`roles`+`permissions` (closing the old probe-`/portfolios`-and-catch-401 gap), a dedicated
+`/admin` console (My API(s)/Manage Users/Functions/Permission/Role, edit-then-save UX),
+permission-based gating on Contrarian Finder's Run Scan + API Keys, Manage Users filters, and
+an Admin-Master Fallback API Key model (3 custom roles modeling bring-your-own-key vs. shared
+fallback — see `User Manual.md`). Usage Tracking is only partial: the `user_evt_usage`/
+`user_evt_usage_summary_monthly` tables + `usageTracking.service.ts` exist and log Contrarian
+Finder scans, but weren't extended to every analysis controller — see Next Up.
+
+## Contrarian Finder Stock Universe + m_tickers sync ✅ Done
+Built 2026-08-02–03 — tackled Architecture.md Section 3 item 7 from a "make the metadata
+usable" angle, not "replace the static constituent list" (that question's still open — see
+Next Up). New `GET /contrarian-finder/universe` reference table (visible to everyone).
+`m_tickers` (name/sector/market_cap, migration 019 adds the last one) is now kept populated
+from two live paths — Portfolio Update inserts, and a shared `refreshTickerDataBatch()` used
+by both "Run Scan (+ Mkt Cap)" (a confirm-gated link, piggybacks a full refresh on the scan's
+own batching) and the Admin Console's new "Master Data" Delta Update tab (missing-only,
+admin-only). Real bugs found live: BTC/ETH prices never updated on Refresh Prices (FMP needs
+the `BTCUSD` pair format, not bare `BTC`); a `HoldingsTable.tsx` Major/Minor-tabs regression
+(null allocation defaulted to hidden, not shown) and a flaky `useLogout` test and an outdated
+E2E permission assumption were all caught by the real E2E suite failing in CI for the first
+time ever — all fixed, all 4 CI jobs (backend/frontend/analysis-service/e2e) confirmed green.
+
+## Contrarian Finder — shared last-scan persistence ✅ Done
+Built 2026-08-04 — closed a real gap the user found by hand: since only Admin/Admin-Master/
+`user-contra-*` roles can run a Contrarian Finder scan and everyone else can only *view* the
+outcome, a regular user (or the same admin on a different device/session) previously saw
+nothing at all, because results lived only in the running browser's `sessionStorage`, never
+anywhere shared. New `tx_shared_contrarian_run` table (migration 020 — deliberately `tx_`-
+prefixed despite the result being shared/global, not portfolio-scoped: running a scan is
+itself a transaction performed by a role, not an admin-exclusive job — both `admin` and
+`user-contra-*` can trigger one — so `tx_` still fits; documented exception in `SCHEMA.md`.
+Stores `started_by` but doesn't expose it via the API yet). `POST /contrarian-finder/last-scan`
+(`requirePermission('contrarian_finder:scan')` — only someone who could run a scan can claim
+to have completed one) is called fire-and-forget by the frontend once a scan reaches `done`;
+`GET /contrarian-finder/last-scan` is ungated (same "viewing isn't the action" reasoning as
+`GET /contrarian-finder/universe`) and used by a new `useLastScanFallback()` hook.
+`ContrarianFinderPage` now shows the run's completed-at timestamp. 10 new backend tests (385
+total), 4 new frontend tests (229 total), `tsc`/lint clean both sides. **Real bug found+fixed
+via live 2-account verification**: `universe_size`/`scanned` (INT8 columns) came back from
+CockroachDB as strings, not numbers — same `node-pg` gotcha as `roles.service.ts`/
+`marketData.service.ts`, fixed with the same `Number()` coercion. Verified live: a plain `user`
+account saw `{ lastScan: null }` before any scan existed, got 403 posting directly, then saw an
+admin account's saved scan appear via `GET` in a completely separate session.
+
+**Follow-up bug found+fixed 2026-08-05, reported by the user in real use**: `useLastScanFallback()`
+originally only fired when a viewer's browser had *no* local scan data at all — the first time
+a plain-`user` account ever visited, it cached whatever the shared result was at that moment
+(in both the QueryClient cache and `sessionStorage`), then never re-checked again for that
+browser session, even across page reloads. A viewer could get permanently stuck seeing a
+days-old result while an admin ran newer scans in the meantime. Confirmed live the backend was
+never the issue (a fresh account with zero local cache always got the true newest record).
+Fixed by making the fallback check fire on every mount unconditionally (cheap, ungated GET),
+applying its result only when it's actually newer (`completedAt` comparison) than whatever's
+currently shown — self-heals a stale view without ever clobbering a run the same session just
+completed itself (guarded by `isPending` and the newer-only check). 1 test replaced with 2
+(one covering the upgrade-when-stale case, one covering never-downgrade-a-fresh-local-run),
+231 frontend tests total.
+
+## Contrarian Finder — tiered last-scan retention ✅ Done
+Built 2026-08-05 — the user noticed the shared-scan table (above) was accumulating one row per
+completed run indefinitely and asked for tiered retention instead: keep a rolling **60-run
+history** for `admin`/`admin-master`, but **upsert a single row per user** for every other
+`contrarian_finder:scan`-permitted role (`user-contra-withKey`/`user-contra-wokey`). Migration
+`021` adds a `run_tier` column (`'admin'` | `'user'`, backfilled `'admin'` for the 2
+pre-existing rows) and a new `contrarian_finder:scan_history` permission, granted to `admin` via
+the migration and to `admin-master` via a direct grant (that role is never migration-seeded —
+same precedent as its other manually-configured grants). `saveLastScan()` branches on tier:
+admin appends then prunes back to the 60 most recent admin-tier rows; user does a transactional
+`DELETE` + `INSERT` keyed on `started_by`, not a partial-unique-index `ON CONFLICT` (simpler to
+reason about, confirmed via the same DELETE+INSERT pattern `roles.service.ts`'s `setUserRole()`
+already established). The controller resolves tier via `rolesService.getUserPermissions()` —
+permission-based, not a hardcoded role-name check, consistent with the rest of this RBAC system.
+`GET /contrarian-finder/last-scan` is deliberately unaffected — still just the single most
+recent row across both tiers (confirmed with the user: a storage/retention change only, not a
+viewer-facing one). 5 new backend tests, `tsc`/lint clean. **Live-verified with two throwaway
+accounts**: an `admin` account running twice left 2 accumulating rows; a `user-contra-withKey`
+account running twice left exactly 1 row (the second run replaced the first).
+
+## Permission dependency guard + Manage Permission UI indent ✅ Done
+Built 2026-08-05, same day — a follow-on question ("should `contrarian_finder:scan` and
+`contrarian_finder:scan_history` be mutually exclusive?") surfaced that `scan_history` is
+actually a strict **child** of `scan` (it only means anything alongside the parent — the tier
+check in `saveLastScan`'s controller only runs after `requirePermission('contrarian_finder
+:scan')` has already let the request through), so granting the child alone via the Admin
+Console would silently do nothing. `roles.service.ts` gets a small, generic `PERMISSION_REQUIRES`
+map (not a full dependency graph — this is currently the only such pair) enforced both
+directions: `grantPermission()` now throws `MissingParentPermissionError` (→ `400`) if the
+parent isn't already granted; `revokePermission()` throws `ParentPermissionInUseError` (→ `409`)
+if a granted child still depends on the permission being revoked. `RolePermissionsPage.tsx`
+mirrors the same map for **display only** (a `withParentChildOrder()` reorder so the child
+renders indented directly under its parent with a `↳` marker, instead of sorting to its own
+alphabetical position — "Contrarian Finder Scan History" would otherwise land well *before*,
+not after, "Run Contrarian Finder Scan"). 6 new backend tests, 1 new frontend test, `tsc`/lint
+clean both sides. Live-verified via the real Admin Console API against a throwaway role: grant
+child without parent → `400`; grant parent then child → both `200`; revoke parent while child
+still granted → `409`; revoke child then parent → both `200`.
+
+## Contrarian Finder — SP500 tier expanded to top 400 ✅ Done
+Built 2026-08-05 — resolved the "keep hand-curating `cf_static_universe.ts`'s SP500 list, or
+source live index membership from FMP" open question in favor of a live-data-driven
+regeneration of the static file, not a runtime FMP dependency. The official S&P 500 membership
+endpoint doesn't work on the current FMP plan (`/stable/sp500-constituent` 402s; legacy
+`/v3/sp500_constituent` is retired) — confirmed live before choosing the fallback: a one-time,
+throwaway `ts-node` script pulled `/stable/company-screener` (real market-cap-ranked US
+companies) and rebuilt the SP500 array as a top-400-by-market-cap proxy, fully replacing the
+old 200 (not appending) — this also fixes a real, previously-confirmed gap (MU, INTC, AMAT,
+ORCL, PLTR, PANW were all missing). Getting a clean list took several rounds of hand-verified
+filtering: the raw screener mixed in preferred stock/notes/trusts with bogus inflated market
+caps, at least one outright private company (SPCX/SpaceX), and OTC-traded subsidiary
+instruments — all caught by spot-checking suspicious symbols live via `/stable/quote` before
+trusting them, not assumed. `dj30`/`ndx100`/`etf` arrays and their DB rows are byte-for-byte
+untouched (confirmed live: 30/88/20-per-ETF, unchanged).
+
+**Real bug this surfaced**: `assembleUniverse()`'s `CF_MAX = 450` cap would have silently
+truncated the ETF tier out of every scan once SP500 grew (ETFs are added last) — raised to
+`600`. Live dedup simulation against the real expanded table: the actual post-expansion total
+is 458 (not the ~540-600 pre-implementation estimate — the real top-400 list overlaps more
+with the ETF tier than assumed), confirmed via a real `scan-batch` API call
+(`universeSize: 458`, `totalBatches: 4`). Frontend's default `maxBatches` raised 3→5 (625
+symbols) so a plain "Run scan" click covers the full universe without needing the Advanced
+panel. `m_index_constituent`'s upsert-only seeding never removes stale rows, so a one-time
+manual prune (`DELETE ... WHERE index_id = 'SP500' AND symbol NOT IN (new 400)`) removed the
+35 tickers that didn't make the new list. 1 new backend test (`assembleUniverse`'s `CF_MAX`
+boundary, 396 total), several existing frontend tests updated for the new default (230 total),
+`tsc`/lint clean both sides.
+
+## Portfolio Upload — Flex ✅ Done
+
+Built across 5 formally-planned phases, 2026-08-07 (scoped through extensive discussion
+2026-08-06/07, then `/plan`-approved and executed in one continuous "auto mode" session). With
+"appifying" the platform in mind: a general-purpose import path that doesn't need a hardcoded
+per-broker parser for every new source, alongside — not replacing — today's working import.
+
+### Scope split
+- **"Portfolio Upload — Legacy"** — today's existing `parser.service.ts` (`parseGenericCsv` +
+  `HEADER_ALIASES`, and the positional `parseRobinhoodTxt`) stays exactly as-is, untouched,
+  covering Fidelity/Empower/Robinhood.
+- **"Portfolio Upload — Flex"** (Phase 1, this effort) — a new, parallel import path for any
+  CSV/XLS file with *some* header row, built around reusable, admin-governed **templates**
+  rather than a hardcoded parser per broker.
+- **Phase 2 (explicitly deferred)** — teach Flex to also accept linear/positional formats like
+  Robinhood's (no real header row today) by first generating an equivalent header row from
+  them, so they could eventually feed the same Flex pipeline instead of needing their own
+  hardcoded parser like `parseRobinhoodTxt`.
+
+### RBAC / UI shape
+- Both `Portfolio-Legacy` and `Portfolio-Flex` are gated Functions in the Authorization Module
+  (`portfolio_upload:legacy` / `portfolio_upload:flex`, migration 024) — a real behavior change,
+  since portfolio import had no permission gate before. Resolved via `AskUserQuestion` during
+  planning: `user` gets `portfolio_upload:legacy` only by default (nobody loses today's import);
+  `portfolio_upload:flex` stays admin-granted-only. `admin`/`admin-master` get all 3 new
+  permissions (the third being the approval function below).
+- A third gated Admin Console function, `portfolio_template:manage_status`, sets a template's
+  approval status (the approval mechanism itself — see below).
+- The "Stock Portfolio" tab became a "Portfolio" tab with two sub-tabs, **Legacy** and **Flex**
+  (`TabShell.tsx`) — each hidden entirely (not just disabled) for a session lacking that
+  function's permission, same pattern as Admin/API Keys. A session with neither permission
+  falls back to a read-only Legacy view (`DashboardPage`'s new `readOnly` prop — no
+  `UploadImportDialog`) rather than a blank tab, the same defensive-default precedent
+  `ContrarianFinderPage` already used. **Bug found live and fixed same day**: the Legacy
+  sub-tab's `PortfolioSelector` wasn't filtered by `flexTemplateStatus`, so a Flex-created
+  portfolio also showed up under Legacy, where its header-alias-guessing importer would have
+  silently overwritten data no longer matching the portfolio's bound Flex template —
+  `PortfolioSelector` gained an optional `filter` prop, wired from `TabShell` as
+  `p => p.flexTemplateStatus === null` for the Legacy sub-tab only.
+
+### Template governance
+- Status lifecycle: `Pending Approval` → `Approved` or `Rejected`, changed only via the new
+  Admin Console function.
+- A user can use *either* an Approved template *or* their own Pending-Approval template for
+  their own uploads — pending status only blocks visibility to *other* users, never usage by
+  the template's own creator.
+- The **Approved-template list a user sees is filtered**, not a flat shared pool: templates
+  created by Admin, Admin-Master, or the logged-in user themselves — not every other regular
+  user's approved templates. **Open question, not yet resolved**: two different users each
+  mapping the same broker end up with two separate private templates rather than converging on
+  one shared one — acceptable, or should same-shape mappings eventually get promoted to a
+  shared admin-owned one?
+- Templates are never deleted, only status-changed — a `Rejected` template has no cleanup story
+  and just sits there. Accepted as a "don't over-build" tradeoff, not pushed back on.
+
+### The full creation flow (settled, including the forced-resolution rule)
+1. At portfolio creation, pick from the Approved-template list (searchable by name) or a
+   personal Pending-Approval dropdown (shown only if the user has one) — **or** start a brand
+   new mapping.
+2. **New mapping path**: upload a file → map its detected headers (left) to the app's mandatory
+   fields — Symbol, Quantity, Current Price — plus optional ones — Purchase Price, Name,
+   Sector, Purchase Date (right, mandatory ones visually marked) → **Inspect Data** (disabled
+   until every mandatory field is mapped) shows a top-5-record preview, purely in-memory, no
+   writes yet.
+3. From either path, proceeding **actually creates the portfolio for real** — full file
+   imported, `tx_holdings` written, Dashboard rendered from genuinely persisted data (the
+   Dashboard can't render any other way, so this was never something that could stay purely a
+   preview).
+4. **The Dashboard result forces exactly one of two next actions — this is no longer
+   optional**:
+   - **Looks right** → **Save Template is now mandatory**, not offered-and-skippable. This is
+     the entire reason the flow is ordered this way: a template can only ever be saved once
+     it's been proven against a real, rendered Dashboard from real data — a superficial top-5
+     preview alone can't catch a mapping that's subtly wrong (e.g. a numeric-looking column
+     mapped to the wrong field) but would still produce a broken Dashboard. Saving requires a
+     meaningful name (validated: trimmed non-empty, minimum length, at least one letter, on top
+     of the table's own uniqueness constraint) and persists the mapping into
+     `m_portfolio_template_mapping_master`/`_dtls` at `Pending Approval`, binding it to the
+     portfolio via `upload_template_id`.
+   - **Looks wrong** → the only way out is **Delete Portfolio** (already an existing feature,
+     nothing new needed) and start over with a corrected file. Nothing about a bad mapping is
+     ever persisted as reusable.
+   - **Caveat, acknowledged**: a web app can't literally force a user to stay on a page and
+     choose — they can always navigate away mid-decision. "Forced" in practice means: present
+     both actions prominently right after the Dashboard renders, and if the user leaves without
+     choosing, the portfolio is left in an explicit **error/needs-attention state** (next
+     section) rather than silently allowed to exist in limbo.
+5. **Later uploads for an existing portfolio**: if it has a bound template, later Flex uploads
+   reuse it automatically — no mapping screen shown again. The bound template *can* be changed,
+   but changing it always requires re-running Inspect Data against the new mapping first, never
+   a silent swap.
+
+### `flex_template_status` — new column on `tx_portfolios`
+Tracks exactly the "did this Flex portfolio ever get properly resolved" state from step 4 above
+— a deliberately minimal alternative to building a separate notifications/pending-actions
+system. Three values:
+- **`'Flex'`** — created via Flex and properly closed out. Since the only way to survive a bad
+  mapping is deletion, this state can only mean Save Template succeeded — so
+  `upload_template_id` is always non-null whenever `flex_template_status = 'Flex'`.
+- **`'Flex-Err'`** — created via Flex, but the user left before completing Save Template (or
+  Delete). The "needs attention" state — `upload_template_id` stays `NULL` here. Any
+  attention-needed banner, and any block on further uploads until resolved, is just
+  `WHERE flex_template_status = 'Flex-Err'`.
+- **`NULL`** — Classic/Legacy portfolios, untouched by any of this.
+
+Invariant for Flex portfolios: `flex_template_status = 'Flex' ⟺ upload_template_id IS NOT NULL`;
+`'Flex-Err' ⟹ upload_template_id IS NULL`. No drift possible between the two columns as long as
+both are always written together.
+
+### DB design (table names + column names confirmed by the user)
+- **`m_portfolio_template_mapping_master`** — one row per template: `id`, `template_name`
+  (`NOT NULL`, unique — backs the search-by-name list), `status` (`'Pending Approval'` \|
+  `'Approved'` \| `'Rejected'`), `created_by`/`reviewed_by` (FK → `users`), `reviewed_at`,
+  `sample_preview` (`JSONB`, nullable — the top-5-mapped-records snapshot from Inspect Data, so
+  an admin reviewing a pending template later doesn't need the file re-uploaded),
+  `created_at`/`updated_at`.
+- **`m_portfolio_template_mapping_dtls`** — one row per mapped field: `id`, `template_id` (FK
+  → master, `ON DELETE CASCADE`), `target_field` (the app's field: `symbol`/`quantity`/
+  `currentPrice`/`purchasePrice`/`name`/`sector`/`purchaseDate`), `source_header` (the file's
+  actual header text, normalized the same way `mapHeaders()` already does — resilient to column
+  reordering on later uploads). Unique on `(template_id, target_field)`.
+- **Two new columns on the existing `tx_portfolios`**: `upload_template_id` (nullable FK →
+  `m_portfolio_template_mapping_master`, `ON DELETE SET NULL`) and `flex_template_status`
+  (nullable `VARCHAR` — `'Flex'` \| `'Flex-Err'` \| `NULL`, per above).
+- **No new tables needed for RBAC** (reuses `m_function_master`/`m_role_permissions` — just 3
+  new permission rows) **or for holdings data** (Flex just needs to produce the same
+  `HoldingEntry[]` shape `parser.service.ts` already does, then plugs into the existing,
+  already-tested `portfolioService.importHoldings()` — same `tx_holdings`/`tx_uploads`/
+  `tx_portfolio_action_hist` writes as Legacy).
+
+### Implementation summary
+- **Backend**: migrations 022-024 (both new tables + `tx_portfolios`' 2 new columns + the 3
+  permission rows); `parser.service.ts`'s per-row logic extracted into an exported
+  `buildHoldingsFromMappedRows()` (existing `parseGenericCsv` tests passed unchanged — the
+  regression proof that Legacy's own output never moved) so `flexParser.service.ts`'s
+  `resolveMapping()`/`parseFlexCsv()` reuse the exact same value-parsing code, just with a
+  user-defined mapping instead of `HEADER_ALIASES`; `portfolioTemplate.service.ts` (template
+  CRUD/governance, including a composable-transaction `createTemplate(input, client?)` so Save
+  Template can atomically create-and-bind in one transaction); `portfolio.service.ts` gained
+  `createPortfolioFlex()`/`saveFlexTemplate()`/`changeFlexTemplate()`; new
+  `POST /portfolios/flex` (supports a `dryRun` preview branch — the wizard's "Inspect Data"
+  step — mirroring Legacy's own `dryRun` precedent), `POST`/`PUT /portfolios/:id/flex-template`,
+  and the `/portfolio-templates` router (`GET /`, `GET /mine/pending`, `GET /admin/all`,
+  `POST /`, `GET /:id`, `PUT /:id/status`). 472 backend tests (up from 467), `tsc`/lint clean.
+- **Frontend**: `ColumnMappingWizard` (file → header/field mapping → Inspect Data → top-5
+  preview), `FlexTemplatePicker` (searchable Approved list + personal Pending dropdown),
+  `FlexResolutionBanner` (the forced Save-Template-or-Delete-Portfolio UI, re-running the
+  wizard if the original mapping isn't still in browser session state), `FlexPortfolioPage`
+  (the Flex sub-tab — reuses `KpiCards`/`AllocationChart`/`PerformanceChart`/`HoldingsTable`
+  unchanged, same as Legacy), and `PortfolioTemplateApprovalPage` (new Admin Console
+  "Portfolio Templates" tab, gated by `portfolio_template:manage_status`). 256 frontend tests
+  (up from 231), `tsc`/lint clean.
+- **Verified live end-to-end** against the real dev server + CockroachDB Cloud instance, all
+  cleaned up afterward: brand-new-mapping creation → real Dashboard with real data →
+  `flex_template_status: 'Flex-Err'` → Save Template → atomically bound (`Flex` +
+  `upload_template_id`, confirmed via direct row query) and appearing in the creator's own
+  Pending list; reuse of that still-Pending template by id → resolves immediately to `Flex`;
+  changing an already-resolved portfolio's template → re-import + rebind; a plain `user`
+  session correctly 403s on `POST /portfolios/flex`; the Admin Console's new Portfolio
+  Templates tab lists a Pending template, shows its mapping + sample preview on expand, and
+  Approve flips it to `Approved` — immediately visible in a completely unrelated plain user's
+  Approved-template list, confirming the full governance loop end-to-end.
+
+## Config Properties framework ✅ Done
+
+Built 2026-08-24, requirements worked out via conversation first (per the "First discuss and
+finalize the requirement" instruction), then `/plan`-approved and implemented. General-purpose,
+admin-configurable settings so business-tunable values live in the DB and can be changed by
+`admin-master` alone, without a code deploy — not a one-off fix, meant to grow (future examples
+already named: "Max Portfolios Allowed," "Max Stocks in a Portfolio Allowed"). Deliberately
+distinct from `m_function_master`/"Manage Functions" (an unrelated RBAC permission catalog) —
+the two were almost named the same thing, caught early in the conversation.
+
+Migration `027` adds `m_config_group` (free-standing category label), `m_config_property` (the
+definition — `property_key` globally unique + immutable, `value_type` `'integer'`\|`'string'`,
+optional numeric `min_value`/`max_value`, `status` `'active'`\|`'inactive'`), and
+`m_config_property_value` (**append-only value history** — every change inserts a new row and
+flips the previous active row's `is_active` to `false`, transactionally, same shape as
+`roles.service.ts`'s `setUserRole()`; `effective_timestamp` always equals `created_at` for now —
+kept as its own column so real future-dated scheduling can be added later with zero schema
+change). A property can never exist with zero value rows. Reads are always live, no caching
+(`getConfigValue`/`getConfigInt` — the latter never throws, warns + falls back on a
+missing/unparseable value). Full detail (including the DB design) in `Architecture.md`
+Section 1; new tables documented in `backend/src/db/SCHEMA.md`; user-facing walkthrough in
+`User Manual.md`.
+
+**One deliberate exception to "never hardcode a role name"**: `config_properties:manage` can
+only ever be granted to `admin-master` — enforced by a small hardcoded
+`ADMIN_MASTER_ONLY_PERMISSIONS` set inside `roles.service.ts`'s `grantPermission()`, confirmed
+with the user as acceptable since this is genuinely system-level config. The permission
+mechanism itself stays fully DB-driven (still a real, revocable `m_role_permissions` row, still
+checked by `requirePermission` like everything else) — only *which role this one key can be
+granted to* is hardcoded.
+
+**First real consumer wired up**: `contrarianFinder.service.ts`'s previously-hardcoded
+`ADMIN_HISTORY_LIMIT = 60` (admin-tier scan history retention) now reads
+`contrarian_finder_admin_history_retention_count` via `getConfigInt()`, falling back to `60` if
+the config row is ever missing/unparseable.
+
+Backend: `configProperty.service.ts`/`.controller.ts`/`.routes.ts`, every route gated by
+`requirePermission('config_properties:manage')`. 53 new backend tests plus the
+`contrarianFinder.service.test.ts` admin-tier test updated for the new 3rd `pool.query` call
+(542 total), `tsc`/lint clean. Frontend: `api/configProperties.ts` (TanStack Query hooks),
+`ConfigPropertiesPage.tsx` (create group/property, edit metadata, set a new value, view version
+history) wired into `AdminPage.tsx` as a new admin-master-only tab. 18 new frontend tests (290
+total), `tsc`/lint clean. Migration verified live (`SHOW CREATE TABLE` + seeded rows), and
+`config_properties:manage` granted to `admin-master` directly (same manual-grant precedent as
+`contrarian_finder:scan_history`).
+
+**Second real consumer, migration `029`**: the Admin-Master Fallback API Key model's previously
+hardcoded `FALLBACK_ELIGIBLE_ROLES` array (which roles may fall back to the shared admin-master
+FMP/Finnhub key when they have none of their own) is now a `string`-typed config property,
+`api_key_fallback_eligible_roles` (comma-separated role names, group "API Key Access Policies"),
+read live via a new `getConfigStringList()` — no caching, same as the integer consumer above.
+**What actually surfaced this**, per the migration's own note: a new custom role, `user-premium`,
+had no FMP/Finnhub key of its own and wasn't in the hardcoded array — every key-dependent feature
+hard-503'd for it with no way to fix that short of a code deploy, exactly the "business-tunable
+value that shouldn't need a deploy" case this framework exists for. New `ROLE_LIST_PROPERTY_KEYS`
+validation in `configProperty.service.ts` so a `string`-typed property still gets real validation
+(`validateRoleListValue()` — every comma-separated entry, trimmed, must name a role that actually
+exists in `m_roles`) instead of being accepted as an arbitrary opaque string; `getConfigStringList()`
+trims and drops empty entries the same way on the read side. `getDecryptedKey()`'s role-fetch and
+config-read now run concurrently via `Promise.all` rather than adding a second sequential
+round-trip.
+
+## Portfolio Upload — Flex: Footer & Cash Row Markers ✅ Done
+
+Built 2026-08-25–27 — two follow-on rounds to the original Flex wizard (above), both addressing
+real files the user tried mid-testing that didn't fit the original "one clean header row, then
+straight data" assumption.
+
+**Footer marker (migration `028`)**: some broker exports have a trailing summary/disclaimer block
+below the real holdings rows (e.g. "Totals," "As of [date]," legal boilerplate) that the parser
+had no way to exclude — it would either choke on non-numeric cells in that block or, worse, ingest
+it as a bogus holding row. New optional step in `ColumnMappingWizard.tsx`: after Inspect Data's
+top-5 preview, the user can click a row in a full-file grid to mark it (and everything below) as
+the footer; `flexParser.service.ts` truncates before parsing. Persisted as a nullable
+`footer_marker_row` on `m_portfolio_template_mapping_master` so a reused template auto-truncates
+future uploads at the same relative row without re-asking. **Real bug found+fixed live**: manually
+retyping a value into a cell (to fix a bad parse) didn't reach the same code path as a genuine
+file re-upload, so the footer-marker index could silently point past the edited row count —
+fixed by re-deriving the marker against the current in-memory row array on every edit, not the
+original upload's row count.
+
+**Cash row identifier v1 (migration `030`)**: several brokers export a portfolio's cash/money-
+market position as its own row rather than a separate `tx_cash_positions` field the mapping can
+target directly — without a way to flag it, that row either got silently dropped (no `Quantity`/
+`Current Price` combination made sense for it) or, worse, miscounted into holdings math. V1 added
+one pattern only: click a row to mark it "this is the cash row," then map which column holds its
+dollar value (a `cashValueColumn` marker, mirroring the footer marker's click-to-set UX) — covers
+brokers with cash broken out as its own explicit line with a value column.
+
+**Cash row identifier v2 — JSON redesign (migration `031`)**: testing surfaced a second real
+pattern v1 couldn't express — some exports embed the cash amount *inside* a labelled cell
+(e.g. a "Description" column containing literal text like `"CASH & CASH EQUIVALENTS $12,345.67"`)
+rather than a clean separate numeric column. Rather than bolt on more flat columns, replaced the
+3 flat cash columns on `m_portfolio_template_mapping_master` with a single `cash_config JSONB`
+column holding a discriminated union:
+```ts
+type CashValueSource = { kind: 'column'; column: string } | { kind: 'embedded'; pattern: string };
+type CashConfig = { rowMarker: string; value: CashValueSource } | null;
+```
+new `extractEmbeddedCashAmt()`/`coerceCashConfig()` in `flexParser.service.ts` parse the dollar
+figure out of the marked cell via the stored pattern. Wizard's cash step now offers "Same column"
+(Pattern #1, unchanged UX) vs. "Embedded in another column" (Pattern #2, new) as an explicit
+toggle. **Real bug found+fixed live**: switching from Pattern #1 to Pattern #2 left the grid's
+click-target defaulted to "marker" instead of auto-switching to "value," so the very next click
+(intended to pick the embedded-value cell) silently overwrote the already-correct row marker
+instead — fixed by having the "Separate column" step also call `setCashPickTarget('value')` on
+entry, and the same day's follow-up bug where the Inspect Data preview never surfaced the detected
+cash amount at all — fixed by adding a "Cash detected: $X" line to that step.
+
+Migration `030` and its 3 flat columns never shipped to a real user-facing release before being
+superseded by `031` the same week — no backfill/dual-write concern.
+
+## Portfolio Upload — Flex: Guided Stepper ✅ Done
+
+Built 2026-08-26–27 — the wizard had grown, across footer marker + cash identifier v1/v2 above,
+into 4-plus loosely-sequenced optional steps before Inspect Data, and manual testing surfaced
+users skipping straight to "Use This Mapping" without ever scrolling down to actually look at the
+top-5 preview — the one safeguard step 4 of the original flow design depends on ("a template can
+only ever be saved once it's been proven against a real, rendered Dashboard" — but that proof is
+worthless if the human never looked at the intermediate preview either).
+
+Replaced the flat toggle row with a real 6-step stepper — **Header → Footer → Cash → Map Columns
+→ Inspect Data → Confirm Mapping** — rendered as a single combined bar: a left `stageActions` zone
+(the step's own Back/Next/Skip buttons, distinct background) and a right stepper zone
+(`bg-bg-card`, one indicator per `DISPLAY_STEPS` entry) separated by a visible divider, with a
+`stepStatus()` function deriving each indicator's done/current/upcoming state from the wizard's
+existing state machine — no new state, purely a derived view.
+
+**Scroll-to-review gate**: "Use This Mapping" stays disabled until the user has actually scrolled
+the top-5 preview into view — a `hasSeenPreview` flag flipped by an `IntersectionObserver` watching
+a `previewEndRef` sentinel placed after the last preview row, plus a visible remark near the
+disabled button explaining why. Once triggered, `hasSeenPreview` stays true even if the user
+scrolls back up — the gate only needs to confirm the preview was seen once, not that it's
+currently in the viewport.
+
+`ColumnMappingWizard.test.tsx`/`FlexPortfolioPage.test.tsx` needed a `vi.stubGlobal('Intersection
+Observer', ...)` mock (jsdom has no real implementation) capturing registered callbacks so tests
+can call `simulatePreviewScrolledIntoView()` — wrapped in React Testing Library's `act()` to avoid
+act-warnings, since the callback synchronously updates component state outside an event handler.
+
+## Portfolio Template Governance — Delete, Bound-Portfolios & Unattached Portfolios ✅ Done
+
+Built 2026-08-27 — a cluster of admin-side template-lifecycle gaps surfaced while manually testing
+the Flex wizard work above, all scoped to the existing Portfolio Templates admin tab (no new menu
+items), following the "admin acts on another user's resource, tightly scoped" pattern already
+established by this repo's other admin-adjacent features.
+
+**Hard-delete a template**: templates were previously permanent once created ("never deleted, only
+status-changed," per the original Flex build) — the user found this too rigid for `Rejected`/still-
+`Pending Approval` templates created by mistake during testing. New delete action, restricted to
+those two statuses only (an `Approved` template already bound to real portfolios can never be
+hard-deleted, only rejected going forward) — blocked outright if any portfolio is currently bound
+to it via `upload_template_id`.
+
+**Bound-portfolios pop-up**: rather than a bare "can't delete, in use" error, a blocked delete
+attempt now opens a pop-up listing every portfolio still bound to that template (owner email +
+portfolio name), each with its own delete action — resolving the block from the same screen
+instead of sending the admin off to hunt through Manage Users/Dashboards first. **Real bug found
++fixed live**: deleting a bound portfolio from this pop-up hit the same `useDeletePortfolio` query-
+cache race the standalone Dashboard delete flow had already fixed once (see the frontend `client
+.ts`/`queryClient.ts` global-401 work below for the general pattern) — the pop-up's own list wasn't
+using the fixed `removeQueries`-based hook, so a deleted portfolio could still flash in the list
+until the next full refetch. Fixed by wiring the pop-up onto the same shared hook instead of a
+bespoke fetch.
+
+**Unattached Flex Portfolios (View + Delete)**: the user found a real orphaned portfolio
+("Charles-Schwab - Complete") stuck at `flex_template_status = 'Flex-Err'` — created via Flex, left
+before Save Template/Delete Portfolio, with no UI anywhere surfacing that it existed. Per the
+user's explicit placement instruction, built as a new section *inside* the existing Portfolio
+Templates admin tab, not a standalone menu item. New `listUnattachedFlexPortfolios()`/
+`deleteUnattachedFlexPortfolio()` in `portfolio.service.ts` (scoped strictly to
+`flex_template_status = 'Flex-Err'` — never touches a resolved `'Flex'` or Legacy portfolio), new
+`GET`/`DELETE /portfolio-templates/unattached-portfolios(/:portfolioId)`, gated by the same
+`portfolio_template:manage_status` permission as the rest of that tab (no new permission needed —
+this is squarely template-governance work). New `UnattachedFlexPortfoliosSection` component in
+`PortfolioTemplateApprovalPage.tsx`. Live-verified: the real orphaned Charles-Schwab portfolio
+appeared in the list and was cleanly deleted.
+
+## Header Persona Badge ✅ Done
+
+Built 2026-08-27 — a small usability gap noticed while juggling multiple test accounts across
+roles during manual QA: the header showed no quick way to confirm which account/role a given
+browser session was actually signed in as without opening Admin → Manage Users or squinting at
+`/auth/me`. New `UserPersonaBadge.tsx` — an initials-seal badge (`data-testid="user-persona-
+badge"`) rendered in both `TabShell.tsx`'s and `AdminPage.tsx`'s headers, with a native `title`
+tooltip showing the full email and role(s) on hover (no extra dependency for a custom tooltip).
+Small enough to not warrant its own migration or backend change — purely derived from the already-
+fetched `useSession()` data.
+
+## Global 401 Self-Healing Session ✅ Done
+
+Built 2026-08-27 — root-caused a recurring "the app looks like the backend is down" report that
+turned out to be entirely client-side: `useSession()`'s `staleTime: Infinity` meant that once a
+cookie went stale (expiry, or a backend restart invalidating the JWT secret in dev), the frontend
+kept trusting its cached "logged in" state and let every subsequent authenticated call fail with an
+uncaught 401 instead of ever re-prompting login — surfaced first as a user report asking whether
+logging into two different roles from the same browser tab was supported (it isn't — the cookie is
+per-origin, not per-tab — but chasing that question surfaced the real underlying bug).
+
+New `frontend/src/lib/queryClient.ts` exports: `SESSION_EXPIRED_STORAGE_KEY` and
+`clearSession(client: QueryClient, options: { markExpired?: boolean } = {})` — clears the cached
+session/portfolio/etc. query state and, when `markExpired` is set, drops a `sessionStorage` flag
+for the next page load to notice. `frontend/src/api/client.ts`'s `apiFetch` now calls
+`clearSession(queryClient, { markExpired: true })` on *any* `401` response, from *any* call site,
+before throwing — a single global choke point rather than teaching every page its own 401 handler.
+`useLogout` reuses the same `clearSession()` (without `markExpired`) for the ordinary logout path.
+`LoginPage.tsx` checks/clears the flag on mount and shows a "Your session ended, please log back
+in" banner (`data-testid="login-session-expired"`) when it was set.
+
+**Real bug found+fixed during design**: the first version of `clearSession` closed over the
+singleton `queryClient` import directly, which broke `useLogout`'s existing test (that test
+constructs its own local `QueryClient` instance, never the app singleton) — fixed by making
+`clearSession` take the `QueryClient` as an explicit parameter instead of importing the singleton,
+so callers (real app code and tests alike) always pass the instance they actually mean.
+
+Also fixed the same day: a `useDeletePortfolio` 404 console error on delete — a blanket
+`invalidateQueries(['portfolios'])` was refetching the just-deleted portfolio's own detail query
+before the caller's state update could navigate away from it. Switched to
+`queryClient.removeQueries({ queryKey: ['portfolios', id] })` for the specific deleted portfolio
+plus an `exact`-scoped `invalidateQueries` for the list only — this is the same shared hook later
+reused by the bound-portfolios pop-up above.
+
+## "Login-as" Impersonation ✅ Done
+
+Built 2026-08-28, `/plan`-approved after a same-session discussion of the idea ("Heavy Lift or OK
+Lift?" — assessed as an OK lift given the existing JWT/RBAC/admin-user-list foundation already in
+place). Lets an `admin-master` account view the app exactly as a specific user sees it, without
+their password — a non-intrusive troubleshooting tool for the multi-role rollout, not a general
+admin feature. Per explicit direction, the permission is deliberately **admin-master-only and
+granted via direct SQL only**, never through the Admin Console's Manage Permission screen — same
+backend-only rollout precedent as `config_properties:manage`/`contrarian_finder:scan_history`.
+
+**Dual-identity JWT, not a second session**: `auth.service.ts`'s `TokenPayload` gains an optional
+`impersonatedBy` (the admin's own user id); `signToken()` takes an `{ impersonatedBy?, expiresIn?
+}` option; `requireAuth.ts`/`types/express.d.ts` carry the same optional field onto `req.user`. One
+cookie, one token, both identities recoverable from it. Impersonation sessions get a deliberately
+shorter expiry (new `env.impersonationExpiresIn`, default `1h` vs. the normal 7d) — when it lapses,
+the Global 401 Self-Healing Session work above already handles it gracefully with zero new
+plumbing.
+
+**New `impersonation.service.ts`**: `startImpersonation(adminId, targetUserId)` 404s on a
+nonexistent target and blocks (403, `CannotImpersonateAdminError`) a target holding *any*
+admin-console permission (`roles:manage`/`permissions:manage`/`users:manage_roles`/
+`functions:manage` — the same set `hasAdminConsoleAccess` already checks frontend-side, mirrored
+backend-side) — impersonating another admin is a privilege-escalation path, not a support tool,
+full stop. `endImpersonation(adminId, targetUserId)` stamps `ended_at`. New migration `032`: an
+`m_function_master` row for `users:impersonate` (not granted by the migration itself — granted to
+`admin-master` via a direct, separate SQL statement), and `user_evt_impersonation_log`
+(`admin_user_id`/`target_user_id`/`started_at`/`ended_at` nullable, `WITH (ttl_expire_after = '180
+days')` — longer than usage-tracking's own TTLs, since this is a security audit trail).
+`roles.service.ts`'s `ADMIN_MASTER_ONLY_PERMISSIONS` set gains `'users:impersonate'`.
+
+**Auth controller**: `POST /auth/impersonate` (`requireAuth` + `requirePermission('users
+:impersonate')`) rejects nested impersonation with `409` if `req.user.impersonatedBy` is already
+set, otherwise signs a new short-lived token for the target and sets the cookie. `POST /auth/stop-
+impersonating` (`requireAuth` only) `400`s if not currently impersonating, otherwise ends the audit
+row and signs a fresh normal-length token for the *original* admin. `GET /auth/me` gains
+`impersonating: boolean`.
+
+**Frontend**: `User.impersonating`; `switchIdentity(queryClient, user)` helper (`clear()` then a
+synchronous `setQueryData` — no clearSession-style deferred race to guard against here, since the
+new cookie is already valid the instant this runs, unlike the logout/expiry case). New
+`LoginAsModal.tsx` (reuses the existing `useUsersWithRoles()`/`GET /users`, already gated by
+`users:manage_roles` — no new list endpoint needed; search/filter, explicit confirm step, surfaces
+a failed attempt's backend error inline instead of closing). New `ImpersonationBanner.tsx`
+(`data-testid="impersonation-banner"`, rendered in both `TabShell.tsx` and `AdminPage.tsx` — "You
+are viewing as {email}." plus a "Return to my account" button, `data-testid="return-to-my-
+account"`). `AdminPage.tsx` gains a "Login as User" header trigger, hidden entirely without
+`users:impersonate`, same permission-gating pattern as every other admin-console control.
+
+New `impersonation.service.test.ts` (4 tests), extended `auth.controller.test.ts` (`/auth
+/impersonate`/`/auth/stop-impersonating` blocks, updated `/auth/me` test), new `LoginAsModal
+.test.tsx` (4 tests), new `ImpersonationBanner.test.tsx` (3 tests), extended `AdminPage.test.tsx`
+(2 new tests for the header trigger's permission gating), `UserPersonaBadge.test.tsx` fixed for the
+new `impersonating` field on the test `User` fixture. `tsc`/lint clean both sides.
+
+**Live-verified 2026-09-12**: ran the full two-real-account walkthrough from the actual app —
+admin-master `subrataroygcp@gmail.com` impersonating plain user `Joinbb@gmail.com`, confirming the
+banner/Dashboard reflect the target's real data and "Return to my account" restores admin-master
+cleanly. Separately confirmed directly against the DB that `user_evt_impersonation_log` recorded a
+non-null `ended_at` (~14 seconds after `started_at`) for that session — the one sub-check that
+needed DB access rather than just the browser. Closes the live-verification gap noted at build
+time; no longer listed in Next Up.
+
+## Flex Wizard — Progress-Bar Stepper Redesign ✅ Done
+
+Built 2026-08-29, in response to live feedback on the guided stepper (above): the "current step"
+badge reused the exact same solid `bg-accent`/`text-white` styling as the Next/Skip buttons, so it
+visually read as a clickable button rather than a progress indicator. Redesigned as a real
+numbered-circle track: done steps are filled green circles with a checkmark and a green connecting
+line, the current step is an **accent-outlined, not filled**, circle with a bold accent label,
+upcoming steps are plain gray-outlined circles. Also: "Confirm the header row to continue" is now
+bold amber (`text-warning`) instead of plain muted gray — a clearer "action needed" nudge, distinct
+from both ordinary secondary text and the buttons' own blue. The Header/Footer/Cash stage
+instructional paragraphs stay normal weight but are now a soft blue (`text-accent/80`) instead of
+blending into ordinary muted secondary text elsewhere on the page. No `data-testid`/`data-state`
+changes, so no test updates were needed — purely a styling pass.
+
+## Self-Registration, Password Policy & Security-Question Recovery ✅ Done
+
+Built 2026-08-29–30 across three rounds (the core feature, a selectable-questions/post-login-
+management refinement, then a question-count reduction) — closes the gap flagged when the user
+asked "how can a user change their password today?": until now, only an admin could rewrite a
+password via Manage Users, and public signup was a bare email+8-char-password form that
+immediately granted an active `user` account.
+
+**Registration**: `SignupPage.tsx` rewritten into "Register New User" — email, first/last name, a
+7-rule password (below), and the user's own choice of 5 of the app's 15 security questions
+(`SecurityQuestionPicker.tsx`, shared with the post-login Manage Security Questions screen — see
+below). New accounts are created `status: 'pending'` with **no role assigned** — a deliberate
+removal of the old auto-`user`-role signup behavior — and stay functionally locked out until an
+admin assigns a role and activates them via the existing Manage Users screen.
+`auth.service.ts`'s `login()` now lets `'pending'` through (only `deactivated`/`cancelled` still
+block) so a pending account can log in immediately and see **only** a new full-screen
+`PendingReviewPage.tsx` ("Thanks for Registering... under Review...") — `ProtectedRoute.tsx`
+renders it in place of `<Outlet />` for any `'pending'` session, uniformly across every protected
+route, not per-page.
+
+**Password policy** (`backend/src/utils/passwordPolicy.ts`, the sole enforcement authority; mirrored
+client-side in `frontend/src/lib/passwordPolicy.ts` for live feedback, same "two hand-maintained
+copies" precedent used elsewhere in this codebase) — 7 rules: 15–25 characters; ≥1 uppercase; ≥1
+number; ≥1 special character (`! @ # $ % ^ & * ( ) _ - + = ? .`); doesn't contain the user's first
+or last name; doesn't contain 5+ consecutive characters from the email's local-part; and — server-
+only, via new `passwordHistory.service.ts` (migration `035`'s `user_evt_password_history`,
+insert-then-prune to 5) — isn't a repeat of the last 5 passwords. `PasswordRequirementsChecklist
+.tsx` shows the first 6 as a live-updating ✓ checklist, the 7th as a static note (it needs a DB
+round-trip, can't be verified while typing) — one shared component, reused by Registration, Change
+Password, and Forgot Password's final step.
+
+**Forgot Password — security-question-based, not email** (no email provider exists in this repo,
+deliberately avoiding that dependency): migration `034` adds `m_security_question` (15 seeded, see
+`SCHEMA.md`) and `users_security_answers` (bcrypt-hashed, never plaintext). Three stateless
+endpoints — `/auth/forgot-password/start|verify|reset` — hand a short-lived signed challenge/reset
+token forward at each step (same pattern as Login-as's own token, no persisted reset-session table
+needed). `start` randomly challenges 3 of the account's 5 saved questions; all 3 must match
+(generic "one or more answers were incorrect," never revealing which) to get a reset token.
+Migration `033` adds nullable `first_name`/`last_name` to `users` (needed for the name-substring
+rule to have anything to check against).
+
+**Round 2 — selectable questions + post-login management, per explicit follow-up requests**: the
+registration form originally handed out a random subset of the 15 questions; changed so the user
+instead **picks their own**, via fixed "Question N" **dropdown slots** (`SecurityQuestionPicker
+.tsx`) — slot 1 offers all 15, each later slot's options narrow to exclude whatever's already
+picked in another slot (its own current pick stays selectable so switching back is possible). Built
+first as a flat checkbox list, then redesigned into this per-slot dropdown per explicit live
+feedback ("a better design" — a checkbox list doesn't guide a user toward exactly N distinct picks
+the way N numbered slots do). `GET /auth/security-questions` (renamed from `/random`, no more
+server-side randomization there — Forgot Password's own challenge pick is unaffected, still
+genuinely random). New post-login **`ManageSecurityQuestionsPage.tsx`** (`GET .../mine` + `PUT
+/auth/security-questions`, current-password-confirmed, full replace only — answers are one-way
+hashed, so nothing can be silently "kept," even a re-selected question needs its answer retyped)
+— also how an admin-created account (which never collects Q&A at creation) sets them up for the
+first time. Reached via a new **user-icon dropdown** (`UserPersonaBadge.tsx` is now a clickable
+menu trigger, backdrop-click-to-close, same pattern as `TabShell.tsx`'s existing API Keys modal)
+holding both "Change Password" and "Manage Security Questions" — consolidated out of the old
+standalone header link.
+
+**Round 2 also fixed a live-reported UX bug**: the checklist's name/email rules use negated logic
+("doesn't contain X"), so an *empty* password trivially read as passing them — fixed with a
+`MIN_CHARS_BEFORE_GATING = 4` floor in `frontend/src/lib/passwordPolicy.ts`: no rule shows green
+until at least 4 characters are typed, applied uniformly across all 6 live rules (display-only,
+doesn't affect what's actually enforced at submit).
+
+**Round 3 — question count reduced from 7 to 5** (2026-08-30, live-reported: "Setting up 7
+Questions is a little exhausting"): `REGISTRATION_QUESTION_COUNT` (backend `auth.controller.ts`)
+and `REQUIRED_QUESTION_COUNT` (frontend `SignupPage.tsx`/`ManageSecurityQuestionsPage.tsx`) both
+changed 7→5; `CHALLENGE_QUESTION_COUNT` changed 4→3, so Forgot Password now randomly challenges 3
+of the user's 5 saved answers instead of 4 of 7. Pure count change, no DB migration needed — the
+`securityQuestion.service.ts` functions were already generic on an explicit count parameter, so
+only the two controllers'/pages' constants and their comments/tests moved. Verified live against
+the real dev DB with a throwaway account: a 5-answer signup succeeds, a 6-answer signup is rejected
+`400`, and a Forgot Password challenge on that account returns exactly 3 questions.
+
+**Two real bugs found and fixed during the core build**:
+1. The special-character regex's character-class escaping didn't escape `-`, producing an invalid
+   range (`_-+` = "everything from `_` to `+`") — crashed the whole `auth.controller.test.ts` suite
+   at import time, caught immediately by the test run, not by `tsc`.
+2. **The frontend's typecheck command was a silent no-op for this entire multi-day feature.**
+   `npx tsc --noEmit -p tsconfig.json` against this project's `references`-based root
+   `tsconfig.json` (`"files": []`) checks nothing without `-b`. The correct command —
+   `npx tsc -b --noEmit`, matching `package.json`'s own `typecheck` script — surfaced 3 real,
+   previously-undetected errors (two test fixtures missing the newer `status`/`firstName`/
+   `lastName` fields, one stale `useSignup` test) the moment it was actually run correctly. Fixed
+   immediately; every frontend typecheck claim from this point forward in this file uses the real
+   command. Runtime tests (Vitest) were never affected — they don't depend on `tsc` — so this was a
+   compile-check-only gap, not a functional one.
+
+678 backend tests, 398 frontend tests (up from 373 before this feature), `tsc`/lint clean both
+sides (using the corrected command). **Verified live across all three rounds** against the real dev
+DB with throwaway accounts, cleaned up after each: (1) core build — register → `pending`/no-role →
+same session shows `active` + real permissions immediately after the DB-level equivalent of an
+admin's approval, without re-login → full Forgot Password round trip (wrong answer generically
+rejected, correct answers → reset → working new password) → reuse-from-history correctly blocked,
+a genuinely new password accepted; (2) round 2 — registered with a deliberately scattered question
+selection, confirmed `GET .../mine` matched exactly, replaced the whole set via `PUT`, confirmed
+Forgot Password's next challenge drew only from the *new* set; (3) round 3 — confirmed the 5/3
+counts above via a real signup + forgot-password-start call.
+
+**Known gaps, not yet closed**: no email-based recovery path exists at all (by design, but worth
+naming as a real limitation if a user loses access to both their password and their memory of their
+security answers); no rate-limiting/lockout specific to `forgot-password/verify` beyond the
+existing per-IP `rateLimiters` already wrapping `/auth`; `forgot-password/start` isn't anti-
+enumeration-safe (404s plainly on an unknown email), a deliberate simplicity tradeoff, consistent
+with this app's own existing precedent of not hiding account existence everywhere.
+
+**Real bug found+fixed 2026-08-31, reported live**: entering a wrong current password on Change
+Password (or Manage Security Questions) immediately logged the user out with a "Your session ended"
+message — not a session bug at all. Root cause: `changePassword`/`updateSecurityQuestions` returned
+`401` for "current password is wrong," colliding with `apiFetch`'s global rule (Global 401
+Self-Healing Session, above) that *any* `401`, from *any* endpoint, means the session token itself
+is invalid and force-logs the user out. A wrong-but-still-authenticated password check is a
+validation failure, not an auth failure. Fixed by changing that response (and, while auditing every
+other `401` in `auth.controller.ts` for the same collision, the three Forgot Password error cases —
+invalid challenge token, wrong answers, invalid reset token, all public/logged-out endpoints where
+the mislabeled `401` could otherwise prime a spurious "session ended" banner for the next login) to
+`400`. `requireAuth`'s own `401`s (missing/invalid/expired session) are untouched. New regression
+test in `client.test.ts` exercises the real `apiFetch` (not a mock of it) to directly guard this —
+the reason the bug shipped in the first place is that `ChangePasswordPage.test.tsx`/
+`ManageSecurityQuestionsPage.test.tsx`/`ForgotPasswordPage.test.tsx` all mock `apiFetch` itself,
+bypassing the interceptor entirely. Verified live: a wrong current password now returns `400` and a
+follow-up `GET /auth/me` confirms the session is still valid.
+
+## Contrarian Finder — Run History (view archived runs) ✅ Done
+
+Built 2026-08-31, `/plan`-approved after a two-turn design conversation (feasibility analysis,
+then a full UI/UX proposal) — `tx_shared_contrarian_run` already stored a full JSONB snapshot per
+completed scan (up to a configurable admin-tier retention cap, Config Properties-driven, currently
+30), but the only read path was `GET /contrarian-finder/last-scan`, always just the single newest
+row. No way existed to browse older runs at all.
+
+**Gated Function, zero default grants — the user's own explicit requirement**: new
+`contrarian_finder:view_history` permission (migration `036`) is invisible/unusable for a role
+until an `admin` or `admin-master` explicitly grants it via the Admin Console's Manage Permission
+screen — same zero-default-grant precedent as `config_properties:manage`/`users:impersonate`
+(migrations `027`/`032`), but **not** added to `roles.service.ts`'s
+`ADMIN_MASTER_ONLY_PERMISSIONS` set, since the user asked for "Admin **or** Admin-Master" to be
+able to grant it to any role — the normal, unrestricted grant path every other permission uses.
+`RolePermissionsPage.tsx` sources its checklist live from `GET /functions`, so the new Function
+appeared in Manage Permission automatically — no admin-console frontend change needed.
+
+**Backend**: `contrarianFinder.service.ts` gained `listRunHistory()` (metadata only — id,
+completedAt, universeSize, scanned, params, **excluding the ~150KB-per-row `results` blob** to
+keep the list call cheap) and `getRunById(id)` (the full record, same shape `getLastScan()`
+already returns). Both tier-agnostic, mirroring `getLastScan()`'s own "viewing ignores `run_tier`"
+philosophy. New `GET /contrarian-finder/run-history` / `GET /contrarian-finder/run-history/:id`,
+both gated by `requirePermission('contrarian_finder:view_history')` — the real enforcement; the
+frontend hiding the entry point is UX only, same split already used for `contrarian_finder:scan`.
+
+**Frontend**: new `ContrarianRunHistoryDrawer.tsx` — a right-side slide-over (not a centered modal
+like the API Keys dialog), deliberately chosen so the live page stays fully visible/usable behind
+it while browsing. `ContrarianFinderPage.tsx` gained a completely separate `archivedRunId` piece of
+state — selecting an archived run **never** writes into `scan.data`, sessionStorage, or the
+TanStack cache slot the live view owns, satisfying "without disturbing the current default view"
+literally, not just visually. An amber "📁 Viewing an archived run from … [← Back to current run]"
+banner replaces the "Last scan used" caption while active; the drop-threshold filter and
+Candidates/Strength List tabs keep working against the archived data (pure client-side filtering,
+already decoupled from where `results` came from). Starting a new scan, or clicking "Back to
+current run," both immediately clear back to the live view.
+
+**Real bug found+fixed during the build**: the page's existing cross-tab Strength List cache sync
+(`STRENGTH_LIST_QUERY_KEY`, read by `MomentumPage.tsx`) was initially wired to the same
+archive-aware `strengthList` variable used for display — meaning viewing an archived run would
+have leaked that run's strength list into a completely different page's shared cache, exactly the
+kind of disturbance this feature was built to avoid. Fixed by keeping the cache-sync effect keyed
+strictly to `scan.data` (live only), computing its own `liveStrengthList` independently of the
+display variable.
+
+689 backend tests (11 new), 411 frontend tests (12 new), `tsc`/lint clean both sides. **Verified
+live against the real dev DB and its 9 real stored runs**: confirmed `403` before any grant,
+directly granted `contrarian_finder:view_history` to a throwaway role (DB-level equivalent of the
+Admin Console's own grant action), confirmed `200` with the real run list (no `results` in the
+payload), fetched one real run's full detail (348 real results, matching that run's own `scanned`
+count), confirmed an unknown id `404`s, then cleaned up the throwaway role/grant/account. The
+drawer/banner/archive-mode UI interactions themselves were verified via the 5 new frontend
+integration tests rather than a live interactive browser walkthrough — flagged as a lighter-weight
+verification pass than usual, available on request.
+
+## Usage Audit + Flex Portfolio Quota Limits ✅ Done
+
+Built 2026-09-05/06 across 7 `/plan`-approved phases (one phase per turn, each built/tested/
+live-verified/reported before the next was scoped), closing two requests from the same
+conversation: (1) making the write-only Usage Tracking data (`user_evt_usage`/
+`user_evt_usage_summary_monthly`, RBAC item's leftover) actually accurate and eventually
+reportable, and (2) per-user caps on Portfolio Upload — Flex template/portfolio creation.
+
+**Phase 1-2 — Usage Audit schema + real API-call detail**: migration `038` adds nullable
+`api_call_details JSONB` to both usage tables plus a new single-row
+`sys_usage_aggregation_watermark` table (`sys_` bucket, mirrors `sys_schema_migrations`).
+`usageTracking.service.ts`'s `logUsage()` gained an optional per-call breakdown parameter —
+`portfolio_refresh`/`contrarian_finder_scan` (the 2 heaviest features) now log real FMP call
+counts instead of the old implicit `1` (one Refresh Prices click is
+`fmpQuoteSymbols.length + historySymbols.length` real calls, previously invisible).
+`event_count`'s existing real-time semantics are untouched — only the new JSONB detail is
+deferred to a watermark-gated daily job (`maybeRunDailyUsageAggregation()`, triggered
+fire-and-forget from `login()`) that merges it into the monthly summary and prunes the raw rows.
+`GET /quotes` tracking and extending call-level detail to Momentum/Long-Term Analysis/Contrarian
+Comeback were both deliberately scoped out (introducing a brand-new tracked feature vs. a small
+first pass) — noted as open, not forgotten.
+
+**Phase 3-4 — Flex Portfolio quota schema + enforcement**: migration `039` adds a "Flex
+Portfolio Limits" Config Properties group (`portfolio_flex_max_pending_templates`=2,
+`_approved_templates`=5, `portfolio_flex_max_portfolios`=6) plus 3 nullable
+`flex_max_*_override` columns on `users` (`NULL` = use the global default). New
+`flexQuota.service.ts` resolves the effective limit per user. Enforced in
+`portfolioTemplate.service.ts`'s `createTemplate()` — checked **at creation time**, including
+the caller's current Approved count (not just Pending), since the confirmed rule is "once a
+user has the max Approved templates, they can't create any more until an admin raises their
+quota," even though a new template always starts Pending — and in `portfolio.service.ts`'s
+`createPortfolioFlex()` (counts `Flex` + `Flex-Err` portfolios together). New
+`TemplateQuotaExceededError`/`PortfolioQuotaExceededError`, both mapped to `409` at every
+relevant controller call site including the Save-Template path.
+
+**Phase 5 — Created-By on the admin template list**: `listAllTemplates()` gained a `LEFT JOIN
+users` and a new `AdminTemplateSummary` type (`createdByEmail`) — deliberately kept off the
+shared `TemplateSummary` type used by the approved/pending lists, which have no need for it.
+
+**Phase 6 — Admin override editing**: the existing `PUT /users/:id` endpoint (not a new route)
+accepts the 3 override fields with `undefined`/`null`/number = don't-touch/clear/set semantics.
+`roles.service.ts`'s `listUsersWithRoles()` (backing `GET /users`) now returns the 3 current
+override values so the UI never shows blank fields for a user who already has one set. Per an
+explicit design discussion, the 3 fields live in a new **pop-up** (`FlexQuotaOverridesModal.tsx`,
+triggered by a "Flex Quotas" button on Manage Users) rather than crammed into the already-tight
+per-row edit line — this is a rare exception action, not routine editing.
+
+**Phase 7 — Created-By/Created-Date display + filters**: `PortfolioTemplateApprovalPage.tsx`
+now shows each template's real creator email + creation date, plus Name/Status/Created-By
+filter controls (client-side, same pattern as `UserRolesPage.tsx`'s own filter bar).
+
+**A live-caught, same-session regression, fixed in Phase 6 itself**: adding the Flex Quotas
+button and narrowing the Password input broke Manage Users' filter-header alignment (the header
+row was never updated to match) — fixed before this ever shipped, not a released bug.
+
+764+ backend tests, 450+ frontend tests by the end of Phase 7, `tsc`/lint clean both sides
+throughout. Every phase live-verified against the real dev DB with throwaway accounts, cleaned
+up after each (quota boundaries hit exactly at 2/5/6, per-user overrides raising/lowering the
+effective limit and reading the *live* Config Property value — not a hardcoded fallback,
+confirmed by bumping the global default mid-test and watching a never-overridden user's
+effective limit track it).
+
+**Known gaps, not built this pass (see Next Up)**: the quota-exceeded `409` messages render via
+existing generic error-display scaffolding (real backend message, plain red text) — no special
+styling/CTA, no pre-submission guard, no client-side visibility into a user's current limit.
+
+## Admin Console UI Cleanup — Grouped Tabs + Filter Alignment ✅ Done
+
+Built 2026-09-06, two observations raised before starting the Usage Dashboard. `AdminPage.tsx`'s
+9 flat top-level tabs collapsed to 6: Manage Users/Functions/Permission/Role now live under one
+"Manage User Attribute" parent tab, revealing the 4 as sub-tabs on click — same sub-tab bar
+pattern `TabShell.tsx` already used for Portfolio's Legacy/Flex split. Pure navigation
+regrouping, no permission-gating change (none of the 4 were ever hidden by permission). Also
+fixed the filter-header misalignment noted above: the "Password" header label is now
+"New Password" at a matching fixed width, and a header placeholder was added for the "Flex
+Quotas" column that never had one.
+
+## User Usage Dashboard ✅ Done
+
+Built 2026-09-06, `/plan`-approved — the first read/reporting surface over the Usage Audit data
+above, which had been write-only since it existed. New Admin Console "User Usage" tab, two
+sub-tabs: **Last 3 Days** (default) and **Monthly** (with a month picker, since
+`user_evt_usage_summary_monthly` already retains ~12 months). Landing view: users ranked by a
+usage score — real API-call counts summed where known, falling back to 1-per-event
+(Last 3 Days) or the row's own `event_count` (Monthly) for the 3 features without call-level
+detail yet — a zero-usage user still appears, at the bottom, rather than being omitted.
+
+**A real design conflict surfaced and fixed while scoping this**: the existing daily
+aggregation job deleted a feature's raw detail rows as soon as they were folded into the
+monthly summary (within ~24h) — too soon for a "Last 3 Days" view to ever see the full window.
+Fixed by changing the job's merge/delete query to only touch rows **older than 3 days**,
+guaranteeing Last 3 Days always has complete raw detail; the monthly summary's own detail is
+delayed by up to those same 3 extra days for the newest activity (already-accepted lag).
+
+New `getUsageRankingLast3Days()`/`getUsageRankingForMonth()`/`getAvailableUsageMonths()` in
+`usageTracking.service.ts`, `GET /usage-audit/{last-3-days,monthly,available-months}` gated by a
+new zero-default-grant `usage_audit:view` permission (migration `040`, same "Admin or
+Admin-Master can grant to any role" precedent as `contrarian_finder:view_history`). 778 backend
+tests (25 new), 458 frontend tests (7 new). **Live-verified against the real dev DB**: real-call-
+sum + event-fallback scoring confirmed correct; the 3-day retention boundary confirmed exactly
+right (a 2-day-old detail row survived a sweep untouched, a 4-day-old one was merged+deleted);
+directly observed Monthly temporarily under-reporting very recent activity via the event-count
+fallback until the sweep catches up — confirmed as the designed tradeoff, not a bug.
+
+## Stock Analysis Tab — 4 Simultaneous Preview Quadrants ✅ Done
+
+Built 2026-09-07. New top-level "Stock Analysis" tab (`stock_analysis:view`, migration `041`,
+gated Function, zero default grants — hidden entirely from the nav without it, same pattern as
+Admin/API Keys, plus a direct-URL guard since every other tab here has always been open to any
+signed-in session). Four independent, always-visible quadrants, each an on-demand ticker lookup
+— deliberately not built on `tickerHistory.ts`'s `useTickerHistory()` (that hook models "one
+active symbol + a switchable history list," the wrong shape when all 4 slots are simultaneously
+live). New `useStockAnalysisTickers()` (`stockAnalysisTickers.ts`) persists the 4 slots to
+`sessionStorage`, same session-only/survives-reload/clears-on-close precedent as Contrarian
+Finder's scan results.
+
+`StockPreviewChart.tsx`'s body was extracted into a new, reusable `StockPreviewBody.tsx` so the
+existing standalone modal and the 4 new quadrants share one implementation — `StockPreviewChart`
+itself is now just a thin modal wrapper around it. `stockPreview.controller.ts` gained its first
+usage-tracking call (`logUsage(userId, 'stock_preview', { fmp_historical: 1, fmp_quote: 1 })` —
+2 real FMP calls per lookup, quote + historical, same as every other price-lookup feature).
+
+**Real bug found and fixed during the build**: `useStockPreview`'s query function never threaded
+React Query's cancellation `AbortSignal` through to the underlying `fetch()`, so React
+StrictMode's dev-mode double-mount caused two real, duplicate HTTP calls to both complete and
+both get logged — confirmed live via 4 duplicate `user_evt_usage` rows created within 153ms of
+each other. Fixed by passing `{ signal }` from `queryFn` into `apiFetch()`.
+
+## Long-Term Analysis / Contrarian Comeback — Shared Daily FMP Cache ✅ Done
+
+Built 2026-09-07 across several phases in one session (Contrarian Comeback's own short-lived
+Gate→Submit cache, Long-Term Analysis's day-level cache, a 3-part refinement pass, then
+extending the same day-cache to Contrarian Comeback). New `m_fmp_daily_cache` (migration `042`)
+— one row per `(symbol, api_name)`, refreshed once per US-Eastern calendar day, **shared across
+all users** (market data is identical regardless of who fetches it, unlike per-user data).
+`fmpDailyCache.service.ts`'s `getOrFetch<T>(symbol, apiName, description, fetchFn, opts?)` is
+the single reusable function both `longTermAnalysisData.service.ts` and
+`contrarianComebackData.service.ts` now route every FMP call through, confirmed live to actually
+cross-benefit (a symbol looked up via one feature costs the other ~0 calls the same day).
+
+**Market-hours-aware hybrid**: exactly one call per feature (`quote`, the subject's own live
+price) stays realtime during market hours (weekday, 9:30am–4:00pm America/New_York, deliberately
+no holiday calendar), folding into the day-cache after close. Every other call — `profile`,
+`income-statement`, `price-target-consensus`, `grades`, `insider-trading`, historical price bars,
+balance-sheet/cash-flow statements, peer quotes — is always day-cached. Standardized a real
+inconsistency found while cross-checking the two features: `grades` was fetched with different
+`limit` params by each (unbounded vs. `limit=50`) — since the cache doesn't key on query params,
+whichever feature ran first for a symbol would silently decide the other's dataset too. Both now
+use the more-inclusive `limit=50`.
+
+Separately, a **short-lived, per-`(userId, symbol)` in-memory cache** (`contrarianComebackCache
+.ts`, 30-minute TTL — a different mechanism from the day-cache above, not DB-backed, not shared
+across users) stops Contrarian Comeback's Gate and Submit steps from independently re-fetching
+the same ~10 FMP calls within one user's own round trip.
+
+`apiCallCounts` for both features became a real, live count of calls that weren't served from
+cache (`!wasCached`), replacing fixed formulas — Usage Audit numbers now reflect actual FMP cost,
+not a theoretical maximum. Momentum's `logUsage()` call also gained a real
+`{ fmp_historical: 1, fmp_quote: 1 }` breakdown (previously an unqualified event with no detail
+at all). `financial-estimates` was removed entirely from Long-Term Analysis after confirming
+live, across multiple symbols including a mega-cap (NVDA), that it returns empty on this
+account's FMP plan tier universally, not per-symbol.
+
+**Two real bugs found and fixed during the build**: `fetchPeerData`/`fetchEvToEbitda`'s catch
+blocks reported `realCalls: 0` on a failed fetch, undercounting a real (failed) attempt as free
+— fixed to `1`, under the principle "a cache hit can never reach a catch block" (a cache hit
+never makes a network call, so any exception there is necessarily a real one). The one
+previously-silent `catch` on Contrarian Comeback's conditional sector-ETF historical fetch now
+logs via `console.error` instead of swallowing the failure.
+
+817 backend tests (up from 778), `tsc`/lint clean. Verified live: a Contrarian Comeback run for
+CIEN cost only 4 real FMP calls because Long-Term Analysis had already cached 5 of its 9 calls
+for that symbol earlier the same day.
+
+## Flex Portfolio Quota Status Indicator + Pre-Submission Guard ✅ Done
+
+Built 2026-09-07, closing the "known gap" flagged when Flex Portfolio Quota Limits first
+shipped: a `409` was the only signal a user ever got, after the fact, with zero visibility into
+their usage beforehand. New `GET /flex-quota/status` (`flexQuota.controller.ts`/`.routes.ts`,
+mirrors `flexQuota.service.ts`'s existing resolution logic) backs a new `QuotaIndicator`
+component shown in two places: Save Template (pending/approved template counts) and the Flex
+Portfolio creation flow (portfolio count). Each now disables its own action once at or over the
+effective limit, instead of only finding out via a failed request, and turns amber approaching
+the cap. `useCreatePortfolioFlex()`/`useSaveFlexTemplate()` both invalidate the new quota-status
+query on success so the indicator stays live across actions.
+
+## Usage Audit — Batch-Only Monthly Summary + Function/FMP/Finnhub Split ✅ Done
+
+Built 2026-09-07, closing a real gap between the Usage Audit's original stated design and its
+actual implementation, surfaced by direct user review of the aggregation logic. `logUsage()` was
+doing two writes on every single call — an `INSERT` into the raw `user_evt_usage` log, **and** a
+real-time `UPSERT` incrementing `event_count` on `user_evt_usage_summary_monthly` — while only
+`api_call_details` was deferred to the existing 3-day-gated daily sweep. Confirmed with the user
+this diverged from the original intent (3 days of raw detail, one batch rollup a day, not a
+real-time double-write) and that real-time-updating Monthly was overkill for an audit feature.
+
+`logUsage()` is now insert-only. `maybeRunDailyUsageAggregation()`'s sweep now rolls up **both**
+`event_count` and `api_call_details` together for every raw row older than 3 days (previously
+the sweep skipped rows without detail entirely, leaving them to the raw table's 35-day TTL
+backstop) — since a summary row may not exist at all until the sweep first runs for a given
+`(user, feature, month)`, the write changed from `UPDATE` to `INSERT ... ON CONFLICT`. New
+`getUsageAggregationCutoff()` exposes the sweep's own watermark (minus 3 days) so the Monthly
+tab can show a "this tab's data reflects cumulative call details until `<cutoff>`" banner —
+Monthly is now genuinely a few days behind by design, and this makes that visible rather than
+confusing.
+
+Separately, replaced the single blended "score" per user (API-call sum falling back to a flat
+event count) with **three distinct numbers** — Function Calls, FMP Calls, and Finnhub Calls —
+surfaced after the user asked to see FMP/Finnhub volume "separately" rather than combined. A
+`key.startsWith('fmp'|'finnhub')` split covers every existing `logUsage()` call site's
+provider-prefixed detail keys with zero controller changes needed. Both Last 3 Days and Monthly
+rank by combined FMP+Finnhub volume (the real-cost metric), not Function Calls.
+
+**Fresh start, by explicit user request**: `event_count` had been accurate since the table's
+inception, but `api_call_details` was schema-only/`NULL` from migration `038` until each feature
+was individually wired to populate it — `momentum`/`long_term_analysis`/`contrarian_comeback`
+only got wired the same day as part of the daily-cache work above. Mixing pre/post-wiring rows
+would have kept understating FMP/Finnhub volume for those three features, so
+`user_evt_usage`/`user_evt_usage_summary_monthly` were truncated and the watermark reset to its
+`'2000-01-01'` sentinel on the dev DB as a one-time step alongside this change.
+
+817 backend tests, 483 frontend tests, `tsc`/lint clean both sides. **Verified live against the
+real dev DB**: confirmed zero summary-row writes immediately after `logUsage()` calls (previously
+would have been an instant increment), backdated real rows past 3 days and force-ran the sweep —
+raw rows deleted, summary `event_count`/`api_call_details` both correct, cutoff ~3 days behind
+now, Monthly and Last 3 Days both reflecting the split correctly, Last 3 Days correctly dropping
+back to zero once the activity aged out of its window. Cleaned up all test data afterward.
+
+## User Usage Dashboard — Independent Per-Chart Controls + `GET /quotes` Tracking ✅ Done
+
+Built 2026-09-12 across two rounds. **Round 1**: the Dashboard sub-tab's original 2-chart-per-row
+layout (Last 3 Days pie + Monthly pie, `/plan`-approved 2026-09-09) became 3 charts at ~33% width
+each per explicit follow-on request — a new by-user **bar chart** (same combined FMP+Finnhub
+metric as the pies; x-axis labels hidden since users are identified by email, tooltip + a color
+legend below identify bars instead), plus a new **day picker** (Last 3 Days / Today / Yesterday /
+Day Before Yesterday) on the first pie card, backed by a new `GET /usage-audit/day?offset=0|1|2`
+reading straight from the raw event log (always safe — raw rows are never swept until 3+ days
+old). Per explicit direction, **every one of the 6 cards (3 charts × 2 rows) got its own
+independent embedded control** rather than a page-level shared picker — any card can show a
+different period/month/role-group at once. `UsageRankingEntry` gained a `roles` field (a separate
+query, not joined into the existing ranking query, to avoid multiplying rows and corrupting the
+FMP/Finnhub sums). **Real bug found+fixed, surfaced by the new independent dropdowns**:
+`getAvailableUsageMonths()` returned its `DATE` column as a raw value that `node-postgres` parses
+into a JS `Date` and JSON-serializes with a timezone shift (e.g. `2026-09-01T04:00:00.000Z`), so it
+never string-matched the frontend's plain `'YYYY-MM-01'` current-month check — silently
+duplicating the current month in every month picker. Invisible before (only one shared picker ever
+rendered), fixed by casting to `month::text` in SQL.
+
+**Round 2**: closed the last remaining Usage Audit gap — `GET /quotes` (a standalone batch-quote
+endpoint from Phase 1, 2026-07-08, predating almost everything else in this app) had zero usage
+tracking at all. Added `'quotes'` to the `UsageFeature` union and a `logUsage(userId, 'quotes',
+{ fmp_quote: symbols.length })` call in `quotes.controller.ts` — one real FMP call is attempted
+per requested symbol (`marketData.service.ts`'s `getQuotes()` fires one unbatched call per symbol),
+counted regardless of per-symbol success, same "an attempt is a real cost" principle already
+established for Long-Term Analysis. New `quotes.controller.test.ts` (this controller had zero
+direct tests before this — 6 new tests: 401/400/503-logs-nothing/200/usage-log-count). **Confirmed
+this route currently has zero frontend callers** — closing the gap is about correctness (anyone
+calling it directly, or a future feature wiring it up, is now tracked) rather than fixing a live
+under-reporting problem.
+
+**Round 3, built 2026-09-18–19**: the Dashboard sub-tab's Chart-3 bar chart was regrouped from
+by-user to **by-function/feature** — same combined FMP+Finnhub metric, but now summed per feature
+(Stock Preview, Contrarian Finder, Momentum Analysis, etc.) across every user in the role-filtered
+slice, rather than one bar per user. New `usageSharesByFeature()`/`UsageFeatureShare` in
+`usageShare.ts`, reusing the same `FEATURE_LABELS` map `UsageAuditPage.tsx`'s per-user breakdown
+rows already relied on (moved there from a page-local constant so both need only one copy).
+`UsageBarChart.tsx` is otherwise unchanged — same hidden-x-axis-ticks + tooltip/legend
+identification pattern as its by-user predecessor.
+
+Separately fixed the same day: `'stock_analysis_candlestick'` (added to the backend's
+`UsageFeature` union when the Candlestick Charts feature below shipped) was never added to the
+frontend's own hand-maintained mirror of that type (`frontend/src/api/usageAudit.ts` — this
+codebase's established "two hand-maintained copies" pattern) or to `FEATURE_LABELS`. Real
+candlestick usage numbers were showing up correctly in both the Dashboard bar chart and the Last
+3 Days breakdown rows, but with a blank label next to them (`FEATURE_LABELS[feature]` evaluating
+to `undefined`) — the data was always right, only the label lookup was missing. Since
+`FEATURE_LABELS` is typed as `Record<UsageFeature, string>`, correctly updating the union is what
+would have made TypeScript force the missing label entry to exist in the first place. Fixed both
+files; `tsc -b --noEmit` now genuinely requires the label whenever a new feature key is added.
+
+904 backend tests, 516 frontend tests, `tsc`/lint clean both sides (Round 3's own count, after the
+Candlestick Charts work below). Round 1/2's own counts (828/488) are as they were verified at the
+time.
+
+## Dev-Mode Double-Billing Fix — Lazy Tab Mounts + In-Flight FMP Request Coalescing ✅ Done
+
+Built 2026-09-18, prompted by a direct report: a session that had just logged in and made no
+explicit request of its own still showed 16 real API calls under "Today's calls." Root-caused to
+two independent, compounding issues.
+
+**`TabShell.tsx` mounted every tab unconditionally** (only toggling CSS `hidden` to control which
+one was visible), so a tab's own data-fetching hooks fired the instant a session logged in, before
+the user ever clicked that tab — confirmed live via Stock Analysis's 4 quadrants, which persist
+their last-looked-up tickers to `sessionStorage`, re-fetching those leftover tickers on every
+single login with zero user action. Fixed with a `visitedTabs` `Set<string>` that only ever grows
+— a tab's content now renders only once its path has actually been visited at least once in the
+session, and stays mounted (preserving in-progress state exactly as before) for the rest of the
+session once it has. This only defers the *first* mount, so tab-switching still never resets a
+tool's state.
+
+**`fmpDailyCache.service.ts`'s `getOrFetch()` had a real concurrent-fetch race**: two requests for
+the same `(symbol, apiName)` arriving before either one's cache write had landed both saw a cache
+miss and both made a real, billed FMP call — reproduced live via React StrictMode's dev-only
+double-mount, but the same race can occur in production too (e.g. two users looking up the same
+previously-uncached symbol at the same moment). Fixed by coalescing concurrent callers for the
+same key through an in-flight `Promise` map — whichever call reaches the function first "wins,"
+and every other concurrent caller for that same key awaits and shares its single result instead
+of starting a second real fetch. New regression tests cover both the coalescing case and that a
+later, non-concurrent call for the same key still starts a fresh fetch as normal.
+
+## Stock Analysis — Candlestick Charts ✅ Done
+
+Built across three rounds, 2026-09-18. A new "Candlestick Charts" section on the Stock Analysis
+tab (reuses the existing `stock_analysis:view` gate — see below for a known, still-open RBAC gap
+this shares with the 4-quadrant preview), independent of the 4 existing preview quadrants: a
+left-side panel listing every symbol already cached (shared across every user — the cache is
+symbol+interval-keyed, not per-user; green rows are fresh within the last 10 minutes, grey rows
+are viewable but not live-fresh) plus a lookup field for a brand-new symbol, opening a full-screen
+pop-up chart. Six timeframes — `5min`/`15min`/`30min`/`1hour`/`4hour`/`1day` (`1min` was
+considered and dropped: live-verified against a real FMP account as a genuine HTTP 402 plan-tier
+restriction, not a market-hours artifact).
+
+**Shared cache, split by freshness rule**: `1day` deliberately reuses the *existing* shared daily
+cache (`m_fmp_daily_cache`/`marketData.service.ts`, the same one Momentum/Refresh Prices/Stock
+Preview/Contrarian Comeback/`GET /quotes` all already share) rather than a new mechanism — its
+`getHistorical(symbol, apiKey, limit)` already slices whatever's cached down to a caller-supplied
+`limit`, so the interval just computes and passes one, exactly like every other caller. The five
+new sub-daily intervals get their own new table, `m_stock_ticker_candlestick_cache` (migration
+`044`) — one row per `(symbol, time_interval)`, storing both the raw OHLCV bars and their
+precomputed indicators as JSONB, with a **time-based** (10-minute) freshness rule instead of
+`m_fmp_daily_cache`'s calendar-day one, since intraday bars turn over far faster. Read/write are
+deliberately split into an always-free, never-fetching `getCached()`/`getSnapshot()` path and an
+explicit, rate-limited `fetchAndStore()`/`refresh()` path (`fmpIntradayCache.service.ts`/
+`candlestick.service.ts`) — mirrors `fmpDailyCache.service.ts`'s own in-flight-coalescing pattern
+so two near-simultaneous refreshes for the same symbol+interval share one real fetch.
+
+**Indicators**: reuses this codebase's existing SMA/EMA/RSI/MACD/Bollinger Bands math
+(`momentum.service.ts`) rather than reimplementing it, wrapped by new rolling-window/continuous-
+state series functions in `candlestickIndicators.service.ts` — `mwSMA`/`mwBB` are pure rolling-
+window reuse (each reading only depends on its own trailing closes), while RSI/MACD get their own
+real continuous-state series implementations, since naively reseeding `mwRSI`/`mwMACD` at every
+window position would silently diverge from a textbook-correct reading. Three genuinely new
+indicators with no prior precedent in this codebase: **VWAP**, **Pivot Points** (Classic, derived
+from the most recently closed prior bar), and **Fibonacci Retracement** (auto-detected swing
+high/low across the returned window). A per-interval display/buffer day-range table
+(`INTERVAL_RANGES`) bounds how much history is fetched/shown per timeframe (sized to target
+~150-170 displayed bars per interval, using real bars-per-trading-day ratios confirmed live, not a
+naive session-hours estimate) — split into **history-dependent** indicators (SMA/EMA/RSI/MACD/BB/
+Volume MA, computed over the full buffered range so they're accurate from the very first
+*displayed* bar, not just the newest one) vs. **window-relative** ones (VWAP/Pivot Points/
+Fibonacci/Volume/OBV, recomputed fresh over just the displayed bars, never the hidden buffer —
+conventionally session/view-relative measures where accumulating across invisible history would
+produce a number that doesn't mean what a viewer expects).
+
+**Chart x-axis positions bars by sequence index, not real elapsed time** — drawing weekend/
+overnight gaps to scale on a real time axis was visually flattening each trading session's price
+action into a narrow sliver, making moving-average overlays look like a flat staircase instead of
+a smooth trend line (live-verified the underlying indicator *data* was correct throughout; this
+was a rendering/scale characteristic). Tick/tooltip callbacks recover the real date from the index
+via the same chronological bar array already in scope.
+
+**Volume Moving Average + On-Balance Volume (OBV)**, added as the third round: two volume-
+correlated overlays on the existing Volume panel (not a new stacked panel), since none of the
+other indicators actually correlate with volume itself. Volume MA is a trivial reuse of the same
+rolling-window SMA logic fed `bar.volume` instead of `bar.close`; OBV (a cumulative running total
+— adds volume on an up day, subtracts on a down day, unchanged on a flat day) is genuinely new
+and needs its own secondary y-axis, since its cumulative scale is unrelated to Volume's per-bar
+magnitude and can go negative, unlike raw volume.
+
+**Per-user rate limit** on the only action that ever makes a real FMP call (`POST .../refresh`) —
+one combined budget across every symbol/timeframe for that user, admin-configurable via Config
+Properties (default 10 requests/10 minutes at launch; **currently set to 50/5 in the live dev
+environment**). The two Config Property display names were renamed 2026-09-19 (migration `045`,
+from "Candlestick Max New Requests"/"Candlestick Rate Limit Window (Minutes)" to **"User's Max New
+Requests"**/**"User's API Rate Limit Window (Minutes)"**) ahead of the still-backlogged
+all-encompassing rate limit (see Backlog below) — `property_key` is unchanged/immutable, only the
+admin-facing label was generalized so it doesn't need a second rename later. Reads are always
+free, even while a user is fully rate-limited.
+
+**A real bug found and fixed live 2026-09-18, worth calling out same as this project's other
+"real bug found+fixed" entries**: a cache row written under an earlier code version — before the
+full-per-bar-series shape existed for `sma20`/`sma50`/`ema20`/`rsi14`/`macd`/`bb20` — still held
+the OLD single-value/single-object shape (the same shape `momentum.service.ts`'s own single-
+snapshot functions return). `getSnapshot()` never recomputed on read, so an un-refreshed row was
+passed straight through to the frontend, which crashed trying to spread a non-array
+(`TypeError: series is not iterable`, surfacing wherever `seriesToPoints()` happened to run first
+— reported as "an error in the `<MacdChart>` component" in one real session, but not specific to
+that chart). Fixed with a self-healing check (`isValidHistorySeries()`): if a cached row's
+history-dependent fields aren't array-shaped, `getSnapshot()` recomputes them fresh from the
+already-cached raw bars (zero FMP cost) instead of passing the stale shape through — this also
+means adding `volumeSma20` for the Volume MA work above automatically self-healed every existing
+cache row on next read, with no migration needed. A second, separate bug found while building the
+index-based x-axis: `seriesToPoints()` reversed an indicator series to chronological order but
+zipped it against the *original* (still newest-first) `bars` array by the same index, silently
+mismatching every point except the exact midpoint — fixed by using the series' own reversed
+length for indices on both sides, removing the second array entirely.
+
+**Known, still-open RBAC gap**: Candlestick Charts is not separately identified/gated from the
+base `stock_analysis:view` permission that already gates the 4 preview quadrants — both share the
+one permission, with no dedicated sub-permission of their own. Raised and discussed, but
+superseded by the rate-limit-naming work above; not yet resolved either way.
+
+904 backend tests (up from 828), 516 frontend tests (up from 488), `tsc`/lint clean both sides
+throughout all three rounds. Live-verified against the real dev DB and a real FMP account
+(throwaway `user-premium` test account, deleted after each round's verification): real candlestick
+rendering, indicator overlays, timeframe switching, freshness badge/Time-of-Pull, rate limiting
+(confirmed the limit-plus-one request 429s with a clear message, confirmed reads stay free even
+while rate-limited), the `1day` daily-reuse path, the gap-free x-axis, and — for the Volume MA/OBV
+round specifically — opening a symbol cached *before* that round shipped and confirming it
+self-heals and renders correctly with no console error.
+
+## Support Module — Requester Identity + Unread-Reply Indicator ✅ Done
+
+Built 2026-09-18, closing two gaps in the existing Support Tickets feature (2026-09-05): the admin
+Support Tickets UI showed a ticket's subject/status but never who it was from, and — unlike
+admin's own existing unread-ticket badge — a user had no way to tell a new admin reply had
+arrived without opening every ticket to check.
+
+New nullable-free `user_last_read_at TIMESTAMPTZ NOT NULL DEFAULT now()` column on
+`users_support_tickets` (migration `043`) — mirrors `status = 'new'` already doubling as the
+*admin*-side unread flag, but a ticket's status can't do double duty for the *owner* too (it can
+land on any of the 3 admin-owned resting states — open/on_hold/closed — regardless of whether the
+owner has seen the latest reply), so this needed its own orthogonal column. Unread-by-owner is
+**derived, not stored**, as `user_last_read_at < updated_at`: replying as the owner stamps both
+columns with the same `now()` in one write (read); an admin reply only moves `updated_at` forward
+(unread); opening the ticket as its owner stamps `user_last_read_at = now()` (cleared) — the exact
+mirror of `markOpenedByAdmin()`'s existing status-based read-receipt for the admin side.
+
+`supportTicket.service.ts`'s ticket queries now `JOIN users` to surface `userEmail` alongside
+every ticket, and select the derived `unread_by_user` boolean — both populated on every ticket
+list/detail read. `AdminSupportTicketsPage.tsx` shows "From `{ticket.userEmail}`" on both the list
+and detail views. `SupportWidget.tsx` gets a numeric red badge on its "Support" trigger link,
+counting tickets with `unreadByUser: true` — mirroring `UserPersonaBadge.tsx`'s existing admin-
+side unread-ticket-count badge, but living on the widget itself (fetched unconditionally, not only
+while the modal is open, so the badge is visible before ever clicking it) since `UserPersonaBadge`
+isn't rendered on `PendingReviewPage.tsx`, while the Support widget is present everywhere a user
+can see their own tickets.
+
+## Refresh Prices FMP Call Reduction — Shared Cache Extended to marketData.service.ts ✅ Done
+
+Built 2026-09-12, prompted by a direct question about reducing FMP call volume on Refresh Prices
+(Legacy + Flex — confirmed both share the exact same `POST /:id/refresh-prices` route). Real data
+found before proposing anything: 241 total `tx_holdings` rows across only 83 distinct symbols in
+the dev DB (MSFT/TSLA/META/NFLX/BA held by 7 portfolios each, PCG/ITB by 8) — massive cross-
+portfolio symbol overlap with zero cache-sharing between them. Also found `getQuotes()`/
+`getHistorical()` in `marketData.service.ts` are shared by **four** features, not just Refresh
+Prices: Momentum and Stock Preview call them too, plus `GET /quotes`. Given that, extended the
+shared daily FMP cache (`fmpDailyCache.service.ts`, built for Long-Term Analysis/Contrarian
+Comeback) into these two shared functions directly, rather than duplicating cache-wiring inside
+`refreshPrices()` alone — confirmed with the user as the preferred scope before starting.
+
+`getQuotes()` now routes each symbol through `fmpDailyCache.getOrFetch(symbol, 'quote', ...,
+{ forceFresh: isMarketOpenNow() })` — live during market hours, day-cached after close, the same
+policy Long-Term Analysis/Contrarian Comeback's own `quote` calls already use, and now sharing
+those exact same cache rows. `getHistorical()` always fetches the shared `limit=1000` internally
+(matching Contrarian Comeback's own subject-symbol history call under the identical
+`(symbol, 'historical-price-eod')` cache key) regardless of the caller's own smaller `limit`
+(Refresh Prices/Momentum use 130, Stock Preview uses 96), then slices the most recent N bars
+locally — FMP returns bars newest-first, so this is the exact same "standardize on the more
+inclusive value, slice per-consumer" fix already used once for `grades`'s limit param, this time
+applied preemptively rather than after finding a live collision.
+
+Both functions now return `{ quotes, realCalls }` / `{ bars, realCalls }` instead of a bare
+value, so every caller's `logUsage()` reports genuine non-cached call counts — `momentum
+.controller.ts`, `stockPreview.controller.ts`, `portfolio.service.ts`'s `refreshPrices()`, and
+`quotes.controller.ts` (built minutes earlier the same day) all updated to read `realCalls`
+instead of a flat per-symbol count, same "an attempt is a real cost" principle used throughout
+the shared-cache work (a rejected promise still counts as 1 real call, since a cache hit can
+never reach a rejection).
+
+New direct unit tests for `getQuotes`/`getHistorical` in `marketData.service.test.ts` — these two
+functions had **zero** direct test coverage before this (only tested transitively through each
+controller's own mocks, which mock `marketData.service` entirely and would never have caught a
+caching bug inside it). 845 backend tests (up from 828), `tsc`/lint clean. Zero frontend changes -
+every caller's HTTP response shape to its own client is unchanged, only the internal real-call
+accounting changed.
+
+**Live-verified against the real dev DB**: called `GET /momentum/AAPL` (cache stale from
+2026-09-07) — logged a real `{ fmp_historical: 1, fmp_quote: 1 }` and refreshed the
+`historical-price-eod` cache row's description to confirm it requested `limit=1000` even though
+Momentum only asked for 130. Immediately called `GET /stock-preview/AAPL` (a different feature,
+requesting `limit=96`) — logged `{ fmp_historical: 0, fmp_quote: 0 }`, confirming both the
+historical and quote legs were served entirely from the cache Momentum had just populated, with
+zero additional real FMP calls, less than a second later.
+
+## Anthropic API Key — Bring-Your-Own + Admin-Master Fallback ✅ Done
+
+Built 2026-09-20 — Candlestick Pattern Q&A's free-text Ask had been hard-503ing for everyone
+("not configured yet") since a single global `ANTHROPIC_API_KEY` env var was never set. Rather
+than just filling in that one env var, wired Anthropic into the exact same bring-your-own +
+Admin-Master Fallback machinery FMP/Finnhub already use — no new tables, no new Config
+Property, no new fallback logic.
+
+`'anthropic'` added to `userSubscription.controller.ts`'s `ALLOWED_PROVIDERS` (the actual gate
+that would otherwise 400-reject a key) and to `SubscriptionsPage.tsx`'s `PROVIDERS` list (My
+API(s) tab) — `users_subscriptions`/`getDecryptedKey()` were already fully provider-agnostic, so
+no schema or service change was needed there. `anthropicClient.service.ts`'s `createMessage`
+now takes the resolved key as an explicit per-call argument instead of a module-level singleton
+built once from `env.anthropicApiKey` — different callers can now have different keys, and
+constructing the SDK wrapper per call is cheap (same reasoning `marketData.service.ts`'s
+`getQuotes(symbols, apiKey)` already relies on for FMP). `candlestickQuestionAnswerAsk.service
+.ts`'s `ask()` gained an `apiKey` parameter threaded through; `candlestickQuestionAnswer
+.controller.ts`'s `askQuestion()` resolves `getDecryptedKey(userId, 'anthropic')` after the
+existing rate-limit check and before calling `ask()`, replacing the old
+`MissingAnthropicApiKeyError` → generic-503 catch with the same `MissingUserApiKeyError` →
+real-message-503 pattern every other provider-consuming controller already uses.
+
+`ANTHROPIC_API_KEY`/`env.anthropicApiKey` were deleted outright (`env.ts`, `.env.example`,
+`.env`) rather than left as a third inert vestige alongside `fmpApiKey`/`finnhubApiKey` (which
+stayed declared-but-unused after their own 2026-07-12 switch, since real users had been relying
+on them in production up to that point) — this field never had a single working real-user path
+to preserve compatibility with, so there was nothing worth keeping.
+
+966 backend tests (up from 965), 555 frontend tests (up from 554), `tsc`/lint clean both sides.
+Documentation updated in `User Manual.md` (role table's key-provider list, the API key
+resolution section). Still to be confirmed live: admin-master adding a real Anthropic key via
+My API(s) and a fallback-eligible role successfully borrowing it end-to-end (needs a real,
+billed Anthropic key on the account first).
+
+**Spend-control research, same day**: before loading a real (small, ~$10) balance onto the
+Anthropic account, confirmed directly against Anthropic's current API docs that **no
+balance-query endpoint exists** — the Console's Plans & Billing page is the only place a
+remaining-$ figure is shown; the Usage & Cost Admin API only reports historical spend already
+incurred, and requires a different, org-level Admin API key (`sk-ant-admin01-...`) that doesn't
+fit this platform's per-provider key model at all. Recommended approach instead: a self-tracked
+$ ledger computed from the token counts already logged in `user_evt_candlestick_question_answer_log`
+against Anthropic's published per-model pricing, gated by a new Config Property budget cap, with
+a hard-stop once estimated spend crosses it — no Anthropic API call needed. **Not yet built** —
+documented in `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md` Section 9.4/11.9 as
+an open item pending a build-now-vs-fast-follow decision.
+
+## Candlestick Patterns — Tweezer Bottom/Top ✅ Done
+
+Built 2026-09-28, the first item picked off the Section 13 backlog (`Requirements/Candlestick-
+Pattern-Q&A-Module-Requirements.md`) — chosen because its Q&A content was already drafted.
+`detectTweezerBottom`/`detectTweezerTop` added to `candlestickComplexPatternDetection.ts` as pure
+2-bar geometric checks (matching lows/highs within a 10% tolerance of the larger candle's own
+range) — deliberately does NOT require the two candles to be opposite colors, since the curated
+content frames that as a reliability enhancer, not part of the pattern's own definition. Checked
+as the weakest `else if` fallback after Harami in `detectComplexPatterns()`'s 2-bar chain, per the
+curated content's own "a comparatively weaker signal... don't treat it with the same weight as an
+Engulfing pattern" framing. `COMPLEX_PATTERN_KEYS` grew 6→8; badges `Tb`/`Tt` (green/red, matching
+the Iu/Id/Ou/Od "name already encodes direction" convention rather than +/-); 2 new diagram
+entries in `candlestickPatternDiagrams.ts` (two candles sharing the exact same low/high). 4 test
+files updated (detection, badge, popup fixture/count assertions, diagrams) — one pre-existing
+`detectComplexPatterns` test fixture needed a tweak after its own "neutral" bar coincidentally
+also satisfied the new Tweezer Top check (same class of fixture-collision issue found during the
+Three Outside Up round). 733 frontend tests, `tsc`/lint clean both sides. DB seeded scoped to just
+these 2 patterns (`npm run seed:candlestick-question-answer -- "Tweezer Bottom" "Tweezer Top"`) —
+verified live via direct query (both `Composite` tier, 5 Q&A entries each, Composite total 6→8).
+**Live-verified end-to-end** against the real dev server: real Tweezer Bottom/Top matches found on
+BA's 1-hour chart, badges/connectors render and align correctly with real candles, and both
+patterns' curated Q&A + diagrams render correctly on the Pattern Q&A page.
+
+**Bullish/Bearish Kicking ✅ Done, built 2026-09-28-29** — content drafted first (10 Q&A entries,
+`complexityTier: 'Composite'`, mirroring Tweezer's own content-first precedent), then seeded, then
+diagrams added, then full chart detection in a final round. `detectBullishKicking`/
+`detectBearishKicking` reuse the exact 0.05×range wick threshold `detectSingleBarPattern()`'s own
+`marubozu` check already uses (so "Marubozu" can never mean two different things in this codebase),
+plus a zero-overlap gap requirement between the two candles' ranges - naturally mutually exclusive
+with every other 2-bar pattern, so order in `detectComplexPatterns()`'s chain doesn't matter for
+correctness. `COMPLEX_PATTERN_KEYS` grew 8→10; badges `K+`/`K-` (back to the +/- convention, since
+"Kicking" itself carries no bullish/bearish direction the way Tweezer's Bottom/Top does); 2 diagram
+entries (both Marubozu shapes, second candle's range gapping past the first's). 749 frontend tests,
+`tsc`/lint clean. DB seeded scoped to just these 2 patterns, verified live (`Composite` tier, 5 Q&A
+entries each, Composite total 8→10). **Live-verified**: picker/badges/labels all correct in the
+real chart UI; scanned every currently-cached symbol/timeframe's real market data for an actual
+Kicking match and found none (expected - the curated content itself frames this as "a rare but
+distinct pattern," requiring a genuine gap between two wickless candles) - no false positives
+either, a useful negative-side confirmation the detector isn't over-firing.
+
+## Candlestick Popup — In-Place Symbol Switcher ✅ Done
+
+Built 2026-09-29, `/plan`-approved. Replaces the popup header's static ticker `<h1>` with a
+dropdown (`SymbolSwitcher`, defined inline alongside `PatternPicker`) so a user can switch which
+symbol the same open chart shows without closing it - reuses `CandlestickSymbolList.tsx`'s own
+new-symbol-lookup form and cached-symbol row styling exactly, and calls `useCachedSymbolsList()`
+itself (react-query dedupes against the landing page's own subscription, no extra network cost).
+Per explicit pre-planning answers: the popup owns "current symbol" as its own internal
+`activeSymbol` state (seeded once from the `symbol` prop, `CandlestickSymbolList.tsx` needed zero
+changes), switching preserves the current interval/indicators/pattern-picker selections rather
+than resetting to defaults, and the dropdown includes the new-symbol lookup input too (full parity
+with the landing page). One deliberate exception to "preserve everything": `autoRefreshedRef`
+(the once-per-session 1-Day auto-refresh guard) resets on every real symbol change, since it's
+per-symbol bookkeeping, not a user preference. 5 new tests, plus 2 pre-existing
+`CandlestickSymbolList.test.tsx` tests fixed for the new markup (they asserted the old plain `<h1>`
+text). 754 frontend tests, `tsc`/lint clean. **Live-verified**: switching BA→PLTR kept the interval
+on 4 Hour and the Composite pick at "1 of 10 shown" (not reset); typing a brand-new symbol (MSFT)
+in the switcher's own input correctly hit the existing "no cached data" → Fetch flow, which then
+loaded real data while still preserving interval/pattern picks.
+
+**Real MSFT Tweezer occurrences confirmed correct the same day**: a user-reported Tweezer Bottom
+on Mar 2, 2026 and Tweezer Top on Mar 5, 2026 were both verified genuine, not false positives -
+Feb 27's low ($389.88) vs. Mar 2's low ($390.63) differ by $0.75, well inside the 10%-of-range
+tolerance; Mar 4's high ($411.03) vs. Mar 5's high ($411.61) differ by $0.58, same tolerance check.
+Confirmed both via direct API/bar-data recomputation and by reading the live badges' own `title`
+tooltips in the browser - both matched exactly.
+
+## Candlestick Patterns — Content Drafted for Every Remaining Backlog Item ✅ Done
+
+Built 2026-09-29, per explicit direction ("do the content creation for all of them in next Phase
+and then implement them as per convenience and lift") - rather than pick one pattern at a time,
+drafted Q&A content for every pattern still in the Section 13 backlog in one pass, so future
+rounds can implement whichever is most convenient without a content-authoring step first.
+**Bullish/Bearish Abandoned Baby** and **Upside/Downside Tasuki Gap** (both Advanced tier, 10 Q&A
+entries each) added directly to `backend/src/db/seedCandlestickQuestionAnswer.ts`'s `SEED_PATTERNS`
+— fit the existing tier system with zero schema changes, so either can be built next without any
+type/schema work first. **Rising/Falling Three Methods** (the Complex 5-candle tier's own concrete
+example) drafted as plain text in `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md`
+Section 13 instead of the seed file - `ComplexityTier` has no `'Complex'` value yet, and widening
+that type before the tier itself is scoped would let an unbuilt option leak into the Admin
+Console's/Pattern Q&A page's own tier dropdowns with nothing behind it. `tsc -b --noEmit` clean on
+the backend after the seed-file additions (content-only, no detection/badge/chart-picker wiring
+for any of the 3 pattern pairs yet).
+
+**Diagrams added for all 6 patterns the same day**, per a direct follow-up question ("Have you
+got the Diagrams in for all the cases?") - Bullish/Bearish Abandoned Baby (reuses Morning/Evening
+Star's own long-candle shapes exactly, redrawing only the middle candle with a real gap on both
+sides instead of Morning/Evening Star's one-sided, touchable gap), Upside/Downside Tasuki Gap
+(candle 3 drawn opening inside candle 2's body and pulling back into the gap without reaching
+candle 1's own close), and Rising/Falling Three Methods (three small contained candles between
+two long ones) all added to `candlestickPatternDiagrams.ts`. The first two pairs' diagrams are
+live (seeded + reachable from the Q&A page); Rising/Falling Three Methods' diagrams are dormant
+(no live pattern row references them yet) until the Complex tier itself exists. 16 new tests, 772
+frontend tests, `tsc`/lint clean. **Live-verified**: seeded Abandoned Baby/Tasuki Gap temporarily
+to confirm both diagrams render correctly on the Pattern Q&A page (island-reversal gap and
+partial-gap-fill shapes both visually correct).
+
+## Bullish/Bearish Abandoned Baby ✅ Done
+
+Built 2026-09-29, the first item picked off the now-fully-content-drafted backlog. `detectBullish
+AbandonedBaby`/`detectBearishAbandonedBaby` reuse `detectMorningStar`/`detectEveningStar` as a base
+requirement (same reuse-the-existing-detector precedent as Three Inside/Outside reusing Harami/
+Engulfing) plus a strictly stronger double-gap check (`b.high < a.low && c.low > b.high` for the
+bullish case) - proven to always imply the base Morning/Evening Star check already holds, so
+checking Abandoned Baby's stricter branch BEFORE Morning/Evening Star in `detectComplexPatterns()`'s
+3-bar chain correctly makes it the more specific classification, falling back to plain Morning/
+Evening Star for the far more common partially-gapped case. `ADVANCED_PATTERN_KEYS` grew 8→10;
+badges `A+`/`A-` (back to the +/- convention, since "Abandoned Baby" carries no inherent
+direction). 783 frontend tests, `tsc`/lint clean. **Live-verified against real market data**: found
+3 genuine occurrences by scanning every cached symbol/timeframe (GEV bearish on 2026-03-26, XLC
+bearish on 2026-08-17, REMX bullish on 2026-08-14) - opened GEV's real chart and confirmed the
+badge, its tooltip OHLC, and the underlying 3-day bar sequence all agree: a long bullish candle
+(Mar 24), a small candle gapping cleanly above it (Mar 25, low $920.90 vs. Mar 24's high $913.58),
+then a long bearish candle gapping cleanly back below (Mar 26, high $917.26 vs. Mar 25's low
+$920.90) - a genuine island reversal, unlike Kicking which found zero real matches.
+
+## Upside/Downside Tasuki Gap ✅ Done
+
+Built 2026-10-03 - the last Advanced-tier item ready to build without schema work (Rising/Falling
+Three Methods is all that's left, and it needs the new Complex tier first). `detectUpsideTasukiGap`/
+`detectDownsideTasukiGap` are the only CONTINUATION patterns in this file's 3-bar tier (every other
+Advanced pattern is a reversal): two same-direction candles with a genuine gap between them (no
+overlap), then a third candle opening inside the second candle's body and pulling back into the gap
+without fully filling it (its close must stay short of the first candle's own close). Structurally
+incompatible with Engulfing-based Three Outside Up/Down (which require a/b to OVERLAP, the opposite
+of this pattern's no-overlap gap), so no priority-ordering conflict. `ADVANCED_PATTERN_KEYS` grew
+10→12; badges `Gu`/`Gd` (non-+/- convention like Three Inside/Outside, since "Upside"/"Downside"
+already encode direction; "G" for "Gap" since "T" was already Tweezer's). 795 frontend tests,
+`tsc`/lint clean. Content was already seeded from the earlier diagram-verification pass, so no new
+seed run was needed this round. **Live-verified against real market data**: found 3 genuine
+occurrences scanning every cached symbol (XLB upside on 2026-08-06, SATS upside on 2026-03-26,
+FBTC upside on 2026-03-05) - opened XLB's real chart and confirmed the badge, its tooltip OHLC, and
+the underlying 3-day bar sequence all agree: two bullish candles with a clean $0.38 gap (Aug 5's
+low $52.45 vs. Aug 4's high $52.07), then Aug 6 opening inside Aug 5's body and closing at $52.17 -
+into the gap zone, but still above Aug 4's own close ($52), so the gap holds exactly as the
+pattern's own definition requires.
+
+## Complex (5-candle) Tier + Rising/Falling Three Methods ✅ Done
+
+Built 2026-10-03, `/plan`-approved after two parallel Explore passes (backend schema/types,
+frontend UI surfaces) confirmed the real scope before writing any code. Adds the 4th and final
+complexity tier, "Complex" (5 candles) - reusing the name vacated by the 2026-09-28
+Composite rename - and wires up its one concrete example, Rising/Falling Three Methods, closing
+out the entire Section 13 backlog.
+
+**No DB migration needed**: `complexity_tier` is `VARCHAR(10)` with no CHECK constraint -
+validation is entirely application-side (`COMPLEXITY_TIERS` in the backend service,
+`VALID_COMPLEXITY_TIERS` in the controller, both hand-mirrored in the frontend `api/
+candlestickQuestionAnswer.ts`), and `'Complex'` (7 chars) already fit the existing column width -
+confirmed by the exact same column already holding `'Composite'` (9 chars). Every frontend surface
+listing tiers (`CandlestickQuestionAnswerPage.tsx`'s filter, `AdminCandlestickQuestionAnswerPage
+.tsx`'s create-pattern select) was already generated from `COMPLEXITY_TIERS`, not hardcoded - zero
+code changes needed in either file, confirmed by the full existing test suite (251 tests across
+both pages) passing completely unmodified.
+
+**Detection**: `detectRisingThreeMethods`/`detectFallingThreeMethods(a,b,c,d,e)` - a new, genuinely
+5-bar window in `detectComplexPatterns()` (parallel to the existing 2-bar/3-bar windows) - a long
+trend candle, three candles fully contained within its own high/low range (no strict body-size
+threshold on the middle three - the curated content frames smaller bodies as a reliability
+enhancer, not part of the core definition, same precedent as Tweezer's own color check), then a
+long candle closing past the first candle's own close.
+
+**New types/arrays**: `FIVE_CANDLE_PATTERN_KEYS` - deliberately NOT named `COMPLEX_PATTERN_KEYS`,
+since that identifier already means the 2-candle/Composite tier internally (a legacy mismatch kept
+from the 2026-09-28 rename, to avoid a churn-only internal rename). Badges `Rm`/`Fm` (non-+/-
+convention like Three Inside/Outside, since "Rising"/"Falling" already encode direction).
+
+**`CandlestickPopup.tsx`**: a 4th on-demand picker/badge-strip (`Complex5PatternPanel`), replicating
+the exact Composite/Advanced precedent (own state, handlers, `TierLine` row, picker-group row).
+Since Complex is the new last tier by candle-count ordering, `AdvancedPatternPanel`'s own
+`marginBottomClass` changed from `mb-3` to `mb-px` (no longer last, needs the uniform 1px gap) and
+the new panel took over `mb-3`; its `connectorHeightClass` (`478px`) computed the same way the
+existing two were (gap + every strip's height above it, reaching into the price chart).
+
+807 frontend tests (up from 795), `tsc`/lint clean both sides. Content for Rising/Falling Three
+Methods (drafted 2026-09-29 as plain text, pending exactly this tier) copied into `SEED_PATTERNS`
+and seeded live. **Live-verified against real market data**: scanning every cached symbol/timeframe
+found 9 genuine occurrences (not rare at all, unlike Kicking/Abandoned Baby) - opened MSFT's real
+4-hour chart and confirmed a Rising Three Methods on Aug 4→6, 2026: a long bullish candle
+(bodyRatio 0.72, range $479.35–$499.33), three candles fully contained within that range, then a
+long bullish candle closing at $496.43, past the first candle's own $495.29 close. Pattern Q&A page
+confirmed showing "Complex" as a real filter value with both patterns' curated content and diagrams
+rendering correctly.
+
+## Candlestick Pattern Metadata + Ask ReAct Upgrade (Phase 1) ✅ Done
+
+Built 2026-10-04/05, `/plan`-approved, closing a real gap in Candlestick Pattern Q&A's existing
+agentic Ask loop: the model already ran a genuine ReAct-shaped loop (search tool → sufficiency
+judgment → terminal tool), but its only tool was a plain `ILIKE` substring match over
+`question_text`/`pattern_name` — silently returning nothing for structural questions ("which
+patterns are continuation signals?") or synonym phrasing ("pin bar") that never appears verbatim
+in curated text. Confirmed live before building anything: the model's own
+`search_question_answer_entries` tool call really does hit nothing but that one `ILIKE` clause.
+
+**Schema (migrations `054`/`055`)**: six new deterministic metadata columns on
+`m_candlestick_pattern` — `signal_type` (reversal/continuation/indecision), `directional_bias`
+(bullish/bearish/neutral/context-dependent), `requires_gap`, `trend_context`
+(prior-downtrend/prior-uptrend/either/none), `synonyms` (JSONB array), `mirror_pattern_id`
+(self-referencing FK to the true directional-opposite pattern, e.g. Hammer ↔ Shooting Star —
+deliberately **not** used for same-shape-different-context pairs like Hammer/Hanging Man, which
+share identical geometry but aren't mirrors of each other). Backfilled for all 34 patterns,
+grouped by identical value-tuples (10 `UPDATE ... WHERE pattern_name IN (...)` statements instead
+of 34 near-duplicate rows) to keep the migration auditable. `requires_gap` in particular is not a
+judgment call — derived directly from reading the real detector functions
+(`detectPiercingLine`/`detectDarkCloudCover` check a genuine wick-to-wick gap;
+`detectBullishAbandonedBaby`/`detectBearishAbandonedBaby` check gaps on both sides of the middle
+candle; Morning/Evening Star's own weaker body-level gap check is deliberately `false`). Two
+flagged, genuinely debatable judgment calls: Marubozu/Belt Hold's `signal_type` is set to
+`'continuation'` (the dominant textbook framing) despite being the most context-flexible patterns
+in the set. Synonyms deliberately sparse — included `"Inside Bar"` (Harami), `"Island Reversal"`
+(Abandoned Baby); deliberately excluded `"Pin Bar"` (genuinely ambiguous between
+Hammer/Shooting Star/Hanging Man without trend context) and `"Inverted Hammer"`/`"Mat Hold"`
+(these name real, different, unimplemented patterns). Applied and live-verified against the real
+dev DB: 34/34 rows populated, signal-type split (3 indecision/25 reversal/6 continuation) and
+gap count (8 true) match the design exactly, 28 patterns correctly mirrored.
+
+**New tool, `filter_patterns_by_metadata`**: added alongside the existing
+`search_question_answer_entries` in `candlestickQuestionAnswerAsk.service.ts`'s tool-calling
+loop — a second non-terminal tool backed by a new `filterPatternsByMetadata()` query function
+(`candlestickQuestionAnswer.service.ts`), returning compact structural facts (never prose) and
+throwing `NoFilterCriteriaError` if zero filters are given. That error is caught as a *recoverable*
+tool-result error (`is_error: true`, fed back to the model) rather than crashing the loop — the
+model can retry with a real filter instead of failing outright. `provide_answer`'s schema gained
+an optional `matched_pattern_names` field so a purely-structural answer (zero curated entries
+involved) still surfaces pattern diagrams on the frontend; the controller's `matchedPatterns`
+response field now unions pattern names resolved via matched entries with ones resolved directly
+via the new tool. System prompt updated with one sentence establishing the two-tool decision as
+the model's own Thought step: metadata tool for structural/factual questions, search tool for
+interpretive ones about reliability/usage/common mistakes — either or both as needed before a
+terminal tool.
+
+**Explicitly not changed**: no REST route/request-shape change (still `POST
+/candlestick-question-answer/ask` with `question`+`horizon`); no change to rate limiting or the
+billing/usage-tracking model — every `ask()` call still goes through the LLM exactly as before,
+the new tool makes that call's reasoning cheaper and more accurate, it doesn't bypass the LLM.
+Browse untouched.
+
+986 backend tests (up from 976), `tsc --noEmit` clean. Found and fixed 2 real issues while writing
+the new tests: a wrong expected SQL-parameter order in my own new test, and a **pre-existing gap**
+in `candlestickQuestionAnswer.controller.test.ts`'s `beforeEach` — `mockGetEntryById` was never
+reset, letting one test's call count leak into the next; fixed alongside. **Live end-to-end
+verification deliberately deferred** — checked the real dev DB directly and confirmed zero
+accounts currently have an Anthropic key on file at all (a pre-existing gap from before this
+phase, not introduced by it), so a real billed-LLM check isn't possible yet; automated coverage
+(57 tests across the 3 touched files, including the filter-tool-only path, the chained
+filter→search path, and the recoverable-error path) was judged sufficient for now, by explicit
+user direction.
+
+**Not yet built — the next phase, if pursued**: the "related/confusable patterns" field (Tier 2
+from the original metadata design discussion, e.g. Hammer/Hanging Man's own real relationship);
+and any decision on whether structurally-answerable questions should eventually skip the LLM
+call entirely for a cheaper deterministic-only path (explicitly scoped out of this phase, per the
+user's own architecture — every `ask()` call should still go through the LLM's own judgment).
+
+## Candlestick Ask — Deterministic-First Cascade, Asked-Question Cache, LLM-Gating Permission (Phase 2) ✅ Done
+
+Built 2026-10-05, `/plan`-approved, directly answering Phase 1's own "not yet built" question
+above: the user asked to call the LLM only when a cheaper deterministic path can't answer, rather
+than on every `ask()`. Requirements worked out via conversation first (role-scoped LLM gating as
+a Function/permission rather than a Config Property, since Config Properties has no role-scoping
+today; confirmed "Question_Asked_Count" should back a future Top-100 list; a real conflict between
+"drop the per-call log" and rate limiting's own need for per-user/per-timestamp rows, resolved by
+slimming the log instead of dropping it), published as a bullet-list requirements doc (Section 14
+of `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md`), then formally planned.
+
+**The cascade** (`askQuestion()` in `candlestickQuestionAnswer.controller.ts`): cache check first
+(free, no permission/rate-limit check at all) → if the caller's role holds the new
+`candlestick_question_answer:llm_calling` permission, the existing LLM ReAct loop (Phase 1,
+rate-limited as before) → otherwise, a small set of DB-stored question templates
+(`m_question_template`, regex-matched, admin-editable without a deploy) → no match on either path
+→ an honest `unable_to_answer`, never a silent guess. Every resolution (including a template miss)
+is recorded in the new cache table either way.
+
+**`m_candlestick_asked_question`** (migration `056`) — unique on `(normalized_question_text,
+horizon)`, "first answer wins" on a repeat hit (never regenerates `answer_text`, only increments
+`question_asked_count`/`last_asked_at`) — the data this session's own earlier "Question_Asked_Count"
+idea wanted, and the direct backing store for the new Popular Questions list (`GET
+/candlestick-question-answer/top-questions`, `WHERE question_status = 'Answered' ORDER BY
+question_asked_count DESC LIMIT 100`).
+
+**`m_question_template`** (migration `057`) — a small declarative DSL (`fixedFilters`/
+`groupFilters` mapping regex capture groups to `filterPatternsByMetadata()`'s own filter fields,
+reusing Phase 1's tool with zero new query logic), seeded with 3 conservative templates
+(`bias_lookup`, `mirror_lookup`, `signal_type_list`). **Real regex bug caught live, not by unit
+tests**: a lazy `(.+?)` capture group with nothing mandatory after it (just an optional `\??`)
+never expands past 1 character — fixed by anchoring every template to `$`, documented in the
+migration's own header as a bug class to avoid in any future admin-authored template too.
+
+**`candlestick_question_answer:llm_calling`** (migration `058`) — a child permission of `:ask` via
+the existing generic `PERMISSION_REQUIRES` mechanism (`roles.service.ts`, already proven by
+`contrarian_finder:scan_history` → `contrarian_finder:scan`), granted by the migration to every
+role that already held `:ask` so nobody's behavior silently downgraded on rollout — verified live
+by diffing the role list before/after.
+
+**Log table slimmed, not dropped** (migration `059`) — `user_evt_candlestick_question_answer_log`
+drops every column except `id`/`user_id`/`created_at` (its only remaining job is the rolling
+rate-limit window, which only ever needed those) and gets this repo's **first** `ALTER TABLE ...
+SET (ttl_expire_after = ...)` (every prior TTL was set at `CREATE TABLE` time). Rate limiting is
+now narrower in scope too — only the LLM branch calls `recordRateLimitedCall()`; cache hits and
+template resolutions are free, consistent with "reads/cheap paths stay free" elsewhere in this app.
+
+**Frontend**: `RolePermissionsPage.tsx`'s display-only `PERMISSION_PARENT` map gained the new pair;
+new Admin Console "Question Templates" section (create form + activate/deactivate list) on
+`AdminCandlestickQuestionAnswerPage.tsx`; new "Popular Questions" section on
+`CandlestickQuestionAnswerPage.tsx` — each row expands its already-fetched `answerText`/
+`matchedPatternNames` inline, no second request on click, same precedent as Browse Curated
+Questions' own inline expand.
+
+1033 backend tests (up from 966), 815 frontend tests (up from 807), `tsc`/lint clean both sides.
+**Live-verified end-to-end against the real dev DB and running server** with a throwaway
+admin-master account plus a second throwaway role deliberately holding `:ask` without
+`:llm_calling`: the template path resolved "Is Hammer bullish or bearish?" to "Hammer is bullish."
+with zero LLM/Anthropic-key dependency; asking the identical question again was a genuine cache
+hit (`question_asked_count` confirmed incremented 1→2 via direct query, same answer returned, no
+rate-limit or template re-evaluation); an unmatchable question correctly returned
+`unable_to_answer` with a role-aware reason ("This role cannot use the free-text LLM assistant,
+and no matching question template was found."); the Popular Questions list and its inline expand,
+and the Admin Console's Question Templates section (all 3 seeded templates, correct regex/mode/
+status), both confirmed rendering real data in the browser. Throwaway account/role and the test
+cache row cleaned up afterward.
+
+## Candlestick Pattern Q&A — Reachable Without Stock Analysis Access ✅ Done
+
+Built 2026-10-07 — a real bug surfaced the moment `candlestick_question_answer:ask` was granted
+to the base `user` role (without `stock_analysis:view`): the backend route already correctly
+gated Pattern Q&A on `candlestick_question_answer:ask` alone, but its only two UI entry points
+(the contextual link inside `CandlestickSymbolList`, and `CandlestickPopup`'s own shortcut) both
+live *inside* the Stock Analysis panel, which stays hidden entirely without `stock_analysis:view`
+— a `user`-role session had a fully working page with no way to click into it.
+
+Considered three fixes: requiring `stock_analysis:view` as a `PERMISSION_REQUIRES` parent of
+`:ask` (rejected — forces a Q&A-only role into the full 4-quadrant/candlestick-charts surface
+just to read curated content); granting `user` role `stock_analysis:view` directly (rejected —
+same over-exposure problem, and doesn't fix the *next* narrow-scope role either); or restoring a
+nav entry point scoped to `:ask` alone. Went with the third, but per explicit direction, folded
+it into the existing "Stock Analysis" top-level tab as a 2-entry sub-tab bar rather than
+re-adding a second top-level tab (reusing the same sub-tab-bar pattern Portfolio's Legacy/Flex
+split already established, rather than introducing a true popover dropdown).
+
+`TabShell.tsx`'s combined "Stock Analysis" nav link is now visible with **either**
+`stock_analysis:view` or `candlestick_question_answer:ask` (previously `stock_analysis:view`
+only) — its target route depends on which one the session actually holds, so an ask-only session
+lands directly on `/candlestick-question-answer` instead of hitting the stock-analysis route's
+own guard and bouncing home. A new "Candlestick Charts" / "Candlestick Tutorial" sub-tab bar
+(Candlestick Tutorial = the existing Pattern Q&A page, deliberately relabeled here per explicit
+direction — the page's own heading/branding elsewhere is untouched) renders only when **both**
+permissions are held, since a single-permission session has nothing to switch between. Both
+routes' existing direct-URL guards (`Navigate to="/"` when the specific route's own permission is
+missing) are unchanged — the real enforcement never moved, only the nav's visibility/target logic.
+
+8 updated/new tests in `TabShell.test.tsx` (ask-only session sees the combined link land directly
+on Pattern Q&A with no sub-tab bar; a session with both permissions sees the sub-tab bar and can
+switch between the two routes), 817 frontend tests total, `tsc`/lint clean. **Live-verified**
+against the real dev DB and running server with a throwaway `user`-role account (the exact
+real-world grant combination that surfaced this — `candlestick_question_answer:ask` +
+`portfolio_upload:legacy`, no `stock_analysis:view`): the "Stock Analysis" nav link appeared and
+clicking it landed directly on `/candlestick-question-answer` with the Pattern Q&A page rendering
+correctly and no sub-tab bar shown. Throwaway account cleaned up afterward.
+
+**Round 2, built 2026-10-07 same day — sub-tab bar replaced with a popover, per live feedback**:
+the sub-tab bar's real cost became apparent immediately after shipping — it adds a full extra
+row of vertical space to every page, all the time, for a 2-item menu that's only relevant on two
+of the app's routes. Replaced with a click-to-open popover reusing this codebase's own existing
+pattern (`UserPersonaBadge.tsx`'s account menu and `CandlestickQuestionAnswerPage.tsx`'s column-
+filter dropdowns both already use a `position: relative` trigger + `absolute` panel + `fixed
+inset-0` click-outside-to-close backdrop) — zero persistent layout cost, since the panel only
+exists in the DOM while open. The trigger is a `<button>` ("Stock Analysis ▾") only when **both**
+permissions are held (there's a real choice to present); a single-permission session still gets
+the plain `<Link>` from Round 1 unchanged, since there's nothing to choose between. Clicking a
+menu item navigates and closes the popover in the same action; the trigger itself stays
+highlighted (`bg-accent`) while on either sub-page, matching the old sub-tab bar's own active-
+state behavior.
+
+9 updated/new tests in `TabShell.test.tsx` (popover closed by default with no persistent
+menu/row; opening reveals both items; clicking one navigates and auto-closes; clicking the
+backdrop closes without navigating; the single-permission cases confirm a plain link renders,
+never a button), 818 frontend tests total, `tsc`/lint clean. **Live-verified** against the real
+dev DB and running server with a throwaway `user-premium` account (holds both permissions by
+default): the nav renders as a single "Stock Analysis ▾" row with no second line anywhere on the
+page; clicking it opens the popover overlaying the page content with zero layout shift; clicking
+"Candlestick Tutorial" navigates to the Pattern Q&A page, closes the popover, and leaves the
+trigger highlighted. Throwaway account cleaned up afterward.
+
+**Round 3, built 2026-10-07 same day — wording/navigation polish on both ends of the Charts ↔
+Tutorial relationship**: `CandlestickSymbolList.tsx`'s own contextual button (inside the
+Candlestick Charts panel) relabeled "Pattern Q&A →" → "Tutorial →", matching the popover menu's
+own naming instead of an older, inconsistent label. `CandlestickQuestionAnswerPage.tsx`'s "←
+Back" link now reads "← Charts" and navigates directly to `/stock-analysis` for any session that
+actually holds `stock_analysis:view` — a predictable destination instead of whatever happened to
+be in browser history — but falls back to the original generic "← Back" (`navigate(-1)`) for an
+ask-only session with no Charts page to go back to, the exact role shape Round 1 was built for.
+
+Also reworked the page's own section layout per explicit, twice-refined direction: initially
+tried as a single stacked column (Popular Questions → Browse Curated Questions → Ask Your Own
+Question), then corrected back to a 2-column layout — **column 1: Browse Curated Questions;
+column 2: Ask Your Own Question stacked above Popular Questions** (moved out of its own
+full-width row from Phase 2's original build). No data/logic changes, pure JSX reordering within
+the same component.
+
+2 updated + 3 new tests across `CandlestickSymbolList.test.tsx`/`CandlestickQuestionAnswerPage
+.test.tsx` (the relabeled Tutorial link's text; "← Back" vs. "← Charts" for both permission
+cases, including a `waitFor` since the session's own permissions resolve on a separate async
+query from the page's own data and can render the pre-session default label first; a heading-
+order check for the new 2-column structure), 820 frontend tests total, `tsc`/lint clean.
+**Live-verified** against the real dev DB and running server with a throwaway `user-premium`
+account: "← Charts" rendered and correctly navigated to `/stock-analysis`; the Candlestick Charts
+panel's button read "Tutorial →"; the page rendered as Browse Curated Questions (column 1) next
+to Ask Your Own Question above Popular Questions (column 2). Throwaway account cleaned up
+afterward.
+
+## Question Templates — 7 More + a Substring-Collision Fix ✅ Done
+
+Built 2026-10-08, closing a real usability report: a role without `candlestick_question_answer
+:llm_calling` got "unable to answer" for almost every question, since the original 3 templates
+(Phase 2) only matched 3 very specific phrasings. Confirmed live before building anything -
+replayed the 3 existing templates against their own exact phrasing (all worked) vs. close
+variants like "What does Hammer mean?"/"Hammer bullish or bearish" (both failed, by design, not
+a bug) - the real gap was coverage, not correctness.
+
+**A second, genuinely separate bug found during that same investigation**: `patternNameOrSynonym`
+matches via `ILIKE '%...%'` (correct for the LLM tool's own fuzzy search), so "Doji" also matches
+"Doji-Dragonfly"/"Doji-Gravestone"/"Doji-LongLegged" - 4 rows where `single` mode needs exactly
+1, silently failing a perfectly well-formed question ("Is Doji bullish or bearish?"). Fixed in
+`matchTemplate()`: when a `single`-mode match returns more than one row, narrow to an exact
+case-insensitive pattern-name match among them before giving up - scoped to templates only, the
+LLM tool's own broader substring matching is untouched. "Doji" is the only colliding name in the
+current pattern set, confirmed via a full pairwise scan.
+
+**7 new templates** (migration `060`), reusing `filterPatternsByMetadata()`'s existing structural
+fields with zero new query logic: `pattern_description` ("what does X mean"/"describe X"/"tell
+me about X", one regex with 3 alternated capture groups all mapped to the same filter field),
+`signal_type_lookup`, `gap_requirement_lookup`, `trend_context_lookup` (three single-pattern
+lookups exposing `requiresGap`/`trendContext` for the first time), `bias_lookup_relaxed` (drops
+the original `bias_lookup`'s required "is"/"?"), and `bias_list`/`gap_required_list` (mirroring
+`signal_type_list`'s own list-mode shape for two more axes). 10 templates total.
+
+**Real bug caught live, not by unit tests, again**: the first migration write made the exact
+same dollar-quoting mistake migration `057`'s own header warns about - every new `regex_pattern`
+ended in a bare `$re$` closing tag with no literal `$` anchor before it (needed `\??$$re$`, not
+`\??$re$`), so all 7 templates silently lost their end-of-string anchor. Caught by inspecting the
+applied migration file directly before testing, not by the live tests themselves (which would
+likely still have passed for most phrasings, just with the same lazy-capture under-matching risk
+documented in `057`). Fixed in the migration file for future fresh environments, plus a
+corrective `UPDATE` against the already-applied live rows (same resolution pattern as `057`'s
+own live mirror_lookup fix).
+
+21 backend tests (3 new describe-block cases for the Doji-collision narrowing), 1030 backend
+tests total, `tsc` clean. **Live-verified against the real dev DB and running server** with a
+throwaway `user`-role account (holding `:ask` but not `:llm_calling`, the same real-world shape
+that surfaced the original report): all 7 new templates resolved correctly ("What does Hammer
+mean?" → a full description sentence; "Does Piercing Line require a gap?" → "does require a
+gap."; "Which patterns are bullish?" → 8 real pattern names; etc.), "Is Doji bullish or bearish?"
+now resolves instead of failing, and a deliberately horizon-mismatched question ("Tell me about
+Morning Star" under `dayTrading`, a medium/long-term-only pattern) correctly still returned
+`unable_to_answer` - confirming the existing per-request horizon filter (shared by every
+template, old and new) is working as designed, not broken by this round. Throwaway account and
+test cache rows cleaned up afterward.
+
+**Known minor cosmetic nit, not fixed**: `pattern_description`'s answer template reads "a
+Advanced-candle pattern" (should be "an") for patterns whose `complexityTier` starts with a
+vowel - pure grammar, not worth a schema change for.
+
+**Deferred, per explicit direction**: an "(i)" info popover next to the Ask form's own "Question"
+label, surfacing which question shapes are currently recognized - not built this round.
+
+## Candlestick Tutorial — Horizon Becomes Informational, Plus "All" Horizon Option ✅ Done
+
+Built 2026-10-08, `/plan`-approved. Closed a real usability gap found live: "What does Three
+Inside Up mean?" and other perfectly well-formed questions returned a bare `unable_to_answer`
+with zero explanation, because `matchTemplate()`/`filterPatternsByMetadata()`/`searchEntries()`
+all treated the user's selected Trading Horizon as an **exclusionary** filter - a pattern whose
+own relevant-horizons flags didn't include the selected horizon was silently dropped from the
+result set entirely, with nothing distinguishing "the engine doesn't understand your question"
+from "this pattern just isn't tagged for your horizon." Per explicit direction, this was widened
+from the original single-lookup-only proposal to cover every path in the feature - list-mode
+templates and the free-text LLM path too, not just single-pattern lookups.
+
+**Horizon stops being exclusionary everywhere in this feature, becomes purely informational**:
+`filterPatternsByMetadata()`/`searchEntries()` (`candlestickQuestionAnswer.service.ts`) and
+`matchTemplate()` (`candlestickQuestionTemplate.service.ts`) all dropped their `horizon`
+parameter/WHERE-clause branch entirely - a match is resolved first, then annotated. New
+`getPatternHorizonRelevance(patternNames, horizon)` is the single enrichment point, called once
+per successful resolution (cache/template/LLM) by a new `enrichMatchedPatterns()` helper in
+`candlestickQuestionAnswer.controller.ts` - returns `null` for every name when `horizon === 'all'`
+(nothing to compare against) or the input is empty, otherwise one `SELECT ... WHERE pattern_name
+= ANY($1)` reading the pattern's own `is_day_trading`/`is_medium_term`/`is_long_term` column for
+the requested horizon. `MatchedPatternWithHorizonRelevance { patternName, relevantForHorizon:
+boolean | null }` replaces the old plain `string[]` shape everywhere it flowed - the LLM's own
+`ask()` tool-call sites, the cache's `matched_pattern_names` JSONB column, `TopQuestion`, and the
+frontend's `AskResult`/`TopQuestion` types. **The cache-hit branch is the one deliberate
+exception** - it replays the already-enriched shape stored at write time rather than re-calling
+the enrichment helper, keeping cache hits free of any extra query (correct because the cache key
+already includes `(normalized_question_text, horizon)`, so a hit's stored horizon always equals
+the current request's). No DB migration needed anywhere - `matched_pattern_names` is JSONB with
+no fixed shape, this was a pure TS-type/write-shape change. `GET /entries`'s dead `?horizon=`
+query param (searchEntries never actually filtered by it from the Browse Curated picker, only the
+LLM's own search tool did) was removed for honesty rather than left silently ignored.
+
+**New "All" horizon option** (`Horizon`/`AskHorizon` gain `'all'`): lets a user ask without
+committing to a specific horizon - every matched pattern renders with a neutral badge (nothing to
+compare against) instead of forcing a pick. Deliberately a **feature-scoped frontend type**
+(`AskHorizon = HorizonId | 'all'` in `api/candlestickQuestionAnswer.ts`), not a widening of the
+shared `HorizonId` from `lib/candlestickIndicators.ts` - that type is also used by the unrelated
+Candlestick Charts feature (`CandlestickPopup.tsx`/`CandlestickQuickReference.tsx`) for picking
+which indicators to show per timeframe, where "All" has no meaning. The LLM's own system prompt
+and first user message were reworded to be informational, not exclusionary, about horizon, with
+`'all'` phrased as "no particular preference" rather than sent literally.
+
+**Frontend**: new `HorizonRelevanceBadges` component (`CandlestickQuestionAnswerPage.tsx`) renders
+one colored chip per matched pattern name - green (`bg-success/10 text-success`) when
+`relevantForHorizon === true`, red (`bg-danger/10 text-danger`) when `=== false`, neutral
+(`bg-text-muted/10 text-text-muted`) when `=== null` - reusing the exact same semantic-color-token
+pattern `AdminCandlestickQuestionAnswerPage.tsx`'s `STATUS_STYLES` already established. Wired into
+both the Ask answer card and Popular Questions' expanded row, the same two blocks that already
+rendered pattern diagrams. The Trading Horizon `<select>` already generates its options from
+`Object.keys(HORIZON_LABELS)`, so "All" appears automatically with zero extra markup.
+
+1032 backend tests, 823 frontend tests, `tsc`/lint clean both sides. **One-time dev-DB step**
+(not a migration): `m_candlestick_asked_question` truncated (10 stale rows carrying the old
+plain-`string[]` shape) so no row could reach the new code expecting the enriched object shape.
+**Live-verified end-to-end against the real dev DB and running server** with a throwaway
+`user`-role account (confirmed via direct query to hold `candlestick_question_answer:ask` but not
+`:llm_calling`, exercising the template cascade, not the LLM path): "What does Three Inside Up
+mean?" under Day-Trading now answers (previously `unable_to_answer`) with a **red** badge (Three
+Inside Up is `is_day_trading: false`); the identical question under Swing Trading → **green**
+badge; under **"All"** → neutral badge; a repeat ask under Day-Trading was a genuine cache hit
+(`question_asked_count` incremented 1→2 via direct query, identical enriched shape replayed) - a
+list-mode question ("Which patterns are reversal signals?") under Day-Trading returned 25
+patterns, each with its own correct per-pattern badge, including several (Three Inside Up,
+Morning Star, Evening Star, Three Black Crows, etc.) that the old exclusionary filter would have
+silently dropped entirely. Popular Questions' `top-questions` endpoint confirmed surfacing the
+same enriched shape. Throwaway account and all test cache rows cleaned up afterward. The LLM
+path's own badge rendering was verified via the updated automated tests only, not a live call -
+no real Anthropic key is on file in this dev environment, the same known gap noted in the
+Phase 1/2 build logs above.
+
+## Next Up
+
+- **Question Templates "(i)" info popover — deferred 2026-10-08, not yet built.** Per explicit
+  direction while scoping the 7-new-templates round above: an info icon next to the Ask form's
+  "Question" label, showing a pop-up of the currently-recognized question shapes (the growing
+  `m_question_template` list), so a user on a role without `llm_calling` has some discoverability
+  into what the deterministic cascade can actually answer instead of guessing phrasings. Explicitly
+  scoped out of that round to land the template additions first.
+- **E2E suite's signup step was out of date with the real Self-Registration form — identified
+  2026-10-08, fixed same day.** `e2e/steps/auth.steps.ts`'s signup step only filled
+  `signup-email`/`signup-password`, but the real `SignupPage.tsx` (see "Self-Registration,
+  Password Policy & Security-Question Recovery" above) also requires first/last name, a
+  policy-compliant password, and 5 distinct security-question picks before `signup-submit`
+  ever enables — so every e2e scenario that starts from signup (`golden-path`,
+  `tab-navigation`'s both scenarios) timed out waiting for a button that could never become
+  clickable. Fixed by filling every mandatory field (`testUser` fixture gained `firstName`/
+  `lastName` chosen to not overlap any substring of its own password; security-question slots
+  filled by selecting each dropdown's first available option in turn, which always lands on 5
+  distinct questions since each slot narrows to exclude ones already picked elsewhere) and
+  waiting for the post-submit `navigate('/')` to actually land before proceeding. **A second,
+  non-obvious issue surfaced fixing the first**: a freshly self-registered account is created
+  `'pending'`/roleless (per the same feature) and would still "land" at `/` — just rendering
+  `PendingReviewPage` there instead of the dashboard, since both share that route under
+  `ProtectedRoute` — so the old URL-only assertion in the `Then` step was a latent false-pass
+  waiting to happen the moment signup-submit itself got unstuck. Fixed with a new
+  `e2e/scripts/activate-user.ts` (same direct-`Pool` pattern as `cleanup-user.ts`/
+  `grant-role.ts`) that sets `status = 'active'` and assigns the real migration-seeded `'user'`
+  role (not a throwaway E2E-only one, since the golden path needs `'user'`'s real default
+  `portfolio_upload:legacy` grant) immediately after signup, followed by a hard `page.reload()`
+  (`useSession()` has `staleTime: Infinity`, so only a reload — not a refetch — picks up the
+  DB-side change); the `Then` step also now asserts `pending-review-banner` is not visible, as a
+  direct regression guard against the same false-pass class. Not caught earlier because `e2e`'s
+  CI job has been `continue-on-error: true` this whole time. **Verification note**: a full local
+  `npm test` run was blocked by this machine's own already-running dev servers on ports
+  3000/4000 (Playwright's `reuseExistingServer` reused them, but they're bound to the regular
+  dev database, not `.env.e2e`'s dedicated test database, so `activate-user.ts` couldn't find
+  the user signup had just created there) — deliberately not killed, since they weren't started
+  this session and might be in active use. `tsc --noEmit` is clean; real confirmation is the
+  next CI run on this branch, which boots fresh servers with no such conflict. **Confirmed
+  2026-10-08**: the next CI run on this branch passed all 4 jobs, including `e2e` (all 3
+  scenarios — golden-path, both tab-navigation scenarios). `continue-on-error: true` removed
+  from the `e2e` job in `.github/workflows/ci.yml` the same day, now that it's genuinely green
+  — a future regression will fail the build instead of passing through silently.
+- **Candlestick pattern backlog — fully closed, 2026-10-03.** Every item identified in
+  `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md` Section 13 (Tweezer Bottom/Top,
+  Bullish/Bearish Kicking, Bullish/Bearish Abandoned Baby, Upside/Downside Tasuki Gap, and finally
+  the Complex tier + Rising/Falling Three Methods) has been built, seeded, and live-verified. No
+  further candlestick pattern work is currently queued.
+- **Two documentation gaps identified 2026-09-26 — both now closed.**
+  1. **Candlestick Pattern Q&A module coverage — closed 2026-10-03** (Documentation Phase 1).
+     `User Manual.md` and `User Technical Doc/02-Functional-Code-Workflow.md` now cover the
+     Browse-curated vs. Ask-your-own-question split, the Ask rate limit, the Category taxonomy
+     (Definition → Interpretation → Reliability → How to Use → Common Mistakes) and pattern-level
+     relevant-horizons model, the curated-question table's Pattern/Category filters, and the
+     in-popup Symbol Switcher — plus both the "📘 Platform Field Guide" and "🔑 Access & Roles
+     Reference" Artifacts were regenerated/redeployed to match (same links, reused via `url`).
+  2. **Consolidated REST API reference — closed 2026-10-04** (Documentation Phase 2). New
+     `User Technical Doc/04-REST-API-Reference.md` documents all **97** routes across the 19
+     `backend/src/routes/*.ts` files — method, path, auth/permission gate, request shape,
+     response shape, and the distinctive non-200 status codes each route can actually return
+     (confirmed directly against route + controller source, not inferred). Deliberately distinct
+     from the published "API Call Ledger" artifact, which only covers the 7 outbound-FMP/Finnhub-
+     calling features' external call cost/caching — near-zero content overlap between the two.
+     Not yet published as its own Artifact (not requested); cross-linkable from
+     `00-Published-Artifacts.md` later if wanted.
+- Two small known-leftover cleanups (harmless, not yet decided): an orphaned
+  `apiKeys:bringMyOwn` permission naming inconsistency (`User Manual.md`); `momentum
+  .service.ts`'s dead-but-undeleted functions, kept as the Python extraction's rollback path.
+- Phase 4: Shared quote cache — **⏸ on hold, deferred by the user 2026-07-29**. Design already
+  settled (CockroachDB TTL table over Redis, UPSERT-keyed by symbol, TTL window = the
+  retention rule) — see `Architecture.md` Section 3 item 8. Table naming (doesn't fit
+  `m_`/`tx_`/`sys_`/unprefixed/`user_evt_`) is the one still-open decision.
 - Phase 5: Production hardening (Docker, Sentry, staging/prod split)
 - Phase 6: Migration tool + cutover from current app
 
