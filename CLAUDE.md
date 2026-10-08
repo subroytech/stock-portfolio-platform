@@ -2145,7 +2145,11 @@ Phase 1/2 build logs above.
   dev database, not `.env.e2e`'s dedicated test database, so `activate-user.ts` couldn't find
   the user signup had just created there) — deliberately not killed, since they weren't started
   this session and might be in active use. `tsc --noEmit` is clean; real confirmation is the
-  next CI run on this branch, which boots fresh servers with no such conflict.
+  next CI run on this branch, which boots fresh servers with no such conflict. **Confirmed
+  2026-10-08**: the next CI run on this branch passed all 4 jobs, including `e2e` (all 3
+  scenarios — golden-path, both tab-navigation scenarios). `continue-on-error: true` removed
+  from the `e2e` job in `.github/workflows/ci.yml` the same day, now that it's genuinely green
+  — a future regression will fail the build instead of passing through silently.
 - **Candlestick pattern backlog — fully closed, 2026-10-03.** Every item identified in
   `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md` Section 13 (Tweezer Bottom/Top,
   Bullish/Bearish Kicking, Bullish/Bearish Abandoned Baby, Upside/Downside Tasuki Gap, and finally

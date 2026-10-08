@@ -70,8 +70,6 @@ jobs:
   e2e:
     needs: backend
     runs-on: ubuntu-latest
-    # Non-blocking until proven stable across several CI runs - remove once green.
-    continue-on-error: true
     defaults:
       run:
         working-directory: e2e
