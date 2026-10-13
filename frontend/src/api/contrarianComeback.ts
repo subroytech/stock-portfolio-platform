@@ -1,5 +1,6 @@
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from './client';
+import { RATE_LIMIT_STATUS_QUERY_KEY } from './rateLimitStatus';
 
 // Mirrors analysis-service/app/models/contrarian_comeback.py field-for-field
 // - no shared-schema codegen in this repo, keep in sync by hand if either
@@ -187,19 +188,27 @@ export interface ContrarianComebackSubmitInput {
 // A mutation, not a query - same reasoning as useLongTermAnalysis: both are
 // triggered on-demand by a ticker lookup, not something to auto-refetch/
 // cache by symbol.
+// Both Gate and (a cache-miss) Submit count against the combined rate limit - refresh the header
+// indicator right after each settles rather than waiting for its own poll interval. A cache-hit
+// Submit never touches the rate limit backend-side either, so this invalidation is harmless
+// (the fetched status just won't have changed) rather than incorrectly implying a cost was paid.
 export function useContrarianComebackGate() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (symbol: string) =>
       apiFetch<ContrarianComebackGateResult>(`/analysis/contrarian-comeback/${encodeURIComponent(symbol)}/gate`),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: RATE_LIMIT_STATUS_QUERY_KEY }),
   });
 }
 
 export function useContrarianComebackSubmit() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ symbol, ...body }: ContrarianComebackSubmitInput) =>
       apiFetch<ContrarianComebackSubmitResult>(`/analysis/contrarian-comeback/${encodeURIComponent(symbol)}`, {
         method: 'POST',
         body: JSON.stringify(body),
       }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: RATE_LIMIT_STATUS_QUERY_KEY }),
   });
 }

@@ -1,10 +1,19 @@
 import { createContext, useContext, useEffect, useRef } from 'react';
 
 // Lets any tab "launch" a ticker on another tab (e.g. a Contrarian Finder
-// row triggering Long-Term Analysis) without unmounting either - both tabs
-// stay mounted at all times under TabShell, so the target page's own hooks
-// just react to a context change. Follows the same
+// row triggering Long-Term Analysis) without unmounting either - the target
+// page's own hooks just react to a context change. Follows the same
 // Context+Provider-in-TabShell pattern as apiKeysModal.ts.
+//
+// Note: TabShell.tsx's `launch()` guarantees the target tab is already
+// mounted (via visitedTabs) BEFORE ever dispatching a handoff to it - tabs
+// are lazily mounted on first visit (2026-09-18), so without that ordering
+// the target page could mount for the first time in the same instant it
+// receives the handoff, landing inside React StrictMode's dev-only
+// double-invoke window and silently losing the mutation's result (a real
+// bug found live 2026-09-19). This module's own `useIncomingTicker` doesn't
+// need to know about that - it just assumes (correctly, given the above)
+// that it's always reacting to an update on an already-mounted page.
 export type HandoffTarget = 'long-term-analysis' | 'contrarian-comeback';
 
 export interface TickerHandoff {

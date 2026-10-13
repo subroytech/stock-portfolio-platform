@@ -1,0 +1,28 @@
+-- Candlestick Pattern complexity tier (2026-09-27). Schema (DDL) only - the data backfill lives
+-- in migration 051, deliberately split into its own file for the exact reason documented in
+-- migration 048's own header: CockroachDB doesn't reliably make a schema change visible to
+-- dependent DML submitted in the same multi-statement batch.
+--
+-- Why this lives on the PATTERN, not the entry: complexity is an inherent structural property of
+-- the pattern itself ("how many candles do you have to read to identify it?"), not something
+-- re-decided per Q&A entry - the same reasoning migration 048 used to move horizon-relevance onto
+-- m_candlestick_pattern's own is_day_trading/is_medium_term/is_long_term columns.
+--
+-- The rule, per explicit user direction: tier = candle count. Simple = 1 candle, Complex = 2,
+-- Advanced = 3. This is deliberately a rule a self-directed investor can reason about ("more
+-- candles to track = harder to use correctly") rather than an arbitrary difficulty label - the
+-- app's whole premise is self-directed investing across a wide range of user sophistication.
+--
+-- Deliberately NOT related to m_candlestick_question_answer_entry.tier (101/201/301) - that's
+-- about content depth per category within a single pattern, an entirely separate axis. A Simple
+-- pattern still has both 101 and 201 entries; an Advanced one does too.
+--
+-- App-validated enum ('Simple' | 'Complex' | 'Advanced'), no SQL CHECK constraint - same
+-- convention every other enum-ish column on these tables already follows (category, tier,
+-- status). Title Case matches category's own display-label convention, not status's lowercase
+-- internal-flag one, since this value is shown to users directly in the filter UI.
+--
+-- DEFAULT 'Simple' makes this a safe, non-breaking add for every existing row; migration 051 then
+-- corrects the 10 patterns that are actually Complex or Advanced.
+
+ALTER TABLE m_candlestick_pattern ADD COLUMN complexity_tier VARCHAR(10) NOT NULL DEFAULT 'Simple';

@@ -42,9 +42,28 @@ describe('createUser', () => {
   beforeEach(() => mockQuery.mockReset());
 
   test('inserts and returns the new user (no password hash in the result)', async () => {
-    mockQuery.mockResolvedValue({ rows: [{ id: '1', email: 'a@b.com' }] });
+    mockQuery.mockResolvedValue({ rows: [{ id: '1', email: 'a@b.com', status: 'active', first_name: null, last_name: null }] });
     const user = await createUser('a@b.com', 'hashed');
-    expect(user).toEqual({ id: '1', email: 'a@b.com' });
+    expect(user).toEqual({ id: '1', email: 'a@b.com', status: 'active', firstName: null, lastName: null });
+  });
+
+  test('defaults status to "active" and firstName/lastName to null when not given', async () => {
+    mockQuery.mockResolvedValue({ rows: [{ id: '1', email: 'a@b.com', status: 'active', first_name: null, last_name: null }] });
+    await createUser('a@b.com', 'hashed');
+    expect(mockQuery).toHaveBeenCalledWith(expect.any(String), ['a@b.com', 'hashed', 'active', null, null]);
+  });
+
+  test('passes an explicit status through (admin-created accounts)', async () => {
+    mockQuery.mockResolvedValue({ rows: [{ id: '1', email: 'a@b.com', status: 'deactivated', first_name: null, last_name: null }] });
+    await createUser('a@b.com', 'hashed', 'deactivated');
+    expect(mockQuery).toHaveBeenCalledWith(expect.any(String), ['a@b.com', 'hashed', 'deactivated', null, null]);
+  });
+
+  test('passes firstName/lastName through (self-registration)', async () => {
+    mockQuery.mockResolvedValue({ rows: [{ id: '1', email: 'a@b.com', status: 'pending', first_name: 'Jordan', last_name: 'Rivera' }] });
+    const user = await createUser('a@b.com', 'hashed', 'pending', 'Jordan', 'Rivera');
+    expect(mockQuery).toHaveBeenCalledWith(expect.any(String), ['a@b.com', 'hashed', 'pending', 'Jordan', 'Rivera']);
+    expect(user).toEqual({ id: '1', email: 'a@b.com', status: 'pending', firstName: 'Jordan', lastName: 'Rivera' });
   });
 
   test('a unique-violation error (code 23505) is translated to EmailAlreadyExistsError', async () => {
@@ -66,21 +85,21 @@ describe('findUserByEmail', () => {
     expect(await findUserByEmail('nobody@example.com')).toBeNull();
   });
 
-  test('maps password_hash to passwordHash', async () => {
-    mockQuery.mockResolvedValue({ rows: [{ id: '1', email: 'a@b.com', password_hash: 'hashed' }] });
+  test('maps password_hash to passwordHash and includes status/firstName/lastName', async () => {
+    mockQuery.mockResolvedValue({ rows: [{ id: '1', email: 'a@b.com', password_hash: 'hashed', status: 'active', first_name: 'Jordan', last_name: 'Rivera' }] });
     const user = await findUserByEmail('a@b.com');
-    expect(user).toEqual({ id: '1', email: 'a@b.com', passwordHash: 'hashed' });
+    expect(user).toEqual({ id: '1', email: 'a@b.com', passwordHash: 'hashed', status: 'active', firstName: 'Jordan', lastName: 'Rivera' });
   });
 });
 
 describe('login', () => {
   beforeEach(() => mockQuery.mockReset());
 
-  test('returns the user on correct credentials', async () => {
+  test('returns the user on correct credentials for an active account', async () => {
     const hash = await hashPassword('correctpassword');
-    mockQuery.mockResolvedValue({ rows: [{ id: '1', email: 'a@b.com', password_hash: hash }] });
+    mockQuery.mockResolvedValue({ rows: [{ id: '1', email: 'a@b.com', password_hash: hash, status: 'active', first_name: null, last_name: null }] });
     const user = await login('a@b.com', 'correctpassword');
-    expect(user).toEqual({ id: '1', email: 'a@b.com' });
+    expect(user).toEqual({ id: '1', email: 'a@b.com', status: 'active', firstName: null, lastName: null });
   });
 
   test('throws InvalidCredentialsError for an unknown email', async () => {
@@ -88,7 +107,26 @@ describe('login', () => {
     await expect(login('nobody@example.com', 'whatever')).rejects.toBeInstanceOf(InvalidCredentialsError);
   });
 
-  test('unknown email and wrong password produce the identical error message (no user-enumeration leak)', async () => {
+  test.each(['deactivated', 'cancelled'])(
+    'throws InvalidCredentialsError for correct credentials on a "%s" account, checked only after the password is confirmed correct',
+    async (status) => {
+      const hash = await hashPassword('correctpassword');
+      mockQuery.mockResolvedValue({ rows: [{ id: '1', email: 'a@b.com', password_hash: hash, status, first_name: null, last_name: null }] });
+      await expect(login('a@b.com', 'correctpassword')).rejects.toBeInstanceOf(InvalidCredentialsError);
+    },
+  );
+
+  // Self-Registration & Password Policy: 'pending' is a deliberate exception to the status
+  // gate above - a self-registered account can log in immediately and see the "under review"
+  // banner (frontend's job, not login()'s), rather than being locked out entirely.
+  test('succeeds for correct credentials on a "pending" account', async () => {
+    const hash = await hashPassword('correctpassword');
+    mockQuery.mockResolvedValue({ rows: [{ id: '1', email: 'a@b.com', password_hash: hash, status: 'pending', first_name: null, last_name: null }] });
+    const user = await login('a@b.com', 'correctpassword');
+    expect(user.status).toBe('pending');
+  });
+
+  test('unknown email, wrong password, and a non-active status all produce the identical error message (no enumeration leak)', async () => {
     const hash = await hashPassword('correctpassword');
 
     mockQuery.mockResolvedValueOnce({ rows: [] });
@@ -99,7 +137,7 @@ describe('login', () => {
       unknownEmailMessage = (e as Error).message;
     }
 
-    mockQuery.mockResolvedValueOnce({ rows: [{ id: '1', email: 'a@b.com', password_hash: hash }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: '1', email: 'a@b.com', password_hash: hash, status: 'active' }] });
     let wrongPasswordMessage = '';
     try {
       await login('a@b.com', 'wrongpassword');
@@ -107,7 +145,16 @@ describe('login', () => {
       wrongPasswordMessage = (e as Error).message;
     }
 
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: '1', email: 'a@b.com', password_hash: hash, status: 'deactivated' }] });
+    let deactivatedMessage = '';
+    try {
+      await login('a@b.com', 'correctpassword');
+    } catch (e) {
+      deactivatedMessage = (e as Error).message;
+    }
+
     expect(unknownEmailMessage).toBeTruthy();
     expect(unknownEmailMessage).toBe(wrongPasswordMessage);
+    expect(unknownEmailMessage).toBe(deactivatedMessage);
   });
 });
