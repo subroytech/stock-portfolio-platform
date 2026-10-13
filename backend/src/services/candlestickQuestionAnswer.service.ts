@@ -216,6 +216,91 @@ function toPatternMetadataMatch(row: {
   };
 }
 
+const PATTERN_METADATA_COLUMNS = `p.pattern_name, p.complexity_tier, p.signal_type, p.directional_bias, p.requires_gap, p.trend_context,
+         mirror.pattern_name AS mirror_pattern_name`;
+const PATTERN_METADATA_FROM = `FROM m_candlestick_pattern p
+  LEFT JOIN m_candlestick_pattern mirror ON mirror.id = p.mirror_pattern_id`;
+
+// Plain Levenshtein edit distance (character insert/delete/substitute count) - deliberately NOT
+// a DB call (CockroachDB does have a built-in levenshtein(), confirmed live, but the candidate
+// set here is always tiny - a handful of in-memory words - so there's no reason to round-trip to
+// the database for this).
+function levenshteinDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  let prevRow = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const currRow = [i];
+    for (let j = 1; j <= b.length; j++) {
+      currRow[j] = a[i - 1] === b[j - 1]
+        ? prevRow[j - 1]
+        : 1 + Math.min(prevRow[j - 1], prevRow[j], currRow[j - 1]);
+    }
+    prevRow = currRow;
+  }
+  return prevRow[b.length];
+}
+
+function tokenize(text: string): string[] {
+  return text.toLowerCase().trim().split(/\s+/).filter(Boolean);
+}
+
+// Word-by-word, length-scaled typo tolerance for a pattern name/synonym (2026-10-10) - requires
+// the SAME number of words in the same order, each word either identical or within a small edit
+// distance of its counterpart. Deliberately NOT a single blended whole-string similarity score
+// (e.g. Postgres's pg_trgm similarity()): measured live against this app's own 34-pattern
+// vocabulary before choosing this design, and a blended score doesn't safely separate a real typo
+// from a genuinely different pattern that merely shares most of a multi-word name - e.g. "Three
+// Inside Up" vs "Three Outside Up" scored 0.57 and "Upside Tasuki Gap" vs "Downside Tasuki Gap"
+// scored 0.58, both HIGHER than the 0.25 a real one-letter typo ("Dogi" vs "Doji") scored, because
+// the shared words dominate the blended score. Per-word edit distance doesn't have that problem -
+// every real typo tested landed at a 1-2 character edit distance on its own word, while every
+// genuine distinguishing-word pair tested (Bullish/Bearish, Upside/Downside, Inside/Outside,
+// Morning/Evening, Rising/Falling) landed at 3-4, a clean, verified separation. The equal-word-
+// count requirement deliberately does NOT try to resolve a shortened/partial name (e.g. bare
+// "Tasuki Gap" for "Upside Tasuki Gap") - that's a pre-existing, separate ambiguity already
+// handled the same way a correctly-spelled partial name is today (ILIKE substring matching both
+// Upside and Downside Tasuki Gap, correctly treated as ambiguous) - not a new gap this fallback
+// needs to close.
+function isFuzzyWordMatch(queryWords: string[], candidateWords: string[]): boolean {
+  if (queryWords.length !== candidateWords.length || queryWords.length === 0) return false;
+  return queryWords.every((word, i) => {
+    const candidateWord = candidateWords[i];
+    if (word === candidateWord) return true;
+    const maxEdits = word.length > 5 ? 2 : 1;
+    return levenshteinDistance(word, candidateWord) <= maxEdits;
+  });
+}
+
+interface FuzzyCandidateRow {
+  pattern_name: string; complexity_tier: string; signal_type: string; directional_bias: string;
+  requires_gap: boolean; trend_context: string; mirror_pattern_name: string | null; synonyms: string[] | null;
+}
+
+// Runs only when the exact/substring check above found nothing for a given pattern name - see
+// isFuzzyWordMatch's own header for why this typo-tolerant check is safe to apply here but would
+// NOT be safe applied to free-text question caching (an open-ended vocabulary, not this app's own
+// small, fixed set of ~34 pattern names + synonyms).
+async function fuzzyMatchPatternsByName(
+  rawName: string, otherConditions: string[], otherParams: unknown[],
+): Promise<PatternMetadataMatch[]> {
+  const queryWords = tokenize(rawName);
+  const { rows } = await pool.query<FuzzyCandidateRow>(
+    `SELECT ${PATTERN_METADATA_COLUMNS}, p.synonyms
+     ${PATTERN_METADATA_FROM}
+     WHERE ${otherConditions.join(' AND ')}`,
+    otherParams,
+  );
+  return rows
+    .filter((row) => {
+      if (isFuzzyWordMatch(queryWords, tokenize(row.pattern_name))) return true;
+      return (row.synonyms ?? []).some((synonym) => isFuzzyWordMatch(queryWords, tokenize(synonym)));
+    })
+    .map(toPatternMetadataMatch)
+    .sort((a, b) => a.patternName.localeCompare(b.patternName));
+}
+
 // At least one filter is required - deliberately rejected rather than silently returning all 34
 // rows, forcing the LLM tool call to be specific. Caught in the Ask loop as a recoverable
 // tool-result error (the loop keeps going), never surfaces as an HTTP error.
@@ -227,39 +312,45 @@ export async function filterPatternsByMetadata(filters: {
   requiresGap?: boolean;
   trendContext?: TrendContext;
 } = {}): Promise<PatternMetadataMatch[]> {
-  const conditions: string[] = [`p.status = 'active'`];
-  const params: unknown[] = [];
+  // Split into "other" filters (always apply, whether this ends up an exact or fuzzy lookup) and
+  // the name filter (tried exactly first; only falls back to a fuzzy word-match on a true miss).
+  const otherConditions: string[] = [`p.status = 'active'`];
+  const otherParams: unknown[] = [];
   let anyFilterGiven = false;
 
-  if (filters.patternNameOrSynonym?.trim()) {
-    anyFilterGiven = true;
-    params.push(`%${filters.patternNameOrSynonym.trim()}%`);
-    conditions.push(`(p.pattern_name ILIKE $${params.length} OR p.synonyms::text ILIKE $${params.length})`);
-  }
   if (filters.signalType) {
     anyFilterGiven = true;
-    params.push(filters.signalType);
-    conditions.push(`p.signal_type = $${params.length}`);
+    otherParams.push(filters.signalType);
+    otherConditions.push(`p.signal_type = $${otherParams.length}`);
   }
   if (filters.directionalBias) {
     anyFilterGiven = true;
-    params.push(filters.directionalBias);
-    conditions.push(`p.directional_bias = $${params.length}`);
+    otherParams.push(filters.directionalBias);
+    otherConditions.push(`p.directional_bias = $${otherParams.length}`);
   }
   if (filters.complexityTier) {
     anyFilterGiven = true;
-    params.push(filters.complexityTier);
-    conditions.push(`p.complexity_tier = $${params.length}`);
+    otherParams.push(filters.complexityTier);
+    otherConditions.push(`p.complexity_tier = $${otherParams.length}`);
   }
   if (filters.requiresGap !== undefined) {
     anyFilterGiven = true;
-    params.push(filters.requiresGap);
-    conditions.push(`p.requires_gap = $${params.length}`);
+    otherParams.push(filters.requiresGap);
+    otherConditions.push(`p.requires_gap = $${otherParams.length}`);
   }
   if (filters.trendContext) {
     anyFilterGiven = true;
-    params.push(filters.trendContext);
-    conditions.push(`p.trend_context = $${params.length}`);
+    otherParams.push(filters.trendContext);
+    otherConditions.push(`p.trend_context = $${otherParams.length}`);
+  }
+
+  const name = filters.patternNameOrSynonym?.trim();
+  const allConditions = [...otherConditions];
+  const allParams = [...otherParams];
+  if (name) {
+    anyFilterGiven = true;
+    allParams.push(`%${name}%`);
+    allConditions.push(`(p.pattern_name ILIKE $${allParams.length} OR p.synonyms::text ILIKE $${allParams.length})`);
   }
 
   if (!anyFilterGiven) {
@@ -267,15 +358,16 @@ export async function filterPatternsByMetadata(filters: {
   }
 
   const { rows } = await pool.query(
-    `SELECT p.pattern_name, p.complexity_tier, p.signal_type, p.directional_bias, p.requires_gap, p.trend_context,
-            mirror.pattern_name AS mirror_pattern_name
-     FROM m_candlestick_pattern p
-     LEFT JOIN m_candlestick_pattern mirror ON mirror.id = p.mirror_pattern_id
-     WHERE ${conditions.join(' AND ')}
+    `SELECT ${PATTERN_METADATA_COLUMNS}
+     ${PATTERN_METADATA_FROM}
+     WHERE ${allConditions.join(' AND ')}
      ORDER BY p.pattern_name`,
-    params,
+    allParams,
   );
-  return rows.map(toPatternMetadataMatch);
+  if (rows.length > 0 || !name) {
+    return rows.map(toPatternMetadataMatch);
+  }
+  return fuzzyMatchPatternsByName(name, otherConditions, otherParams);
 }
 
 // The single enrichment point for "is this matched pattern actually relevant to the horizon the

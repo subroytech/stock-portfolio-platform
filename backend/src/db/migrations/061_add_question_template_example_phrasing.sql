@@ -1,0 +1,15 @@
+-- Candlestick Pattern Q&A - the deferred "(i)" info popover (2026-10-08, built same day as
+-- requested): a user on a role without candlestick_question_answer:llm_calling has no way to
+-- discover which question SHAPES the deterministic template cascade can actually answer, short
+-- of guessing phrasings. m_question_template had no human-readable field to surface for this -
+-- regex_pattern is admin-authored pattern syntax, not something to show an end user directly.
+--
+-- example_phrasing is a plain-English example question that would actually match the template's
+-- own regex_pattern - purely descriptive/display-only, never parsed or matched against anything
+-- itself.
+--
+-- Schema (DDL) only - backfill lives in migration 062, SET NOT NULL in migration 063, both
+-- deliberately split into their own files/pool.query() calls rather than combined here. Same
+-- reasoning as migration 048's own header: CockroachDB doesn't reliably make a schema change
+-- visible to dependent DML/DDL submitted in the same multi-statement batch.
+ALTER TABLE m_question_template ADD COLUMN example_phrasing TEXT;

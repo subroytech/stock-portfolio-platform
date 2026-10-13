@@ -17,7 +17,8 @@ const TEMPLATES = [
   {
     id: 't1', templateKey: 'bias_lookup', regexPattern: 'is (.+?) bullish or bearish\\??$',
     responseMode: 'single', filterMapping: { fixedFilters: {}, groupFilters: { '1': 'patternNameOrSynonym' } },
-    answerTemplate: '{patternName} is {directionalBias}.', status: 'active', createdAt: 't1', updatedAt: 't1',
+    answerTemplate: '{patternName} is {directionalBias}.', examplePhrasing: 'Is Hammer bullish or bearish?',
+    status: 'active', createdAt: 't1', updatedAt: 't1',
   },
 ];
 
@@ -169,6 +170,7 @@ describe('AdminCandlestickQuestionAnswerPage', () => {
 
       const row = await screen.findByTestId('candlestick-qa-template-row-t1');
       expect(within(row).getByText('bias_lookup')).toBeInTheDocument();
+      expect(within(row).getByText('Is Hammer bullish or bearish?')).toBeInTheDocument();
       expect(within(row).getByText('single')).toBeInTheDocument();
       expect(within(row).getByText('active')).toBeInTheDocument();
     });
@@ -184,6 +186,7 @@ describe('AdminCandlestickQuestionAnswerPage', () => {
       await userEvent.type(screen.getByTestId('candlestick-qa-new-template-key'), 'mirror_lookup');
       await userEvent.type(screen.getByTestId('candlestick-qa-new-template-regex'), 'mirror lookup regex');
       await userEvent.type(screen.getByTestId('candlestick-qa-new-template-answer'), 'The mirror answer.');
+      await userEvent.type(screen.getByTestId('candlestick-qa-new-template-example'), 'What is the opposite of Hammer?');
 
       await userEvent.click(screen.getByTestId('candlestick-qa-create-template-button'));
 
@@ -195,8 +198,25 @@ describe('AdminCandlestickQuestionAnswerPage', () => {
           responseMode: 'single',
           filterMapping: { fixedFilters: {}, groupFilters: { '1': 'patternNameOrSynonym' } },
           answerTemplate: 'The mirror answer.',
+          examplePhrasing: 'What is the opposite of Hammer?',
         }),
       });
+    });
+
+    test('Create Template stays disabled-in-effect (no submission) until examplePhrasing is filled', async () => {
+      const apiFetch = mockRoutedFetch();
+      renderPage();
+      await screen.findByTestId('candlestick-qa-template-row-t1');
+
+      await userEvent.type(screen.getByTestId('candlestick-qa-new-template-key'), 'mirror_lookup');
+      await userEvent.type(screen.getByTestId('candlestick-qa-new-template-regex'), 'mirror lookup regex');
+      await userEvent.type(screen.getByTestId('candlestick-qa-new-template-answer'), 'The mirror answer.');
+      apiFetch.mockClear();
+
+      await userEvent.click(screen.getByTestId('candlestick-qa-create-template-button'));
+
+      const postCall = apiFetch.mock.calls.find(([p, init]) => p === '/candlestick-question-answer/templates' && (init as RequestInit)?.method === 'POST');
+      expect(postCall).toBeUndefined();
     });
 
     test('shows a JSON error and does not submit when filterMapping is invalid', async () => {
@@ -209,6 +229,7 @@ describe('AdminCandlestickQuestionAnswerPage', () => {
       await userEvent.clear(screen.getByTestId('candlestick-qa-new-template-filter-mapping'));
       await userEvent.type(screen.getByTestId('candlestick-qa-new-template-filter-mapping'), 'not valid json');
       await userEvent.type(screen.getByTestId('candlestick-qa-new-template-answer'), 'Answer text.');
+      await userEvent.type(screen.getByTestId('candlestick-qa-new-template-example'), 'Example question?');
       apiFetch.mockClear();
 
       await userEvent.click(screen.getByTestId('candlestick-qa-create-template-button'));

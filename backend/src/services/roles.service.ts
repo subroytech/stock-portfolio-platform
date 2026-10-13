@@ -25,6 +25,7 @@ export class RoleNotAllowedForPermissionError extends Error {}
 const PERMISSION_REQUIRES: Record<string, string> = {
   'contrarian_finder:scan_history': 'contrarian_finder:scan',
   'candlestick_question_answer:llm_calling': 'candlestick_question_answer:ask',
+  'candlestick_question_answer:delete_history': 'candlestick_question_answer:ask',
 };
 
 // Config Properties (2026-08-24) is system-level configuration - the user's own call was that

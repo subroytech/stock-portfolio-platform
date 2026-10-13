@@ -1,8 +1,8 @@
 import { Fragment, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  useSearchCuratedEntries, useAskCandlestickQuestion, useTopQuestions, CATEGORIES, COMPLEXITY_TIERS,
-  type Category, type ComplexityTier, type AskHorizon, type MatchedPatternWithHorizonRelevance,
+  useSearchCuratedEntries, useAskCandlestickQuestion, useTopQuestions, useDeleteTopQuestion, useQuestionShapes, CATEGORIES, COMPLEXITY_TIERS,
+  type Category, type ComplexityTier, type AskHorizon, type MatchedPatternWithHorizonRelevance, type ResolvedVia,
 } from '../api/candlestickQuestionAnswer';
 import { useSession } from '../api/auth';
 import { ApiError } from '../api/client';
@@ -78,8 +78,17 @@ export default function CandlestickQuestionAnswerPage() {
   );
 
   const [question, setQuestion] = useState('');
-  const [horizon, setHorizon] = useState<AskHorizon>('dayTrading');
+  const [horizon, setHorizon] = useState<AskHorizon>('all');
   const ask = useAskCandlestickQuestion();
+
+  // "(i)" info popover (2026-10-08) - a role without candlestick_question_answer:llm_calling
+  // has no free-text LLM fallback, so this is its only way to discover which question SHAPES the
+  // deterministic template cascade can actually answer, short of guessing phrasings. A cheap,
+  // small (~10-row) read, same "reads stay free" precedent as useTopQuestions above - fetched
+  // with the page, not deferred until the popover opens.
+  const [showQuestionShapes, setShowQuestionShapes] = useState(false);
+  const { data: questionShapesData, isLoading: questionShapesLoading } = useQuestionShapes();
+  const questionShapes = questionShapesData?.examples ?? [];
 
   // Popular Questions (Phase 2, 2026-10-05) - reads the already-fetched answerText/
   // matchedPatternNames straight off the Top Questions cache row, same "no second request on
@@ -87,6 +96,22 @@ export default function CandlestickQuestionAnswerPage() {
   const { data: topQuestionsData, isLoading: topQuestionsLoading } = useTopQuestions();
   const topQuestions = topQuestionsData?.questions ?? [];
   const [expandedTopQuestion, setExpandedTopQuestion] = useState<number | null>(null);
+
+  // "Delete Historical Questions" (candlestick_question_answer:delete_history, 2026-10-10) - a
+  // real action, gated separately from the free read above. A per-row inline confirm, same
+  // "no native window.confirm, two-step inline instead" idiom FlexResolutionBanner's own Delete
+  // Portfolio control already established.
+  const canDeleteHistory = session?.permissions?.includes('candlestick_question_answer:delete_history') ?? false;
+  const deleteTopQuestion = useDeleteTopQuestion();
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
+  function handleDeleteTopQuestion(id: string) {
+    deleteTopQuestion.mutate(id, {
+      onSuccess: () => {
+        setConfirmingDeleteId(null);
+        setExpandedTopQuestion(null);
+      },
+    });
+  }
 
   function handleAsk(e: React.FormEvent) {
     e.preventDefault();
@@ -311,9 +336,41 @@ export default function CandlestickQuestionAnswerPage() {
                 ))}
               </select>
             </label>
-            <label className="flex flex-col gap-1 text-sm text-text-secondary">
-              Question
+            <div className="flex flex-col gap-1 text-sm text-text-secondary">
+              <span className="relative flex items-center gap-1">
+                <label htmlFor="candlestick-qa-question-input">Question</label>
+                <button
+                  type="button"
+                  onClick={() => setShowQuestionShapes((prev) => !prev)}
+                  data-testid="candlestick-qa-question-shapes-info"
+                  title="What kinds of questions can this answer without AI?"
+                  className={`relative z-20 flex h-4 w-4 items-center justify-center rounded-full border text-[10px] font-semibold leading-none ${showQuestionShapes ? 'border-accent bg-accent text-white' : 'border-text-muted text-text-muted hover:border-text-secondary hover:text-text-secondary'}`}
+                >
+                  i
+                </button>
+                {showQuestionShapes && (
+                  <>
+                    <div className="fixed inset-0 z-10" data-testid="candlestick-qa-question-shapes-backdrop" onClick={() => setShowQuestionShapes(false)} />
+                    <div
+                      data-testid="candlestick-qa-question-shapes-menu"
+                      className="absolute left-0 top-full z-20 mt-1 w-72 rounded-btn border border-border bg-bg-card p-3 text-left text-xs font-normal text-text-secondary shadow-card"
+                    >
+                      <p className="mb-2 text-text-primary">
+                        Without free-text AI access, questions shaped like these are answered instantly:
+                      </p>
+                      {questionShapesLoading && <p>Loading…</p>}
+                      {!questionShapesLoading && questionShapes.length === 0 && <p>No recognized question shapes yet.</p>}
+                      <ul className="flex flex-col gap-1">
+                        {questionShapes.map((example) => (
+                          <li key={example} className="italic">"{example}"</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </>
+                )}
+              </span>
               <textarea
+                id="candlestick-qa-question-input"
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
                 placeholder="e.g. What does a Bullish Engulfing pattern mean for swing trading?"
@@ -321,7 +378,7 @@ export default function CandlestickQuestionAnswerPage() {
                 data-testid="candlestick-qa-question-input"
                 className="rounded-btn border border-border bg-bg-primary px-2 py-1.5 text-sm text-text-primary"
               />
-            </label>
+            </div>
             <button
               type="submit"
               disabled={ask.isPending || !question.trim()}
@@ -349,6 +406,11 @@ export default function CandlestickQuestionAnswerPage() {
                   </div>
                 )}
                 <div className="min-w-0 flex-1">
+                  {ask.data.fromGeneralKnowledge && (
+                    <p className="mb-2 text-xs font-medium text-warning" data-testid="candlestick-qa-general-knowledge-notice">
+                      ⚠ This answer draws on general candlestick-pattern knowledge, not the platform's own curated content.
+                    </p>
+                  )}
                   <p className="text-sm text-text-secondary">{ask.data.answer}</p>
                   <HorizonRelevanceBadges matches={ask.data.matchedPatterns} />
                 </div>
@@ -375,16 +437,57 @@ export default function CandlestickQuestionAnswerPage() {
           {!topQuestionsLoading && topQuestions.length > 0 && (
             <ul className="mt-3 flex flex-col gap-1">
               {topQuestions.map((q, i) => (
-                <li key={`${q.questionText}-${i}`}>
-                  <button
-                    type="button"
-                    onClick={() => setExpandedTopQuestion((prev) => (prev === i ? null : i))}
-                    data-testid={`candlestick-qa-top-question-${i}`}
-                    className="flex w-full items-center justify-between gap-3 rounded-btn px-2 py-1.5 text-left text-sm text-text-primary hover:bg-bg-primary"
-                  >
-                    <span className="min-w-0 flex-1 truncate">{q.questionText}</span>
-                    <span className="shrink-0 text-xs text-text-muted">{q.questionAskedCount}×</span>
-                  </button>
+                <li key={q.id}>
+                  <div className="flex w-full items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedTopQuestion((prev) => (prev === i ? null : i))}
+                      data-testid={`candlestick-qa-top-question-${i}`}
+                      className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-btn px-2 py-1.5 text-left text-sm text-text-primary hover:bg-bg-primary"
+                    >
+                      <span className="min-w-0 flex-1 truncate">{q.questionText}</span>
+                      <ResolvedViaBadge resolvedVia={q.resolvedVia} fromGeneralKnowledge={q.fromGeneralKnowledge} />
+                      <span className="shrink-0 text-xs text-text-muted">{q.questionAskedCount}×</span>
+                    </button>
+                    {canDeleteHistory && (
+                      confirmingDeleteId === q.id ? (
+                        <span className="flex shrink-0 items-center gap-1 pl-1">
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteTopQuestion(q.id)}
+                            disabled={deleteTopQuestion.isPending}
+                            data-testid={`candlestick-qa-top-question-delete-confirm-${i}`}
+                            className="rounded-btn bg-danger px-2 py-1 text-xs text-white hover:opacity-90 disabled:opacity-60"
+                          >
+                            {deleteTopQuestion.isPending ? '…' : 'Confirm'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmingDeleteId(null)}
+                            className="text-xs text-text-secondary hover:underline"
+                          >
+                            Cancel
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmingDeleteId(q.id)}
+                          aria-label={`Delete "${q.questionText}"`}
+                          title="Delete this historical question"
+                          data-testid={`candlestick-qa-top-question-delete-${i}`}
+                          className="shrink-0 rounded-btn px-2 py-1.5 text-text-muted hover:bg-danger/10 hover:text-danger"
+                        >
+                          🗑
+                        </button>
+                      )
+                    )}
+                  </div>
+                  {confirmingDeleteId === q.id && deleteTopQuestion.isError && (
+                    <p className="mt-1 px-2 text-xs text-danger" data-testid={`candlestick-qa-top-question-delete-error-${i}`}>
+                      Couldn't delete this question. Please try again.
+                    </p>
+                  )}
                   {expandedTopQuestion === i && (
                     <div
                       className="mt-1 rounded-card bg-bg-primary p-3"
@@ -399,6 +502,11 @@ export default function CandlestickQuestionAnswerPage() {
                           </div>
                         )}
                         <div className="min-w-0 flex-1">
+                          {q.fromGeneralKnowledge && (
+                            <p className="mb-2 text-xs font-medium text-warning" data-testid={`candlestick-qa-top-question-general-knowledge-${i}`}>
+                              ⚠ This answer draws on general candlestick-pattern knowledge, not the platform's own curated content.
+                            </p>
+                          )}
                           <p className="text-sm text-text-secondary">{q.answerText}</p>
                           <HorizonRelevanceBadges matches={q.matchedPatternNames} />
                         </div>
@@ -418,6 +526,24 @@ export default function CandlestickQuestionAnswerPage() {
 
 // Green when the matched pattern is relevant to the selected Trading Horizon, red when it isn't,
 // neutral/muted when relevantForHorizon is null ("All" selected, or no data to compare against).
+// Which path in the deterministic-first cascade actually resolved a Popular Questions row
+// (2026-10-09) - lets a viewer tell at a glance whether a given answer came from the free
+// template cascade or cost a real LLM call. No badge at all for a pre-existing row recorded
+// before this shipped (resolvedVia: null) - never guessed.
+function ResolvedViaBadge({ resolvedVia, fromGeneralKnowledge }: { resolvedVia: ResolvedVia; fromGeneralKnowledge: boolean }) {
+  if (!resolvedVia || resolvedVia === 'none') return null;
+  return (
+    <span
+      title={fromGeneralKnowledge ? "Answered from the LLM's own general knowledge, not the platform's curated content" : undefined}
+      className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${
+        resolvedVia === 'llm' ? 'bg-accent/10 text-accent' : 'bg-text-muted/10 text-text-secondary'
+      }`}
+    >
+      {resolvedVia === 'llm' ? (fromGeneralKnowledge ? 'LLM (General)' : 'LLM') : 'Template'}
+    </span>
+  );
+}
+
 function HorizonRelevanceBadges({ matches }: { matches: MatchedPatternWithHorizonRelevance[] }) {
   if (matches.length === 0) return null;
   return (

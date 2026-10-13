@@ -30,6 +30,7 @@ jest.mock('../src/services/candlestickAskedQuestion.service', () => ({
   findCachedAnswer: jest.fn(),
   recordAskedQuestion: jest.fn(),
   listTopQuestions: jest.fn(),
+  deleteAskedQuestion: jest.fn(),
 }));
 jest.mock('../src/services/candlestickQuestionTemplate.service', () => ({
   ...jest.requireActual('../src/services/candlestickQuestionTemplate.service'),
@@ -37,6 +38,7 @@ jest.mock('../src/services/candlestickQuestionTemplate.service', () => ({
   listTemplates: jest.fn(),
   createTemplate: jest.fn(),
   setTemplateStatus: jest.fn(),
+  listActiveExamplePhrasings: jest.fn(),
 }));
 jest.mock('../src/services/roles.service', () => ({
   ...jest.requireActual('../src/services/roles.service'),
@@ -47,6 +49,7 @@ jest.mock('../src/services/userSubscription.service', () => ({
   ...jest.requireActual('../src/services/userSubscription.service'),
   getDecryptedKey: jest.fn(),
 }));
+jest.mock('../src/services/configProperty.service', () => ({ getConfigValue: jest.fn() }));
 
 import request from 'supertest';
 import * as candlestickQuestionAnswer from '../src/services/candlestickQuestionAnswer.service';
@@ -56,6 +59,7 @@ import * as askedQuestionService from '../src/services/candlestickAskedQuestion.
 import * as questionTemplateService from '../src/services/candlestickQuestionTemplate.service';
 import * as rolesService from '../src/services/roles.service';
 import * as userSubscription from '../src/services/userSubscription.service';
+import * as configProperty from '../src/services/configProperty.service';
 import { pool } from '../src/db/pool';
 import { signToken } from '../src/services/auth.service';
 import app from '../src/app';
@@ -72,12 +76,15 @@ const mockRecordRateLimitedCall = rateLimitService.recordRateLimitedCall as jest
 const mockFindCachedAnswer = askedQuestionService.findCachedAnswer as jest.Mock;
 const mockRecordAskedQuestion = askedQuestionService.recordAskedQuestion as jest.Mock;
 const mockListTopQuestions = askedQuestionService.listTopQuestions as jest.Mock;
+const mockDeleteAskedQuestion = askedQuestionService.deleteAskedQuestion as jest.Mock;
 const mockMatchTemplate = questionTemplateService.matchTemplate as jest.Mock;
 const mockListTemplates = questionTemplateService.listTemplates as jest.Mock;
 const mockCreateTemplate = questionTemplateService.createTemplate as jest.Mock;
 const mockSetTemplateStatus = questionTemplateService.setTemplateStatus as jest.Mock;
+const mockListActiveExamplePhrasings = questionTemplateService.listActiveExamplePhrasings as jest.Mock;
 const mockGetUserPermissions = rolesService.getUserPermissions as jest.Mock;
 const mockGetDecryptedKey = userSubscription.getDecryptedKey as jest.Mock;
+const mockGetConfigValue = configProperty.getConfigValue as jest.Mock;
 const mockQuery = pool.query as unknown as jest.Mock;
 
 const authCookie = `auth_token=${signToken('user-1')}`;
@@ -102,12 +109,15 @@ beforeEach(() => {
   mockFindCachedAnswer.mockReset().mockResolvedValue(null); // no cache hit by default
   mockRecordAskedQuestion.mockReset().mockResolvedValue(undefined);
   mockListTopQuestions.mockReset();
+  mockDeleteAskedQuestion.mockReset();
   mockMatchTemplate.mockReset();
   mockListTemplates.mockReset();
   mockCreateTemplate.mockReset();
   mockSetTemplateStatus.mockReset();
+  mockListActiveExamplePhrasings.mockReset();
   mockGetUserPermissions.mockReset().mockResolvedValue(['candlestick_question_answer:ask', 'candlestick_question_answer:llm_calling']); // LLM-granted by default
   mockGetDecryptedKey.mockReset();
+  mockGetConfigValue.mockReset().mockResolvedValue(null); // falls back to 'anthropic'
   mockQuery.mockReset();
 });
 
@@ -143,12 +153,14 @@ describe('POST /candlestick-question-answer/ask', () => {
     expect(res.status).toBe(400);
   });
 
-  test('a cache hit answers directly - no permission check, no rate limit, no LLM, no template, no re-enrichment', async () => {
+  test('a cache hit under the SAME horizon it was stored under answers directly, with no re-enrichment', async () => {
     grantPermission();
-    // The cache row already carries its enriched shape from when it was first written - a hit
-    // replays it verbatim, never re-calling getPatternHorizonRelevance.
+    // The cache row already carries its enriched shape from when it was first written, under
+    // the same horizon this request is using - a hit replays it verbatim, never re-calling
+    // getPatternHorizonRelevance (2026-10-10: horizon dropped out of the cache lookup key
+    // itself, but the controller still skips re-enrichment when the stored horizon matches).
     mockFindCachedAnswer.mockResolvedValueOnce({
-      answerText: 'A Doji signals indecision.', matchedPatternNames: [{ patternName: 'Doji', relevantForHorizon: true }],
+      answerText: 'A Doji signals indecision.', matchedPatternNames: [{ patternName: 'Doji', relevantForHorizon: true }], resolvedVia: 'llm', fromGeneralKnowledge: true, horizon: 'dayTrading',
     });
 
     const res = await request(app).post('/candlestick-question-answer/ask').set('Cookie', authCookie).send({ question: 'What is a Doji?', horizon: 'dayTrading' });
@@ -156,7 +168,7 @@ describe('POST /candlestick-question-answer/ask', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       outcome: 'answered_from_kb', answer: 'A Doji signals indecision.', matchedEntryIds: [],
-      matchedPatterns: [{ patternName: 'Doji', relevantForHorizon: true }], reason: null,
+      matchedPatterns: [{ patternName: 'Doji', relevantForHorizon: true }], reason: null, resolvedVia: 'llm', fromGeneralKnowledge: true,
     });
     expect(mockGetUserPermissions).not.toHaveBeenCalled();
     expect(mockCheckRateLimit).not.toHaveBeenCalled();
@@ -164,6 +176,24 @@ describe('POST /candlestick-question-answer/ask', () => {
     expect(mockMatchTemplate).not.toHaveBeenCalled();
     expect(mockRecordAskedQuestion).not.toHaveBeenCalled();
     expect(mockGetPatternHorizonRelevance).not.toHaveBeenCalled();
+  });
+
+  test('a cache hit under a DIFFERENT horizon than it was stored under re-enriches the relevance badges fresh (2026-10-10)', async () => {
+    grantPermission();
+    // The row was originally written under 'dayTrading' (and would have shown a green badge for
+    // that horizon) - this request asks under 'longTerm' instead, so the stale 'dayTrading'
+    // badge must not be blindly replayed; it has to be recomputed for 'longTerm'.
+    mockFindCachedAnswer.mockResolvedValueOnce({
+      answerText: 'A Doji signals indecision.', matchedPatternNames: [{ patternName: 'Doji', relevantForHorizon: true }], resolvedVia: 'llm', fromGeneralKnowledge: true, horizon: 'dayTrading',
+    });
+    mockGetPatternHorizonRelevance.mockResolvedValueOnce({ Doji: false });
+
+    const res = await request(app).post('/candlestick-question-answer/ask').set('Cookie', authCookie).send({ question: 'What is a Doji?', horizon: 'longTerm' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.matchedPatterns).toEqual([{ patternName: 'Doji', relevantForHorizon: false }]);
+    expect(mockGetPatternHorizonRelevance).toHaveBeenCalledWith(['Doji'], 'longTerm');
+    expect(mockRecordAskedQuestion).not.toHaveBeenCalled(); // still a cache hit - never re-written
   });
 
   describe('when llm_calling is granted', () => {
@@ -175,13 +205,14 @@ describe('POST /candlestick-question-answer/ask', () => {
       expect(mockAsk).not.toHaveBeenCalled();
     });
 
-    test('200 with the LLM\'s result, records the cache row and the rate-limit call, never touches templates', async () => {
+    test('200 with the LLM\'s result when no template matches first, records the cache row and the rate-limit call', async () => {
       grantPermission();
+      mockMatchTemplate.mockResolvedValueOnce(null);
       mockCheckRateLimit.mockResolvedValueOnce({ allowed: true, exempt: false, limit: 10, windowMinutes: 10, usedInWindow: 3 });
       mockGetDecryptedKey.mockResolvedValueOnce('test-anthropic-key');
       mockAsk.mockResolvedValueOnce({
         outcome: 'answered_from_kb', answer: 'A Doji signals indecision.', matchedEntryIds: ['e1'], matchedPatternNames: [], reason: null,
-        llmCallDetails: { llm_tokens_in: 100, llm_tokens_out: 20 },
+        llmCallDetails: { llm_tokens_in: 100, llm_tokens_out: 20 }, fromGeneralKnowledge: false,
       });
       mockGetEntryById.mockResolvedValueOnce({ id: 'e1', patternName: 'Doji' });
       mockGetPatternHorizonRelevance.mockResolvedValueOnce({ Doji: false });
@@ -191,17 +222,60 @@ describe('POST /candlestick-question-answer/ask', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
         outcome: 'answered_from_kb', answer: 'A Doji signals indecision.', matchedEntryIds: ['e1'],
-        matchedPatterns: [{ patternName: 'Doji', relevantForHorizon: false }], reason: null,
+        matchedPatterns: [{ patternName: 'Doji', relevantForHorizon: false }], reason: null, resolvedVia: 'llm', fromGeneralKnowledge: false,
       });
       expect(mockGetPatternHorizonRelevance).toHaveBeenCalledWith(['Doji'], 'dayTrading');
       expect(mockRecordRateLimitedCall).toHaveBeenCalledWith('user-1');
       expect(mockRecordAskedQuestion).toHaveBeenCalledWith(expect.objectContaining({
         questionText: 'What is a Doji?', horizon: 'dayTrading', answerText: 'A Doji signals indecision.',
-        matchedPatternNames: [{ patternName: 'Doji', relevantForHorizon: false }], status: 'Answered',
+        matchedPatternNames: [{ patternName: 'Doji', relevantForHorizon: false }], status: 'Answered', resolvedVia: 'llm', fromGeneralKnowledge: false,
       }));
       expect(mockGetDecryptedKey).toHaveBeenCalledWith('user-1', 'anthropic');
-      expect(mockAsk).toHaveBeenCalledWith('What is a Doji?', 'dayTrading', 'test-anthropic-key');
-      expect(mockMatchTemplate).not.toHaveBeenCalled();
+      expect(mockAsk).toHaveBeenCalledWith('What is a Doji?', 'dayTrading', 'test-anthropic-key', 'anthropic');
+      expect(mockMatchTemplate).toHaveBeenCalledWith('What is a Doji?');
+    });
+
+    test('when the Config Property selects openai, fetches the openai key and threads it through to ask()', async () => {
+      grantPermission();
+      mockMatchTemplate.mockResolvedValueOnce(null);
+      mockCheckRateLimit.mockResolvedValueOnce({ allowed: true, exempt: false, limit: 10, windowMinutes: 10, usedInWindow: 3 });
+      mockGetConfigValue.mockResolvedValueOnce('openai');
+      mockGetDecryptedKey.mockResolvedValueOnce('test-openai-key');
+      mockAsk.mockResolvedValueOnce({
+        outcome: 'answered_from_kb', answer: 'A Doji signals indecision.', matchedEntryIds: [], matchedPatternNames: [], reason: null,
+        llmCallDetails: { llm_tokens_in: 100, llm_tokens_out: 20 }, fromGeneralKnowledge: false,
+      });
+
+      await request(app).post('/candlestick-question-answer/ask').set('Cookie', authCookie).send({ question: 'What is a Doji?', horizon: 'dayTrading' });
+
+      expect(mockGetDecryptedKey).toHaveBeenCalledWith('user-1', 'openai');
+      expect(mockAsk).toHaveBeenCalledWith('What is a Doji?', 'dayTrading', 'test-openai-key', 'openai');
+    });
+
+    // Real bug found live (2026-10-08): llm_calling previously routed straight to the LLM branch,
+    // skipping the template cascade entirely - a premium/LLM-enabled role got a WORSE outcome than
+    // a non-premium role for the exact same question whenever the LLM branch itself failed (e.g.
+    // no Anthropic key configured anywhere), since it never got a chance to fall back to a
+    // template that would have answered the question for free. Reordered so templates are tried
+    // first for every role, LLM only when nothing deterministic matched.
+    test('a template match answers directly even when llm_calling is granted - the LLM is never called', async () => {
+      grantPermission();
+      mockMatchTemplate.mockResolvedValueOnce({
+        matches: [{ patternName: 'Hammer', complexityTier: 'Simple', signalType: 'reversal', directionalBias: 'bullish', requiresGap: false, trendContext: 'prior-downtrend', mirrorPatternName: 'Shooting Star' }],
+        responseMode: 'single', answerTemplate: '{patternName} is {directionalBias}.',
+      });
+      mockGetPatternHorizonRelevance.mockResolvedValueOnce({ Hammer: true });
+
+      const res = await request(app).post('/candlestick-question-answer/ask').set('Cookie', authCookie).send({ question: 'Is Hammer bullish or bearish?', horizon: 'dayTrading' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        outcome: 'answered_from_kb', answer: 'Hammer is bullish.', matchedEntryIds: [],
+        matchedPatterns: [{ patternName: 'Hammer', relevantForHorizon: true }], reason: null, resolvedVia: 'template', fromGeneralKnowledge: false,
+      });
+      expect(mockAsk).not.toHaveBeenCalled();
+      expect(mockGetDecryptedKey).not.toHaveBeenCalled();
+      expect(mockCheckRateLimit).not.toHaveBeenCalled();
     });
 
     test('an unable_to_answer LLM outcome is cached with status Unable_To_Answer', async () => {
@@ -210,7 +284,7 @@ describe('POST /candlestick-question-answer/ask', () => {
       mockGetDecryptedKey.mockResolvedValueOnce('test-anthropic-key');
       mockAsk.mockResolvedValueOnce({
         outcome: 'unable_to_answer', answer: null, matchedEntryIds: [], matchedPatternNames: [],
-        reason: 'Not covered.', llmCallDetails: { llm_tokens_in: 10, llm_tokens_out: 5 },
+        reason: 'Not covered.', llmCallDetails: { llm_tokens_in: 10, llm_tokens_out: 5 }, fromGeneralKnowledge: false,
       });
 
       await request(app).post('/candlestick-question-answer/ask').set('Cookie', authCookie).send({ question: 'An obscure question', horizon: 'dayTrading' });
@@ -225,7 +299,7 @@ describe('POST /candlestick-question-answer/ask', () => {
       mockAsk.mockResolvedValueOnce({
         outcome: 'answered_from_kb', answer: 'Upside Tasuki Gap is bullish and needs a gap.',
         matchedEntryIds: [], matchedPatternNames: ['Upside Tasuki Gap'], reason: null,
-        llmCallDetails: { llm_tokens_in: 100, llm_tokens_out: 20 },
+        llmCallDetails: { llm_tokens_in: 100, llm_tokens_out: 20 }, fromGeneralKnowledge: false,
       });
 
       mockGetPatternHorizonRelevance.mockResolvedValueOnce({ 'Upside Tasuki Gap': true });
@@ -270,7 +344,7 @@ describe('POST /candlestick-question-answer/ask', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
         outcome: 'answered_from_kb', answer: 'Hammer is bullish.', matchedEntryIds: [],
-        matchedPatterns: [{ patternName: 'Hammer', relevantForHorizon: true }], reason: null,
+        matchedPatterns: [{ patternName: 'Hammer', relevantForHorizon: true }], reason: null, resolvedVia: 'template', fromGeneralKnowledge: false,
       });
       expect(mockGetPatternHorizonRelevance).toHaveBeenCalledWith(['Hammer'], 'dayTrading');
       expect(mockCheckRateLimit).not.toHaveBeenCalled();
@@ -291,7 +365,8 @@ describe('POST /candlestick-question-answer/ask', () => {
       expect(res.status).toBe(200);
       expect(res.body.outcome).toBe('unable_to_answer');
       expect(res.body.answer).toBeNull();
-      expect(mockRecordAskedQuestion).toHaveBeenCalledWith(expect.objectContaining({ status: 'Unable_To_Answer', answerText: null, matchedPatternNames: [] }));
+      expect(res.body.resolvedVia).toBe('none');
+      expect(mockRecordAskedQuestion).toHaveBeenCalledWith(expect.objectContaining({ status: 'Unable_To_Answer', answerText: null, matchedPatternNames: [], resolvedVia: 'none' }));
     });
 
     test('a template shape match whose filters resolve to zero patterns also results in unable_to_answer', async () => {
@@ -419,12 +494,57 @@ describe('GET /candlestick-question-answer/top-questions', () => {
   test('200 with the permission, returning the ranked list', async () => {
     grantPermission();
     mockListTopQuestions.mockResolvedValueOnce([
-      { questionText: 'What is a Hammer?', answerText: 'A Hammer is bullish.', matchedPatternNames: [{ patternName: 'Hammer', relevantForHorizon: true }], questionAskedCount: 42, lastAskedAt: 't1' },
+      {
+        id: 'q1', questionText: 'What is a Hammer?', answerText: 'A Hammer is bullish.',
+        matchedPatternNames: [{ patternName: 'Hammer', relevantForHorizon: true }], questionAskedCount: 42, lastAskedAt: 't1',
+        resolvedVia: 'template', fromGeneralKnowledge: false,
+      },
     ]);
     const res = await request(app).get('/candlestick-question-answer/top-questions').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(res.body.questions).toHaveLength(1);
     expect(res.body.questions[0].questionAskedCount).toBe(42);
+  });
+});
+
+describe('DELETE /candlestick-question-answer/top-questions/:id', () => {
+  test('403 without candlestick_question_answer:delete_history', async () => {
+    denyPermission();
+    const res = await request(app).delete('/candlestick-question-answer/top-questions/q1').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(mockDeleteAskedQuestion).not.toHaveBeenCalled();
+  });
+
+  test('200 with the permission, deleting the row by id', async () => {
+    grantPermission();
+    mockDeleteAskedQuestion.mockResolvedValueOnce(true);
+    const res = await request(app).delete('/candlestick-question-answer/top-questions/q1').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+    expect(mockDeleteAskedQuestion).toHaveBeenCalledWith('q1');
+  });
+
+  test('404 when no row matched the given id', async () => {
+    grantPermission();
+    mockDeleteAskedQuestion.mockResolvedValueOnce(false);
+    const res = await request(app).delete('/candlestick-question-answer/top-questions/bogus').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('GET /candlestick-question-answer/question-shapes', () => {
+  test('403 without candlestick_question_answer:ask', async () => {
+    denyPermission();
+    const res = await request(app).get('/candlestick-question-answer/question-shapes').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+  });
+
+  test('200 with the permission, returning only the example phrasings', async () => {
+    grantPermission();
+    mockListActiveExamplePhrasings.mockResolvedValueOnce(['Is Hammer bullish or bearish?', 'Which patterns are bullish?']);
+    const res = await request(app).get('/candlestick-question-answer/question-shapes').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.examples).toEqual(['Is Hammer bullish or bearish?', 'Which patterns are bullish?']);
   });
 });
 
@@ -458,12 +578,22 @@ describe('Question Templates admin management', () => {
     expect(res.status).toBe(400);
   });
 
+  test('POST /templates - 400 when examplePhrasing is missing', async () => {
+    grantPermission();
+    const res = await request(app).post('/candlestick-question-answer/templates').set('Cookie', authCookie).send({
+      templateKey: 'x', regexPattern: 'x', answerTemplate: 'x', responseMode: 'single', filterMapping: { fixedFilters: {} },
+    });
+    expect(res.status).toBe(400);
+    expect(mockCreateTemplate).not.toHaveBeenCalled();
+  });
+
   test('POST /templates - 201 on success', async () => {
     grantPermission();
     mockCreateTemplate.mockResolvedValueOnce({ id: 't1', templateKey: 'bias_lookup' });
     const res = await request(app).post('/candlestick-question-answer/templates').set('Cookie', authCookie).send({
       templateKey: 'bias_lookup', regexPattern: 'is (.+?) bullish or bearish', answerTemplate: '{patternName} is {directionalBias}.',
       responseMode: 'single', filterMapping: { fixedFilters: {}, groupFilters: { '1': 'patternNameOrSynonym' } },
+      examplePhrasing: 'Is Hammer bullish or bearish?',
     });
     expect(res.status).toBe(201);
   });
@@ -474,6 +604,7 @@ describe('Question Templates admin management', () => {
     mockCreateTemplate.mockRejectedValueOnce(new DuplicateTemplateKeyError('duplicate'));
     const res = await request(app).post('/candlestick-question-answer/templates').set('Cookie', authCookie).send({
       templateKey: 'bias_lookup', regexPattern: 'x', answerTemplate: 'x', responseMode: 'single', filterMapping: { fixedFilters: {} },
+      examplePhrasing: 'x',
     });
     expect(res.status).toBe(409);
   });

@@ -326,6 +326,61 @@ describe('setPropertyValue', () => {
       expect(mockQuery).toHaveBeenCalledTimes(1);
     });
   });
+
+  // candlestick_question_answer_llm_provider (2026-10-08) - same narrow-exception shape as
+  // api_key_fallback_eligible_roles above, but a plain set-membership check (no second table).
+  describe('provider validation (candlestick_question_answer_llm_provider)', () => {
+    test('rejects an unrecognized provider name, without opening a transaction', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ property_key: 'candlestick_question_answer_llm_provider', value_type: 'string', min_value: null, max_value: null }] });
+
+      await expect(setPropertyValue('1', { value: 'gemini', changedBy: 'user-1' }))
+        .rejects.toThrow(/not a recognized provider/);
+      expect(mockConnect).not.toHaveBeenCalled();
+    });
+
+    test('accepts "anthropic" and "openai"', async () => {
+      for (const value of ['anthropic', 'openai']) {
+        mockQuery.mockReset();
+        mockQuery.mockResolvedValueOnce({ rows: [{ property_key: 'candlestick_question_answer_llm_provider', value_type: 'string', min_value: null, max_value: null }] });
+        const client = {
+          query: jest.fn((sql: string) => {
+            if (sql.includes('COALESCE(MAX(version)')) return Promise.resolve({ rows: [{ next_version: '2' }] });
+            if (sql.startsWith('INSERT INTO m_config_property_value')) {
+              return Promise.resolve({
+                rows: [{ id: '2', property_id: '1', value, version: '2', effective_timestamp: 't', is_active: true, changed_by: 'user-1', created_at: 't' }],
+              });
+            }
+            return Promise.resolve({ rows: [] });
+          }),
+          release: jest.fn(),
+        };
+        mockConnect.mockResolvedValue(client);
+
+        const result = await setPropertyValue('1', { value, changedBy: 'user-1' });
+        expect(result?.value).toBe(value);
+      }
+    });
+
+    test('does not run the provider check for any other property key', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ property_key: 'contrarian_finder_admin_history_retention_count', value_type: 'integer', min_value: '1', max_value: '500' }] });
+      const client = {
+        query: jest.fn((sql: string) => {
+          if (sql.includes('COALESCE(MAX(version)')) return Promise.resolve({ rows: [{ next_version: '2' }] });
+          if (sql.startsWith('INSERT INTO m_config_property_value')) {
+            return Promise.resolve({
+              rows: [{ id: '2', property_id: '1', value: '30', version: '2', effective_timestamp: 't', is_active: true, changed_by: 'user-1', created_at: 't' }],
+            });
+          }
+          return Promise.resolve({ rows: [] });
+        }),
+        release: jest.fn(),
+      };
+      mockConnect.mockResolvedValue(client);
+
+      await setPropertyValue('1', { value: '30', changedBy: 'user-1' });
+      expect(mockConnect).toHaveBeenCalled(); // not rejected - the provider check never ran
+    });
+  });
 });
 
 describe('listPropertyValueHistory', () => {

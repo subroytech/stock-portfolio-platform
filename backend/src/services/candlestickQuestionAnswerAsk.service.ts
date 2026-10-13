@@ -9,11 +9,19 @@
 // with no tool call is treated as a failure to use the knowledge base correctly, not as a real
 // answer (see the "no tool call at all" branch below) - the whole point of this design is that
 // provide_answer is the only sanctioned way to state an answer.
+//
+// Rewritten 2026-10-08 onto the Vercel AI SDK (generateText/tool/stepCountIs) to make the LLM
+// *provider* admin-switchable (Anthropic/OpenAI), not just the model - see
+// llmModel.service.ts. The two terminal tools deliberately have no `execute`: per the AI SDK's
+// own documented behavior, a tool called with no execute function ends the step loop - the
+// exact same "never actually executed, just inspected" role these two tools already played in
+// the old hand-rolled loop.
 
-import Anthropic from '@anthropic-ai/sdk';
-import * as anthropicClient from './anthropicClient.service';
+import { generateText, stepCountIs, tool } from 'ai';
+import { z } from 'zod';
+import { getLanguageModel, type LlmProvider } from './llmModel.service';
 import * as candlestickQuestionAnswer from './candlestickQuestionAnswer.service';
-import type { Horizon, Tier, ComplexityTier, SignalType, DirectionalBias, TrendContext } from './candlestickQuestionAnswer.service';
+import type { Horizon } from './candlestickQuestionAnswer.service';
 import { getConfigValue } from './configProperty.service';
 
 const DEFAULT_MODEL = 'claude-sonnet-5';
@@ -27,183 +35,170 @@ export interface AskResult {
   matchedPatternNames: string[];
   reason: string | null;
   llmCallDetails: { llm_tokens_in: number; llm_tokens_out: number };
+  // True only when provide_answer itself set from_general_knowledge: true - the curated
+  // tools/content had nothing addressing this specific question, so the model answered from its
+  // own general candlestick-pattern knowledge instead of refusing (2026-10-09). Always false for
+  // every other branch below - this flag only ever comes from the model's own tool call.
+  fromGeneralKnowledge: boolean;
 }
 
-const SEARCH_TOOL: Anthropic.Tool = {
-  name: 'search_question_answer_entries',
+// Exported for direct unit testing of their own execute() mapping/error-propagation, decoupled
+// from mocking the AI SDK's own internal multi-step loop (see the test file's own header note).
+export const searchTool = tool({
   description: "Search the curated candlestick-pattern knowledge base for entries relevant to the user's question. Call this one or more times with different search terms before deciding whether you can answer.",
-  input_schema: {
-    type: 'object',
-    properties: {
-      query: { type: 'string', description: 'Free-text search terms - pattern name or keywords from the question.' },
-      tier: { type: 'integer', enum: [101, 201, 301], description: 'Optional - narrow to one difficulty tier.' },
-    },
-    required: ['query'],
+  inputSchema: z.object({
+    query: z.string().describe('Free-text search terms - pattern name or keywords from the question.'),
+    tier: z.union([z.literal(101), z.literal(201), z.literal(301)]).optional().describe('Optional - narrow to one difficulty tier.'),
+  }),
+  execute: async ({ query, tier }) => {
+    const results = await candlestickQuestionAnswer.searchEntries({ query, tier });
+    return results.map((r) => ({ id: r.id, question: r.questionText, answer: r.answerText }));
   },
-};
+});
 
-const FILTER_TOOL: Anthropic.Tool = {
-  name: 'filter_patterns_by_metadata',
+export const filterTool = tool({
   description: "Look up candlestick patterns by structural, factual properties: signal type (reversal/continuation/indecision), directional bias, whether a genuine price gap is required, trend context, or an exact/alias name match. Returns compact facts about matching patterns, never prose. Use this for 'which pattern(s)...' or 'is X bullish/bearish/a continuation signal' questions - call search_question_answer_entries instead for interpretive questions about reliability, usage, or common mistakes. At least one filter must be given.",
-  input_schema: {
-    type: 'object',
-    properties: {
-      pattern_name_or_synonym: { type: 'string', description: "Exact or alias name, e.g. 'pin bar' or 'Hammer'." },
-      signal_type: { type: 'string', enum: ['reversal', 'continuation', 'indecision'] },
-      directional_bias: { type: 'string', enum: ['bullish', 'bearish', 'neutral', 'context-dependent'] },
-      complexity_tier: { type: 'string', enum: ['Simple', 'Composite', 'Advanced', 'Complex'] },
-      requires_gap: { type: 'boolean' },
-      trend_context: { type: 'string', enum: ['prior-downtrend', 'prior-uptrend', 'either', 'none'] },
-    },
-  },
-};
+  inputSchema: z.object({
+    pattern_name_or_synonym: z.string().optional().describe("Exact or alias name, e.g. 'pin bar' or 'Hammer'."),
+    signal_type: z.enum(['reversal', 'continuation', 'indecision']).optional(),
+    directional_bias: z.enum(['bullish', 'bearish', 'neutral', 'context-dependent']).optional(),
+    complexity_tier: z.enum(['Simple', 'Composite', 'Advanced', 'Complex']).optional(),
+    requires_gap: z.boolean().optional(),
+    trend_context: z.enum(['prior-downtrend', 'prior-uptrend', 'either', 'none']).optional(),
+  }),
+  // A thrown error here becomes a tool-error part the AI SDK feeds back to the model
+  // automatically (replacing the old code's manual is_error: true tool_result construction) -
+  // recoverable, never a terminal failure: NoFilterCriteriaError tells the model to be specific
+  // and try again.
+  execute: async (input) => candlestickQuestionAnswer.filterPatternsByMetadata({
+    patternNameOrSynonym: input.pattern_name_or_synonym,
+    signalType: input.signal_type,
+    directionalBias: input.directional_bias,
+    complexityTier: input.complexity_tier,
+    requiresGap: input.requires_gap,
+    trendContext: input.trend_context,
+  }),
+});
 
-const PROVIDE_ANSWER_TOOL: Anthropic.Tool = {
-  name: 'provide_answer',
-  description: "Call this ONLY when the information you retrieved genuinely answers the user's question. Never call this to provide an answer from your own general knowledge - only synthesize from entries/facts found via search_question_answer_entries or filter_patterns_by_metadata.",
-  input_schema: {
-    type: 'object',
-    properties: {
-      entry_ids: { type: 'array', items: { type: 'string' }, description: 'IDs of the curated entries this answer is drawn from, if any.' },
-      matched_pattern_names: { type: 'array', items: { type: 'string' }, description: 'Pattern names this answer is drawn from, if resolved via filter_patterns_by_metadata rather than (or in addition to) entry_ids.' },
-      synthesized_answer: { type: 'string', description: "A clear answer to the user's question, based only on the retrieved entries/facts." },
-    },
-    required: ['synthesized_answer'],
-  },
-};
+// No `execute` - calling this ends the step loop (see file header). Never actually run;
+// its validated `input` is read directly off the final step's tool call below.
+const provideAnswerTool = tool({
+  description: "Call this when you have an answer to the user's question - either grounded in tool results (preferred), or, when the tools returned nothing addressing this specific question, drawn from your own general candlestick-pattern-analysis knowledge (set from_general_knowledge: true in that case). Still only for candlestick-pattern education content - never personalized financial advice or a buy/sell recommendation.",
+  inputSchema: z.object({
+    entry_ids: z.array(z.string()).optional().describe('IDs of the curated entries this answer is drawn from, if any.'),
+    matched_pattern_names: z.array(z.string()).optional().describe('Pattern names this answer is drawn from, if resolved via filter_patterns_by_metadata rather than (or in addition to) entry_ids.'),
+    synthesized_answer: z.string().describe("A clear answer to the user's question, based on the retrieved entries/facts, or - only when nothing relevant was found - your own general candlestick-pattern-analysis knowledge."),
+    from_general_knowledge: z.boolean().optional().describe('Set to true if this answer is NOT grounded in any tool result - i.e., you answered from your own general knowledge because the curated content had nothing addressing this specific question.'),
+  }),
+});
 
-const UNABLE_TO_ANSWER_TOOL: Anthropic.Tool = {
-  name: 'unable_to_answer',
-  description: 'Call this if, after searching, the curated knowledge base genuinely does not contain a good answer to the question. Always prefer this over guessing or answering from general knowledge.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      reason: { type: 'string', description: 'Briefly, why the curated content did not answer this question.' },
-    },
-    required: ['reason'],
-  },
-};
+// No `execute` - same loop-ending role as provideAnswerTool above.
+const unableToAnswerTool = tool({
+  description: 'Call this only if the question is not about candlestick patterns at all, or you genuinely have no answer even from your own general candlestick-pattern knowledge. Never call this just because the curated tools/content had nothing - use provide_answer with from_general_knowledge: true for that case instead.',
+  inputSchema: z.object({
+    reason: z.string().describe('Briefly, why this could not be answered.'),
+  }),
+});
 
 // Deliberately restricts the model to candlestick-pattern education (never personalized advice
 // or a buy/sell call on a specific stock) - Architecture.md's Platform Objective posture
 // ("never gives personalized financial advice") applied to this feature specifically, since an
 // open-ended LLM is a materially higher drift risk than this app's existing static content.
-const SYSTEM_PROMPT = `You are a candlestick pattern education assistant for a self-directed retail stock investing platform. You answer questions ONLY about candlestick chart pattern recognition and interpretation (e.g. Doji, Hammer, Engulfing) - never personalized financial advice, and never a recommendation to buy or sell any specific stock. You must answer strictly using tool results - never from your own general knowledge. The user has indicated a trading-horizon preference (dayTrading, mediumTerm, longTerm, or no particular preference) for context - you may mention it if relevant, but never use it to exclude an otherwise-correct pattern from your answer; every pattern the tools return is a valid answer regardless of horizon. You have two tools for finding information: filter_patterns_by_metadata for structural/factual questions about which patterns match given properties (signal type, directional bias, gap requirement, trend context, name/alias), and search_question_answer_entries for interpretive questions about a specific pattern's meaning, reliability, or usage. Use either or both as needed before calling a terminal tool. If the question is not about candlestick patterns at all, or neither tool turns up a good answer, call unable_to_answer rather than guessing.`;
+//
+// Loosened 2026-10-09 (explicit user direction, after a real report: "Can Tasuki Gap be used in
+// conjunction with other patterns?" correctly got unable_to_answer, since no curated entry
+// covers cross-pattern confluence) - the model may now answer from its own general knowledge
+// when the curated tools have nothing addressing the specific question, instead of always
+// refusing. The scope boundary itself (candlestick education only, never personalized advice)
+// is untouched - only the "must be tool-grounded" rule loosened, and only with the
+// from_general_knowledge transparency flag (provideAnswerTool's own schema) as the trade-off.
+const SYSTEM_PROMPT = `You are a candlestick pattern education assistant for a self-directed retail stock investing platform. You answer questions ONLY about candlestick chart pattern recognition and interpretation (e.g. Doji, Hammer, Engulfing) - never personalized financial advice, and never a recommendation to buy or sell any specific stock.
 
-export async function ask(question: string, horizon: Horizon, apiKey: string): Promise<AskResult> {
-  const model = (await getConfigValue('candlestick_question_answer_llm_model')) ?? DEFAULT_MODEL;
+Always try your tools first. You have two tools for finding information: filter_patterns_by_metadata for structural/factual questions about which patterns match given properties (signal type, directional bias, gap requirement, trend context, name/alias), and search_question_answer_entries for interpretive questions about a specific pattern's meaning, reliability, or usage. Use either or both as needed before calling a terminal tool.
+
+Prefer the platform's own curated content whenever it addresses the question - build your answer primarily from tool results when they're relevant. If the tools return nothing that actually addresses the specific question (for example, a question about combining multiple patterns together, or a general candlestick-charting concept not tied to one specific curated entry), you may answer from your own general candlestick-pattern-analysis knowledge instead of refusing - but stay within the same strict scope (education only, never personalized advice or a buy/sell call), and set from_general_knowledge: true on provide_answer so the platform can label it as not drawn from its own curated content.
+
+The user has indicated a trading-horizon preference (dayTrading, mediumTerm, longTerm, or no particular preference) for context - you may mention it if relevant, but never use it to exclude an otherwise-correct pattern from your answer; every pattern the tools return is a valid answer regardless of horizon.
+
+If the question is not about candlestick patterns at all, call unable_to_answer rather than guessing or answering off-topic.`;
+
+export async function ask(question: string, horizon: Horizon, apiKey: string, provider: LlmProvider): Promise<AskResult> {
+  const modelId = (await getConfigValue('candlestick_question_answer_llm_model')) ?? DEFAULT_MODEL;
+  const model = getLanguageModel(provider, apiKey, modelId);
   const horizonForPrompt = horizon === 'all' ? 'no particular preference' : horizon;
-  const messages: Anthropic.MessageParam[] = [
-    { role: 'user', content: `Trading horizon: ${horizonForPrompt}\n\nQuestion: ${question}` },
-  ];
 
-  let totalInputTokens = 0;
-  let totalOutputTokens = 0;
+  const result = await generateText({
+    model,
+    system: SYSTEM_PROMPT,
+    prompt: `Trading horizon: ${horizonForPrompt}\n\nQuestion: ${question}`,
+    tools: {
+      search_question_answer_entries: searchTool,
+      filter_patterns_by_metadata: filterTool,
+      provide_answer: provideAnswerTool,
+      unable_to_answer: unableToAnswerTool,
+    },
+    stopWhen: stepCountIs(MAX_TOOL_ITERATIONS),
+  });
 
-  for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-    const response = await anthropicClient.createMessage(apiKey, {
-      model,
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages,
-      tools: [SEARCH_TOOL, FILTER_TOOL, PROVIDE_ANSWER_TOOL, UNABLE_TO_ANSWER_TOOL],
-    });
-    totalInputTokens += response.usage.input_tokens;
-    totalOutputTokens += response.usage.output_tokens;
-    const llmCallDetails = { llm_tokens_in: totalInputTokens, llm_tokens_out: totalOutputTokens };
+  const llmCallDetails = { llm_tokens_in: result.usage.inputTokens ?? 0, llm_tokens_out: result.usage.outputTokens ?? 0 };
 
-    const toolUseBlocks = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
-    const terminal = toolUseBlocks.find((b) => b.name === 'provide_answer' || b.name === 'unable_to_answer');
-
-    if (terminal?.name === 'provide_answer') {
-      const input = terminal.input as { entry_ids?: unknown; matched_pattern_names?: unknown; synthesized_answer?: string };
-      return {
-        outcome: 'answered_from_kb',
-        answer: input.synthesized_answer ?? null,
-        matchedEntryIds: Array.isArray(input.entry_ids) ? input.entry_ids.map(String) : [],
-        matchedPatternNames: Array.isArray(input.matched_pattern_names) ? input.matched_pattern_names.map(String) : [],
-        reason: null,
-        llmCallDetails,
-      };
-    }
-    if (terminal?.name === 'unable_to_answer') {
-      const input = terminal.input as { reason?: string };
-      return {
-        outcome: 'unable_to_answer',
-        answer: null,
-        matchedEntryIds: [],
-        matchedPatternNames: [],
-        reason: input.reason ?? 'The curated knowledge base does not cover this question yet.',
-        llmCallDetails,
-      };
-    }
-
-    if (toolUseBlocks.length === 0) {
-      // Plain text with no tool call at all - never trust free-form text as a real answer;
-      // provide_answer is the only sanctioned way to state one.
-      return {
-        outcome: 'unable_to_answer',
-        answer: null,
-        matchedEntryIds: [],
-        matchedPatternNames: [],
-        reason: 'The model did not use the curated knowledge base to answer this question.',
-        llmCallDetails,
-      };
-    }
-
-    // Only the 2 non-terminal tools are possible here (the other 2 are always terminal and
-    // already handled above) - execute whichever was called, feed results back, let the model
-    // decide its next move (another tool call, possibly the other one, or a terminal tool).
-    messages.push({ role: 'assistant', content: response.content });
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const block of toolUseBlocks) {
-      if (block.name === 'filter_patterns_by_metadata') {
-        const input = block.input as {
-          pattern_name_or_synonym?: string; signal_type?: string; directional_bias?: string;
-          complexity_tier?: string; requires_gap?: boolean; trend_context?: string;
-        };
-        try {
-          const results = await candlestickQuestionAnswer.filterPatternsByMetadata({
-            patternNameOrSynonym: input.pattern_name_or_synonym,
-            signalType: input.signal_type as SignalType | undefined,
-            directionalBias: input.directional_bias as DirectionalBias | undefined,
-            complexityTier: input.complexity_tier as ComplexityTier | undefined,
-            requiresGap: input.requires_gap,
-            trendContext: input.trend_context as TrendContext | undefined,
-          });
-          toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(results) });
-        } catch (err) {
-          if (err instanceof candlestickQuestionAnswer.NoFilterCriteriaError) {
-            // Recoverable - tell the model to be specific and let it try again, never a
-            // terminal failure.
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: err.message, is_error: true });
-          } else {
-            throw err;
-          }
-        }
-        continue;
-      }
-
-      const input = block.input as { query?: string; tier?: number };
-      const results = await candlestickQuestionAnswer.searchEntries({
-        query: input.query,
-        tier: input.tier as Tier | undefined,
-      });
-      toolResults.push({
-        type: 'tool_result',
-        tool_use_id: block.id,
-        content: JSON.stringify(results.map((r) => ({ id: r.id, question: r.questionText, answer: r.answerText }))),
-      });
-    }
-    messages.push({ role: 'user', content: toolResults });
+  // A terminal tool, once called, can only ever appear in the loop's final step (it has no
+  // execute, so the loop cannot continue past it) - searching the cumulative toolCalls is
+  // therefore equivalent to checking just the final step, and (matching the old loop's own
+  // per-turn preference) a terminal call wins even if the model also called a non-terminal tool
+  // in that same final step.
+  const provideAnswerCall = result.toolCalls.find((c) => c.toolName === 'provide_answer');
+  if (provideAnswerCall) {
+    const input = provideAnswerCall.input as { entry_ids?: string[]; matched_pattern_names?: string[]; synthesized_answer: string; from_general_knowledge?: boolean };
+    return {
+      outcome: 'answered_from_kb',
+      answer: input.synthesized_answer,
+      matchedEntryIds: input.entry_ids ?? [],
+      matchedPatternNames: input.matched_pattern_names ?? [],
+      reason: null,
+      llmCallDetails,
+      fromGeneralKnowledge: input.from_general_knowledge ?? false,
+    };
   }
 
+  const unableToAnswerCall = result.toolCalls.find((c) => c.toolName === 'unable_to_answer');
+  if (unableToAnswerCall) {
+    const input = unableToAnswerCall.input as { reason: string };
+    return {
+      outcome: 'unable_to_answer',
+      answer: null,
+      matchedEntryIds: [],
+      matchedPatternNames: [],
+      reason: input.reason,
+      llmCallDetails,
+      fromGeneralKnowledge: false,
+    };
+  }
+
+  const finalStep = result.steps[result.steps.length - 1];
+  if (!finalStep || finalStep.toolCalls.length === 0) {
+    // Plain text with no tool call at all (in the final step) - never trust free-form text as a
+    // real answer; provide_answer is the only sanctioned way to state one.
+    return {
+      outcome: 'unable_to_answer',
+      answer: null,
+      matchedEntryIds: [],
+      matchedPatternNames: [],
+      reason: 'The model did not use the curated knowledge base to answer this question.',
+      llmCallDetails,
+      fromGeneralKnowledge: false,
+    };
+  }
+
+  // The final step had (non-terminal) tool calls, but the step cap was reached before either
+  // terminal tool was ever called.
   return {
     outcome: 'unable_to_answer',
     answer: null,
     matchedEntryIds: [],
     matchedPatternNames: [],
     reason: 'Could not resolve an answer within the allowed number of search attempts.',
-    llmCallDetails: { llm_tokens_in: totalInputTokens, llm_tokens_out: totalOutputTokens },
+    llmCallDetails,
+    fromGeneralKnowledge: false,
   };
 }

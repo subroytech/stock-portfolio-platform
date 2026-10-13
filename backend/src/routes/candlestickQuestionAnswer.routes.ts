@@ -13,6 +13,14 @@ router.post('/ask', requirePermission('candlestick_question_answer:ask'), contro
 // Popular Questions (Phase 2, 2026-10-05) - a read, same "viewing is free" gate as /entries above.
 router.get('/top-questions', requirePermission('candlestick_question_answer:ask'), controller.listTopQuestions);
 
+// Delete Historical Questions (2026-10-10) - a separate, narrower permission than the read
+// above, since deleting a shared history row is a real action, not a view.
+router.delete('/top-questions/:id', requirePermission('candlestick_question_answer:delete_history'), controller.deleteTopQuestion);
+
+// "(i)" info popover (2026-10-08) - recognized question-template phrasings, same "viewing is
+// free" gate as the reads above (not :manage_content - this is for the person USING Ask).
+router.get('/question-shapes', requirePermission('candlestick_question_answer:ask'), controller.listQuestionShapes);
+
 // Admin content management - registered before /entries/:id/status style routes below aren't
 // actually ambiguous here (different static prefixes), but kept grouped and ordered the same
 // way portfolioTemplate.routes.ts orders its own admin routes, for consistency.

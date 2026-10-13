@@ -91,7 +91,8 @@ describe('filterPatternsByMetadata', () => {
   });
 
   test('a name-or-synonym filter matches both pattern_name and the synonyms JSONB array', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // exact/substring check
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // fuzzy fallback (2026-10-10) - also finds nothing for "pin bar"
 
     await svc.filterPatternsByMetadata({ patternNameOrSynonym: 'pin bar' });
 
@@ -114,6 +115,97 @@ describe('filterPatternsByMetadata', () => {
     expect(sql).toContain('p.requires_gap = $3');
     expect(sql).toContain('p.trend_context = $4');
     expect(params).toEqual(['bearish', 'Advanced', true, 'prior-uptrend']);
+  });
+
+  // Fuzzy word-match fallback (2026-10-10) - only ever runs after the exact/substring check
+  // above has already found zero rows for a given pattern name. See the service file's own
+  // isFuzzyWordMatch() header comment for the real measurements (against this app's own pattern
+  // vocabulary) behind choosing per-word edit distance over a blended whole-string similarity
+  // score.
+  describe('fuzzy fallback for a typo in the pattern name', () => {
+    const TASUKI_GAP_ROW = {
+      pattern_name: 'Upside Tasuki Gap', complexity_tier: 'Advanced', signal_type: 'continuation',
+      directional_bias: 'bullish', requires_gap: true, trend_context: 'prior-uptrend',
+      mirror_pattern_name: 'Downside Tasuki Gap', synonyms: [],
+    };
+
+    test('does not run at all when the exact/substring check already found rows', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [METADATA_ROW] });
+
+      await svc.filterPatternsByMetadata({ patternNameOrSynonym: 'Hammer' });
+
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+    });
+
+    test('does not run when no pattern name was given at all, even on zero rows', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+
+      await svc.filterPatternsByMetadata({ signalType: 'reversal' });
+
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+    });
+
+    test('a one-letter typo in a multi-word pattern name resolves via the fallback', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [] }); // exact/substring check misses
+      mockQuery.mockResolvedValueOnce({ rows: [TASUKI_GAP_ROW] }); // fallback candidate fetch
+
+      const result = await svc.filterPatternsByMetadata({ patternNameOrSynonym: 'Upside Tasuke Gap' });
+
+      expect(result).toEqual([{
+        patternName: 'Upside Tasuki Gap', complexityTier: 'Advanced', signalType: 'continuation',
+        directionalBias: 'bullish', requiresGap: true, trendContext: 'prior-uptrend',
+        mirrorPatternName: 'Downside Tasuki Gap',
+      }]);
+    });
+
+    test('the fallback query applies only the OTHER filters, not a name condition, and selects synonyms', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+
+      await svc.filterPatternsByMetadata({ patternNameOrSynonym: 'Upside Tasuke Gap', directionalBias: 'bullish' });
+
+      const [fallbackSql, fallbackParams] = mockQuery.mock.calls[1];
+      expect(fallbackSql).toContain('p.synonyms');
+      expect(fallbackSql).not.toContain('ILIKE');
+      expect(fallbackSql).toContain('p.directional_bias = $1');
+      expect(fallbackParams).toEqual(['bullish']);
+    });
+
+    test('a genuinely different pattern that merely shares most of a multi-word name does NOT fuzzy-match', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+      mockQuery.mockResolvedValueOnce({ rows: [TASUKI_GAP_ROW] }); // "Downside Tasuki Gap" is a real, different pattern
+
+      const result = await svc.filterPatternsByMetadata({ patternNameOrSynonym: 'Downside Tasuki Gap' });
+
+      // Not a typo of "Upside Tasuki Gap" - a genuinely different (mirror) pattern - must not match it.
+      expect(result).toEqual([]);
+    });
+
+    test('a typo in a synonym also resolves via the fallback', async () => {
+      const harami = {
+        pattern_name: 'Bullish Harami', complexity_tier: 'Composite', signal_type: 'reversal',
+        directional_bias: 'bullish', requires_gap: false, trend_context: 'prior-downtrend',
+        mirror_pattern_name: 'Bearish Harami', synonyms: ['Inside Bar'],
+      };
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+      mockQuery.mockResolvedValueOnce({ rows: [harami] });
+
+      const result = await svc.filterPatternsByMetadata({ patternNameOrSynonym: 'Insde Bar' });
+
+      expect(result).toHaveLength(1);
+      expect(result[0].patternName).toBe('Bullish Harami');
+    });
+
+    test('requires the same word count - a shortened/partial name is left unresolved, not guessed', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+      mockQuery.mockResolvedValueOnce({ rows: [TASUKI_GAP_ROW] });
+
+      // 2 words vs the real pattern's 3 - the pre-existing "ambiguous partial name" case, not one
+      // this fallback tries to resolve (see the service file's own comment on this tradeoff).
+      const result = await svc.filterPatternsByMetadata({ patternNameOrSynonym: 'Tasuke Gap' });
+
+      expect(result).toEqual([]);
+    });
   });
 });
 

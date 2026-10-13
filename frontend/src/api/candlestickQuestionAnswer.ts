@@ -73,6 +73,10 @@ export interface AskResult {
   matchedEntryIds: string[];
   matchedPatterns: MatchedPatternWithHorizonRelevance[];
   reason: string | null;
+  // True only when the LLM answered from its own general knowledge, not the curated tools/
+  // content (2026-10-09, the system prompt's loosened "never guess" rule) - the transparency
+  // flag for that trade-off. Always false for a template-resolved or cached-from-such answer.
+  fromGeneralKnowledge: boolean;
 }
 
 // Horizon stopped being an exclusionary filter anywhere in the Candlestick Tutorial feature
@@ -82,16 +86,28 @@ export interface AskResult {
 // on for an unrelated purpose (which indicators to show per timeframe).
 export type AskHorizon = HorizonId | 'all';
 
+// Which path in the deterministic-first cascade actually resolved the question (2026-10-09) -
+// null for rows written before this existed, surfaced as-is, never guessed. 'none' (no template
+// matched, caller's role can't use the LLM) only ever pairs with Unable_To_Answer, so it can
+// never actually appear on a TopQuestion row (listTopQuestions is Answered-only) - kept in the
+// union anyway since this type mirrors the backend's own ResolvedVia exactly.
+export type ResolvedVia = 'llm' | 'template' | 'none' | null;
+
 // Phase 2 (2026-10-05) - the deterministic-first resolution cascade's cache
 // (m_candlestick_asked_question). answerText/matchedPatternNames are already included in the
 // list response, same "reads stay free, no second request on click" precedent as everything
 // else in this app that's a pure read.
 export interface TopQuestion {
+  // Backs the "Delete Historical Questions" control (2026-10-10) - lets a delete request target
+  // the exact row, instead of relying on questionText (not guaranteed unique across horizons).
+  id: string;
   questionText: string;
   answerText: string;
   matchedPatternNames: MatchedPatternWithHorizonRelevance[];
   questionAskedCount: number;
   lastAskedAt: string;
+  resolvedVia: ResolvedVia;
+  fromGeneralKnowledge: boolean;
 }
 
 export type ResponseMode = 'single' | 'list';
@@ -103,6 +119,9 @@ export interface QuestionTemplate {
   responseMode: ResponseMode;
   filterMapping: { fixedFilters: Record<string, string | boolean>; groupFilters: Record<string, string> };
   answerTemplate: string;
+  // Plain-English example question that would actually match regexPattern - backs the "(i)"
+  // info popover on the Ask form (see useQuestionShapes below).
+  examplePhrasing: string;
   status: 'active' | 'inactive';
   createdAt: string;
   updatedAt: string;
@@ -188,6 +207,17 @@ export function useTopQuestions() {
   });
 }
 
+// "Delete Historical Questions" (candlestick_question_answer:delete_history, 2026-10-10) - a
+// real action, separately permissioned from the free read above.
+export function useDeleteTopQuestion() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiFetch<{ success: true }>(`/candlestick-question-answer/top-questions/${id}`, { method: 'DELETE' }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['candlestickQuestionAnswerTopQuestions'] }),
+  });
+}
+
 // --- Question Templates admin management (candlestick_question_answer:manage_content, Phase 2) ---
 
 export function useTemplates() {
@@ -200,9 +230,20 @@ export function useTemplates() {
 export function useCreateTemplate() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { templateKey: string; regexPattern: string; responseMode: ResponseMode; filterMapping: QuestionTemplate['filterMapping']; answerTemplate: string }) =>
+    mutationFn: (input: { templateKey: string; regexPattern: string; responseMode: ResponseMode; filterMapping: QuestionTemplate['filterMapping']; answerTemplate: string; examplePhrasing: string }) =>
       apiFetch<{ template: QuestionTemplate }>('/candlestick-question-answer/templates', { method: 'POST', body: JSON.stringify(input) }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['candlestickQuestionTemplates'] }),
+  });
+}
+
+// --- "(i)" info popover (candlestick_question_answer:ask, 2026-10-08) ---
+
+// A plain read backing the Ask form's "(i)" popover - every active template's example phrasing,
+// so a role without :llm_calling can discover recognized question shapes instead of guessing.
+export function useQuestionShapes() {
+  return useQuery({
+    queryKey: ['candlestickQuestionShapes'],
+    queryFn: () => apiFetch<{ examples: string[] }>('/candlestick-question-answer/question-shapes'),
   });
 }
 

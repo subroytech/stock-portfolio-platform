@@ -18,6 +18,7 @@ function setsEqual(a: Set<string>, b: Set<string>): boolean {
 const PERMISSION_PARENT: Record<string, string> = {
   'contrarian_finder:scan_history': 'contrarian_finder:scan',
   'candlestick_question_answer:llm_calling': 'candlestick_question_answer:ask',
+  'candlestick_question_answer:delete_history': 'candlestick_question_answer:ask',
 };
 
 // Reorders the flat (alphabetical-by-name) function list so a child permission renders

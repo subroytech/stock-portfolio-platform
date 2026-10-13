@@ -66,6 +66,9 @@ export default function AdminCandlestickQuestionAnswerPage() {
   const [newTemplateResponseMode, setNewTemplateResponseMode] = useState<ResponseMode>('single');
   const [newTemplateFilterMappingJson, setNewTemplateFilterMappingJson] = useState(DEFAULT_FILTER_MAPPING_JSON);
   const [newTemplateAnswer, setNewTemplateAnswer] = useState('');
+  // Plain-English example question that would actually match regexPattern - required (migration
+  // 061/063), backs the Ask form's "(i)" info popover (useQuestionShapes).
+  const [newTemplateExample, setNewTemplateExample] = useState('');
   const [newTemplateJsonError, setNewTemplateJsonError] = useState<string | null>(null);
 
   function toggleNewPatternHorizon(horizon: HorizonId) {
@@ -99,7 +102,7 @@ export default function AdminCandlestickQuestionAnswerPage() {
 
   function handleCreateTemplate(e: React.FormEvent) {
     e.preventDefault();
-    if (!newTemplateKey.trim() || !newTemplateRegex.trim() || !newTemplateAnswer.trim()) return;
+    if (!newTemplateKey.trim() || !newTemplateRegex.trim() || !newTemplateAnswer.trim() || !newTemplateExample.trim()) return;
     let filterMapping;
     try {
       filterMapping = JSON.parse(newTemplateFilterMappingJson);
@@ -112,11 +115,12 @@ export default function AdminCandlestickQuestionAnswerPage() {
       {
         templateKey: newTemplateKey.trim(), regexPattern: newTemplateRegex.trim(),
         responseMode: newTemplateResponseMode, filterMapping, answerTemplate: newTemplateAnswer.trim(),
+        examplePhrasing: newTemplateExample.trim(),
       },
       {
         onSuccess: () => {
           setNewTemplateKey(''); setNewTemplateRegex(''); setNewTemplateResponseMode('single');
-          setNewTemplateFilterMappingJson(DEFAULT_FILTER_MAPPING_JSON); setNewTemplateAnswer('');
+          setNewTemplateFilterMappingJson(DEFAULT_FILTER_MAPPING_JSON); setNewTemplateAnswer(''); setNewTemplateExample('');
         },
       },
     );
@@ -358,6 +362,13 @@ export default function AdminCandlestickQuestionAnswerPage() {
             data-testid="candlestick-qa-new-template-answer"
             className="rounded-btn border border-border bg-bg-primary px-2 py-1.5 text-sm text-text-primary"
           />
+          <input
+            value={newTemplateExample}
+            onChange={(e) => setNewTemplateExample(e.target.value)}
+            placeholder="Example phrasing (e.g. Is Hammer bullish or bearish?)"
+            data-testid="candlestick-qa-new-template-example"
+            className="rounded-btn border border-border bg-bg-primary px-2 py-1.5 text-sm text-text-primary"
+          />
           <button
             type="submit"
             disabled={createTemplate.isPending}
@@ -378,6 +389,7 @@ export default function AdminCandlestickQuestionAnswerPage() {
               <tr className="border-b border-border text-text-muted">
                 <th className="py-1.5 pr-3 font-medium">Key</th>
                 <th className="py-1.5 pr-3 font-medium">Regex</th>
+                <th className="py-1.5 pr-3 font-medium">Example</th>
                 <th className="py-1.5 pr-3 font-medium">Mode</th>
                 <th className="py-1.5 pr-3 font-medium">Status</th>
                 <th className="py-1.5 font-medium">Actions</th>
@@ -388,6 +400,7 @@ export default function AdminCandlestickQuestionAnswerPage() {
                 <tr key={t.id} className="border-b border-border last:border-0" data-testid={`candlestick-qa-template-row-${t.id}`}>
                   <td className="py-1.5 pr-3 text-text-primary">{t.templateKey}</td>
                   <td className="py-1.5 pr-3 font-mono text-xs text-text-secondary">{t.regexPattern}</td>
+                  <td className="py-1.5 pr-3 text-text-secondary">{t.examplePhrasing}</td>
                   <td className="py-1.5 pr-3 text-text-secondary">{t.responseMode}</td>
                   <td className="py-1.5 pr-3">
                     <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${t.status === 'active' ? 'bg-success/10 text-success' : 'bg-text-muted/10 text-text-muted'}`}>

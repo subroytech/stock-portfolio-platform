@@ -270,6 +270,18 @@ async function validateRoleListValue(value: string): Promise<void> {
   if (unknown.length) throw new InvalidConfigValueError(`Unknown role name(s): ${unknown.join(', ')}.`);
 }
 
+// Same narrow-exception shape as ROLE_LIST_PROPERTY_KEYS above, for the one property whose value
+// must be a recognized LLM provider name (candlestickQuestionAnswerAsk.service.ts's provider
+// switch, 2026-10-08).
+const PROVIDER_PROPERTY_KEYS = new Set(['candlestick_question_answer_llm_provider']);
+const VALID_PROVIDERS = new Set(['anthropic', 'openai']);
+
+function validateProviderValue(value: string): void {
+  if (!VALID_PROVIDERS.has(value.trim())) {
+    throw new InvalidConfigValueError(`"${value}" is not a recognized provider. Must be one of: anthropic, openai.`);
+  }
+}
+
 // The versioned write - validates against the property's own declared type/range, then flips
 // the current active value row to inactive and inserts the new one as active, in one
 // transaction. Exact "transactional flip" shape as roles.service.ts's setUserRole().
@@ -282,6 +294,7 @@ export async function setPropertyValue(propertyId: string, input: { value: strin
   if (!prop) return null;
   validateValue(prop.value_type as ConfigValueType, input.value, prop.min_value, prop.max_value);
   if (ROLE_LIST_PROPERTY_KEYS.has(prop.property_key)) await validateRoleListValue(input.value);
+  if (PROVIDER_PROPERTY_KEYS.has(prop.property_key)) validateProviderValue(input.value);
 
   const client = await pool.connect();
   try {

@@ -1,12 +1,18 @@
 jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn() } }));
+jest.mock('../src/services/llmProviderModels.service', () => ({
+  ...jest.requireActual('../src/services/llmProviderModels.service'),
+  listModelsForProvider: jest.fn(),
+}));
 
 import request from 'supertest';
 import { pool } from '../src/db/pool';
 import { encrypt } from '../src/utils/encryption';
 import { signToken } from '../src/services/auth.service';
+import * as llmProviderModels from '../src/services/llmProviderModels.service';
 import app from '../src/app';
 
 const mockQuery = pool.query as unknown as jest.Mock;
+const mockListModelsForProvider = llmProviderModels.listModelsForProvider as jest.Mock;
 
 // A real, validly-signed cookie so requests pass through the real
 // requireAuth middleware — this suite is testing userSubscription
@@ -19,6 +25,7 @@ beforeEach(() => {
   // default the caller to granted so tests below exercise the controller itself, unless a
   // test overrides it.
   mockQuery.mockResolvedValue({ rows: [{ '?column?': 1 }] });
+  mockListModelsForProvider.mockReset();
 });
 
 describe('auth gating', () => {
@@ -106,5 +113,75 @@ describe('DELETE /subscriptions/:provider', () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).delete('/subscriptions/fmp').set('Cookie', authCookie);
     expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /subscriptions/:provider/models ("Get Allowed Models")', () => {
+  test('200 with the sorted model list for anthropic', async () => {
+    mockListModelsForProvider.mockResolvedValueOnce(['claude-haiku-4-5', 'claude-opus-5', 'claude-sonnet-5']);
+    const res = await request(app).post('/subscriptions/anthropic/models').set('Cookie', authCookie).send({ apiKey: 'sk-ant-real-key' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ models: ['claude-haiku-4-5', 'claude-opus-5', 'claude-sonnet-5'] });
+    expect(mockListModelsForProvider).toHaveBeenCalledWith('anthropic', 'sk-ant-real-key');
+  });
+
+  test('200 for openai too', async () => {
+    mockListModelsForProvider.mockResolvedValueOnce(['gpt-4o', 'gpt-5']);
+    const res = await request(app).post('/subscriptions/openai/models').set('Cookie', authCookie).send({ apiKey: 'sk-openai-real-key' });
+    expect(res.status).toBe(200);
+    expect(mockListModelsForProvider).toHaveBeenCalledWith('openai', 'sk-openai-real-key');
+  });
+
+  test('400 for a provider with no model catalog (fmp/finnhub)', async () => {
+    const res = await request(app).post('/subscriptions/fmp/models').set('Cookie', authCookie).send({ apiKey: 'x' });
+    expect(res.status).toBe(400);
+    expect(mockListModelsForProvider).not.toHaveBeenCalled();
+  });
+
+  test('400 when apiKey is missing', async () => {
+    const res = await request(app).post('/subscriptions/anthropic/models').set('Cookie', authCookie).send({});
+    expect(res.status).toBe(400);
+    expect(mockListModelsForProvider).not.toHaveBeenCalled();
+  });
+
+  test('400 with the provider\'s own rejection message when the key is rejected', async () => {
+    const { ProviderModelListError } = jest.requireActual('../src/services/llmProviderModels.service');
+    mockListModelsForProvider.mockRejectedValueOnce(new ProviderModelListError('anthropic', 401));
+    const res = await request(app).post('/subscriptions/anthropic/models').set('Cookie', authCookie).send({ apiKey: 'sk-ant-bad-key' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/rejected by Anthropic/);
+  });
+
+  test('403 when the caller doesn\'t have api_keys:manage_own', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).post('/subscriptions/anthropic/models').set('Cookie', authCookie).send({ apiKey: 'x' });
+    expect(res.status).toBe(403);
+    expect(mockListModelsForProvider).not.toHaveBeenCalled();
+  });
+
+  describe('useSavedKey: true ("Check saved key")', () => {
+    test('decrypts the saved key server-side and never requires apiKey in the body', async () => {
+      const encrypted = encrypt('sk-ant-saved-key');
+      mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+      mockQuery.mockResolvedValueOnce({ rows: [{ api_key_encrypted: encrypted }] }); // getOwnDecryptedKey
+      mockListModelsForProvider.mockResolvedValueOnce(['claude-sonnet-5']);
+
+      const res = await request(app).post('/subscriptions/anthropic/models').set('Cookie', authCookie).send({ useSavedKey: true });
+
+      expect(res.status).toBe(200);
+      expect(mockListModelsForProvider).toHaveBeenCalledWith('anthropic', 'sk-ant-saved-key');
+      expect(JSON.stringify(res.body)).not.toContain('sk-ant-saved-key'); // the raw key never reaches the response
+    });
+
+    test('400 with a clear message when nothing is saved yet - never falls back to apiKey in the body', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // requirePermission
+      mockQuery.mockResolvedValueOnce({ rows: [] }); // getOwnDecryptedKey - nothing saved
+
+      const res = await request(app).post('/subscriptions/anthropic/models').set('Cookie', authCookie).send({ useSavedKey: true, apiKey: 'sk-should-be-ignored' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/No anthropic key is saved yet/);
+      expect(mockListModelsForProvider).not.toHaveBeenCalled();
+    });
   });
 });

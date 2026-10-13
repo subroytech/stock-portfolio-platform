@@ -126,6 +126,19 @@ async function getAdminMasterKey(provider: string): Promise<string | null> {
   return rows[0] ? decrypt(rows[0].api_key_encrypted) : null;
 }
 
+// Strictly the caller's OWN saved key - never the Admin-Master Fallback. "Get Allowed Models"'s
+// "Check saved key" option (2026-10-08) needs this distinction: a user clicking "check MY saved
+// key" should see models for the key they themselves configured, not be silently handed results
+// for an admin-master key they may not even know exists. Returns null (not a thrown error) when
+// there's nothing saved - the caller decides what that means.
+export async function getOwnDecryptedKey(userId: string, provider: string): Promise<string | null> {
+  const { rows } = await pool.query<{ api_key_encrypted: string }>(
+    'SELECT api_key_encrypted FROM users_subscriptions WHERE user_id = $1 AND provider = $2',
+    [userId, provider],
+  );
+  return rows[0] ? decrypt(rows[0].api_key_encrypted) : null;
+}
+
 // Resolves the calling user's own key for a provider. Admin-Master Fallback API Key: if the
 // caller has none of their own AND their role is fallback-eligible, transparently uses the
 // single admin-master account's key instead of failing - see User Manual.md. A role that

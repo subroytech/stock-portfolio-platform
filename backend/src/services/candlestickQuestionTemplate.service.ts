@@ -19,6 +19,11 @@ export interface QuestionTemplate {
   responseMode: ResponseMode;
   filterMapping: { fixedFilters: Record<string, string | boolean>; groupFilters: Record<string, string> };
   answerTemplate: string;
+  // Plain-English example question that would actually match regexPattern (migration 061) -
+  // purely descriptive/display-only, never parsed or matched against anything itself. Backs the
+  // "(i)" info popover on the Ask form, so a role without :llm_calling can discover recognized
+  // question shapes instead of guessing phrasings.
+  examplePhrasing: string;
   status: 'active' | 'inactive';
   createdAt: string;
   updatedAt: string;
@@ -35,7 +40,7 @@ export class DuplicateTemplateKeyError extends Error {}
 function toTemplate(row: {
   id: string; template_key: string; regex_pattern: string; response_mode: string;
   filter_mapping: { fixedFilters: Record<string, string | boolean>; groupFilters: Record<string, string> };
-  answer_template: string; status: string; created_at: string; updated_at: string;
+  answer_template: string; example_phrasing: string; status: string; created_at: string; updated_at: string;
 }): QuestionTemplate {
   return {
     id: row.id,
@@ -44,6 +49,7 @@ function toTemplate(row: {
     responseMode: row.response_mode as ResponseMode,
     filterMapping: row.filter_mapping,
     answerTemplate: row.answer_template,
+    examplePhrasing: row.example_phrasing,
     status: row.status as 'active' | 'inactive',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -55,17 +61,26 @@ export async function listTemplates(): Promise<QuestionTemplate[]> {
   return rows.map(toTemplate);
 }
 
+// Backs the "(i)" info popover - every active template's example phrasing only, never the
+// regex/filter-mapping internals an end user has no use for (and shouldn't need to see).
+export async function listActiveExamplePhrasings(): Promise<string[]> {
+  const { rows } = await pool.query<{ example_phrasing: string }>(
+    `SELECT example_phrasing FROM m_question_template WHERE status = 'active' ORDER BY id`,
+  );
+  return rows.map((r) => r.example_phrasing);
+}
+
 const UNIQUE_VIOLATION = '23505';
 
 export async function createTemplate(input: {
   templateKey: string; regexPattern: string; responseMode: ResponseMode;
-  filterMapping: QuestionTemplate['filterMapping']; answerTemplate: string;
+  filterMapping: QuestionTemplate['filterMapping']; answerTemplate: string; examplePhrasing: string;
 }): Promise<QuestionTemplate> {
   try {
     const { rows } = await pool.query(
-      `INSERT INTO m_question_template (template_key, regex_pattern, response_mode, filter_mapping, answer_template)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [input.templateKey, input.regexPattern, input.responseMode, JSON.stringify(input.filterMapping), input.answerTemplate],
+      `INSERT INTO m_question_template (template_key, regex_pattern, response_mode, filter_mapping, answer_template, example_phrasing)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [input.templateKey, input.regexPattern, input.responseMode, JSON.stringify(input.filterMapping), input.answerTemplate, input.examplePhrasing],
     );
     return toTemplate(rows[0]);
   } catch (err) {

@@ -19,8 +19,8 @@ const ENTRIES = [
 ];
 
 const TOP_QUESTIONS = [
-  { questionText: 'Is Doji bullish or bearish?', answerText: 'Doji is neutral.', matchedPatternNames: [{ patternName: 'Doji', relevantForHorizon: null }], questionAskedCount: 12, lastAskedAt: 't1' },
-  { questionText: 'Is Hammer bullish or bearish?', answerText: 'Hammer is bullish.', matchedPatternNames: [{ patternName: 'Hammer', relevantForHorizon: null }], questionAskedCount: 5, lastAskedAt: 't1' },
+  { id: 'q1', questionText: 'Is Doji bullish or bearish?', answerText: 'Doji is neutral.', matchedPatternNames: [{ patternName: 'Doji', relevantForHorizon: null }], questionAskedCount: 12, lastAskedAt: 't1', resolvedVia: 'template' },
+  { id: 'q2', questionText: 'Is Hammer bullish or bearish?', answerText: 'Hammer is bullish.', matchedPatternNames: [{ patternName: 'Hammer', relevantForHorizon: null }], questionAskedCount: 5, lastAskedAt: 't1', resolvedVia: 'llm' },
 ];
 
 function renderPage() {
@@ -269,6 +269,27 @@ describe('CandlestickQuestionAnswerPage', () => {
     expect(answer).toHaveTextContent('A Doji signals indecision.');
     expect(screen.queryByTestId('candlestick-qa-unable-to-answer')).not.toBeInTheDocument();
     expect(screen.getByTestId('candlestick-pattern-diagram')).toBeInTheDocument();
+    expect(screen.queryByTestId('candlestick-qa-general-knowledge-notice')).not.toBeInTheDocument();
+  });
+
+  test('fromGeneralKnowledge: true shows a disclaimer that the answer is not from curated content', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((path: string, init?: RequestInit) => {
+      if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+      if (path === '/candlestick-question-answer/ask' && init?.method === 'POST') {
+        return Promise.resolve({
+          outcome: 'answered_from_kb', answer: 'General knowledge answer.', matchedEntryIds: [],
+          matchedPatterns: [], reason: null, fromGeneralKnowledge: true,
+        });
+      }
+      return Promise.resolve({});
+    });
+    renderPage();
+
+    await userEvent.type(await screen.findByTestId('candlestick-qa-question-input'), 'Can Tasuki Gap be used with other patterns?');
+    await userEvent.click(screen.getByTestId('candlestick-qa-ask-button'));
+
+    const notice = await screen.findByTestId('candlestick-qa-general-knowledge-notice');
+    expect(notice).toHaveTextContent('not the platform');
   });
 
   test('an unable_to_answer outcome shows the honest fallback message, not a fabricated answer', async () => {
@@ -376,6 +397,46 @@ describe('CandlestickQuestionAnswerPage', () => {
       expect(screen.queryByTestId('candlestick-qa-top-question-answer-0')).not.toBeInTheDocument();
     });
 
+    test('shows a "Template" or "LLM" badge per row according to resolvedVia, and no badge for a legacy row (resolvedVia: null)', async () => {
+      const questions = [
+        { questionText: 'Is Doji bullish or bearish?', answerText: 'Doji is neutral.', matchedPatternNames: [], questionAskedCount: 12, lastAskedAt: 't1', resolvedVia: 'template' },
+        { questionText: 'Is Hammer bullish or bearish?', answerText: 'Hammer is bullish.', matchedPatternNames: [], questionAskedCount: 5, lastAskedAt: 't1', resolvedVia: 'llm' },
+        { questionText: 'What is a Piercing line?', answerText: '...', matchedPatternNames: [], questionAskedCount: 1, lastAskedAt: 't1', resolvedVia: null },
+      ];
+      vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+        if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+        if (path === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions });
+        return Promise.resolve({});
+      });
+      renderPage();
+
+      const templateRow = await screen.findByTestId('candlestick-qa-top-question-0');
+      expect(templateRow).toHaveTextContent('Template');
+      const llmRow = await screen.findByTestId('candlestick-qa-top-question-1');
+      expect(llmRow).toHaveTextContent('LLM');
+      const legacyRow = await screen.findByTestId('candlestick-qa-top-question-2');
+      expect(legacyRow).not.toHaveTextContent('Template');
+      expect(legacyRow).not.toHaveTextContent('LLM');
+    });
+
+    test('an LLM row with fromGeneralKnowledge: true shows "LLM (General)" and a disclaimer when expanded', async () => {
+      const questions = [
+        { questionText: 'Can Tasuki Gap be used with other patterns?', answerText: 'General knowledge answer.', matchedPatternNames: [], questionAskedCount: 1, lastAskedAt: 't1', resolvedVia: 'llm', fromGeneralKnowledge: true },
+      ];
+      vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+        if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+        if (path === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions });
+        return Promise.resolve({});
+      });
+      renderPage();
+
+      const row = await screen.findByTestId('candlestick-qa-top-question-0');
+      expect(row).toHaveTextContent('LLM (General)');
+
+      await userEvent.click(row);
+      expect(screen.getByTestId('candlestick-qa-top-question-general-knowledge-0')).toHaveTextContent('not the platform');
+    });
+
     test('clicking a question expands its already-fetched answer, with no extra network call', async () => {
       const apiFetch = vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
         if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
@@ -435,6 +496,180 @@ describe('CandlestickQuestionAnswerPage', () => {
       renderPage();
 
       expect(await screen.findByText('No questions asked yet.')).toBeInTheDocument();
+    });
+
+    describe('Delete Historical Questions (candlestick_question_answer:delete_history)', () => {
+      test('no delete icon is rendered without the permission', async () => {
+        vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+          if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+          if (path === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions: TOP_QUESTIONS });
+          return Promise.resolve({});
+        });
+        renderPage();
+
+        await screen.findByTestId('candlestick-qa-top-question-0');
+        expect(screen.queryByTestId('candlestick-qa-top-question-delete-0')).not.toBeInTheDocument();
+      });
+
+      test('a delete icon is rendered per row with the permission', async () => {
+        vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+          if (path === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['candlestick_question_answer:delete_history'] });
+          if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+          if (path === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions: TOP_QUESTIONS });
+          return Promise.resolve({});
+        });
+        renderPage();
+
+        expect(await screen.findByTestId('candlestick-qa-top-question-delete-0')).toBeInTheDocument();
+        expect(screen.getByTestId('candlestick-qa-top-question-delete-1')).toBeInTheDocument();
+      });
+
+      test('clicking the delete icon shows an inline confirm, not a native confirm dialog', async () => {
+        vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+          if (path === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['candlestick_question_answer:delete_history'] });
+          if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+          if (path === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions: TOP_QUESTIONS });
+          return Promise.resolve({});
+        });
+        renderPage();
+        const deleteIcon = await screen.findByTestId('candlestick-qa-top-question-delete-0');
+
+        await userEvent.click(deleteIcon);
+
+        expect(screen.getByTestId('candlestick-qa-top-question-delete-confirm-0')).toHaveTextContent('Confirm');
+        expect(screen.queryByTestId('candlestick-qa-top-question-delete-0')).not.toBeInTheDocument();
+      });
+
+      test('Cancel dismisses the confirm without calling the delete endpoint', async () => {
+        const apiFetch = vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+          if (path === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['candlestick_question_answer:delete_history'] });
+          if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+          if (path === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions: TOP_QUESTIONS });
+          return Promise.resolve({});
+        });
+        renderPage();
+        await userEvent.click(await screen.findByTestId('candlestick-qa-top-question-delete-0'));
+
+        await userEvent.click(screen.getByText('Cancel'));
+
+        expect(screen.getByTestId('candlestick-qa-top-question-delete-0')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')).toBe(false);
+      });
+
+      test('Confirm calls the delete endpoint with the row id and removes it from the list on success', async () => {
+        const apiFetch = vi.spyOn(client, 'apiFetch').mockImplementation((path: string, init?: RequestInit) => {
+          if (path === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['candlestick_question_answer:delete_history'] });
+          if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+          if (path === '/candlestick-question-answer/top-questions/q1' && init?.method === 'DELETE') return Promise.resolve({ success: true });
+          if (path === '/candlestick-question-answer/top-questions') {
+            const stillPresent = apiFetch.mock.calls.some(([, i]) => (i as RequestInit | undefined)?.method === 'DELETE');
+            return Promise.resolve({ questions: stillPresent ? [TOP_QUESTIONS[1]] : TOP_QUESTIONS });
+          }
+          return Promise.resolve({});
+        });
+        renderPage();
+        await userEvent.click(await screen.findByTestId('candlestick-qa-top-question-delete-0'));
+
+        await userEvent.click(screen.getByTestId('candlestick-qa-top-question-delete-confirm-0'));
+
+        await waitFor(() => {
+          expect(apiFetch).toHaveBeenCalledWith('/candlestick-question-answer/top-questions/q1', { method: 'DELETE' });
+        });
+        await waitFor(() => {
+          expect(screen.queryByText('Is Doji bullish or bearish?')).not.toBeInTheDocument();
+        });
+        expect(screen.getByText('Is Hammer bullish or bearish?')).toBeInTheDocument();
+      });
+
+      test('a failed delete shows an inline error and leaves the row in place', async () => {
+        vi.spyOn(client, 'apiFetch').mockImplementation((path: string, init?: RequestInit) => {
+          if (path === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['candlestick_question_answer:delete_history'] });
+          if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+          if (path === '/candlestick-question-answer/top-questions/q1' && init?.method === 'DELETE') {
+            return Promise.reject(new ApiError(404, 'No such historical question.', null));
+          }
+          if (path === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions: TOP_QUESTIONS });
+          return Promise.resolve({});
+        });
+        renderPage();
+        await userEvent.click(await screen.findByTestId('candlestick-qa-top-question-delete-0'));
+        await userEvent.click(screen.getByTestId('candlestick-qa-top-question-delete-confirm-0'));
+
+        expect(await screen.findByTestId('candlestick-qa-top-question-delete-error-0')).toHaveTextContent("Couldn't delete");
+        expect(screen.getByText('Is Doji bullish or bearish?')).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe('Question shapes info popover', () => {
+    test('is closed by default, with no menu rendered', async () => {
+      vi.spyOn(client, 'apiFetch').mockResolvedValue({ entries: [] });
+      renderPage();
+      await screen.findByTestId('candlestick-qa-question-input');
+
+      expect(screen.queryByTestId('candlestick-qa-question-shapes-menu')).not.toBeInTheDocument();
+    });
+
+    test('clicking the (i) button opens the menu and lists the fetched example phrasings', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+        if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+        if (path === '/candlestick-question-answer/question-shapes') {
+          return Promise.resolve({ examples: ['Is Hammer bullish or bearish?', 'Which patterns are bullish?'] });
+        }
+        return Promise.resolve({});
+      });
+      renderPage();
+      await screen.findByTestId('candlestick-qa-question-input');
+
+      await userEvent.click(screen.getByTestId('candlestick-qa-question-shapes-info'));
+
+      const menu = await screen.findByTestId('candlestick-qa-question-shapes-menu');
+      expect(menu).toHaveTextContent('Is Hammer bullish or bearish?');
+      expect(menu).toHaveTextContent('Which patterns are bullish?');
+    });
+
+    test('clicking the (i) button again closes the menu', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+        if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+        if (path === '/candlestick-question-answer/question-shapes') return Promise.resolve({ examples: ['Is Hammer bullish or bearish?'] });
+        return Promise.resolve({});
+      });
+      renderPage();
+      const infoButton = await screen.findByTestId('candlestick-qa-question-shapes-info');
+
+      await userEvent.click(infoButton);
+      await screen.findByTestId('candlestick-qa-question-shapes-menu');
+      await userEvent.click(infoButton);
+
+      expect(screen.queryByTestId('candlestick-qa-question-shapes-menu')).not.toBeInTheDocument();
+    });
+
+    test('clicking outside the menu closes it without navigating away', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+        if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+        if (path === '/candlestick-question-answer/question-shapes') return Promise.resolve({ examples: ['Is Hammer bullish or bearish?'] });
+        return Promise.resolve({});
+      });
+      renderPage();
+      await userEvent.click(await screen.findByTestId('candlestick-qa-question-shapes-info'));
+      await screen.findByTestId('candlestick-qa-question-shapes-menu');
+
+      await userEvent.click(screen.getByTestId('candlestick-qa-question-shapes-backdrop'));
+
+      expect(screen.queryByTestId('candlestick-qa-question-shapes-menu')).not.toBeInTheDocument();
+    });
+
+    test('shows a friendly empty state when no templates are recognized yet', async () => {
+      vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+        if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+        if (path === '/candlestick-question-answer/question-shapes') return Promise.resolve({ examples: [] });
+        return Promise.resolve({});
+      });
+      renderPage();
+
+      await userEvent.click(await screen.findByTestId('candlestick-qa-question-shapes-info'));
+
+      expect(await screen.findByText('No recognized question shapes yet.')).toBeInTheDocument();
     });
   });
 });

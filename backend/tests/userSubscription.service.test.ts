@@ -2,7 +2,7 @@ jest.mock('../src/db/pool', () => ({ pool: { query: jest.fn() } }));
 
 import { pool } from '../src/db/pool';
 import { encrypt, decrypt } from '../src/utils/encryption';
-import { listSubscriptions, upsertSubscription, deleteSubscription, getDecryptedKey, MissingUserApiKeyError } from '../src/services/userSubscription.service';
+import { listSubscriptions, upsertSubscription, deleteSubscription, getDecryptedKey, getOwnDecryptedKey, MissingUserApiKeyError } from '../src/services/userSubscription.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
 
@@ -76,6 +76,22 @@ describe('deleteSubscription', () => {
   test('returns false when nothing matched', async () => {
     mockQuery.mockResolvedValue({ rows: [] });
     expect(await deleteSubscription('user-1', 'fmp')).toBe(false);
+  });
+});
+
+// "Get Allowed Models"'s "Check saved key" option (2026-10-08) - deliberately never falls
+// back to the Admin-Master Fallback key, unlike getDecryptedKey below.
+describe('getOwnDecryptedKey', () => {
+  test("returns the caller's own key, without ever looking up roles or the fallback config", async () => {
+    const encrypted = encrypt('sk-own-key-2222');
+    mockQuery.mockResolvedValueOnce({ rows: [{ api_key_encrypted: encrypted }] });
+    expect(await getOwnDecryptedKey('user-1', 'openai')).toBe('sk-own-key-2222');
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  test('returns null, not a thrown error, when nothing is saved', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    expect(await getOwnDecryptedKey('user-1', 'openai')).toBeNull();
   });
 });
 

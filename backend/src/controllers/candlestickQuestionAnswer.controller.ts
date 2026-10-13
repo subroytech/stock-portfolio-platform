@@ -2,12 +2,14 @@ import { Request, Response, NextFunction } from 'express';
 import * as candlestickQuestionAnswer from '../services/candlestickQuestionAnswer.service';
 import type { Horizon, Tier, Category, ComplexityTier } from '../services/candlestickQuestionAnswer.service';
 import * as ask from '../services/candlestickQuestionAnswerAsk.service';
+import type { LlmProvider } from '../services/llmModel.service';
 import { checkRateLimit, recordRateLimitedCall, CandlestickQuestionAnswerRateLimitExceededError } from '../services/candlestickQuestionAnswerRateLimit.service';
 import * as askedQuestion from '../services/candlestickAskedQuestion.service';
 import * as questionTemplate from '../services/candlestickQuestionTemplate.service';
 import * as rolesService from '../services/roles.service';
 import * as usageTracking from '../services/usageTracking.service';
 import * as userSubscription from '../services/userSubscription.service';
+import { getConfigValue } from '../services/configProperty.service';
 
 const LLM_CALLING_PERMISSION = 'candlestick_question_answer:llm_calling';
 
@@ -73,13 +75,19 @@ async function enrichMatchedPatterns(
   return patternNames.map((patternName) => ({ patternName, relevantForHorizon: relevance[patternName] ?? null }));
 }
 
-// The free-text ask path - a deterministic-first resolution cascade (Phase 2, 2026-10-05):
+// The free-text ask path - a deterministic-first resolution cascade (Phase 2, 2026-10-05;
+// reordered 2026-10-08 so the free paths are tried for EVERY role, not just roles without
+// candlestick_question_answer:llm_calling - a premium/LLM-enabled role was otherwise getting a
+// worse outcome than a non-premium one for the exact same question whenever the LLM branch
+// itself failed, e.g. no Anthropic key configured anywhere, since it never got a chance to fall
+// back to a template that would have answered it for free):
 // 1. A cache hit (m_candlestick_asked_question) answers directly - no LLM, no rate limit, no
 //    template logic reached at all.
-// 2. A role holding candlestick_question_answer:llm_calling falls to the existing Phase 1 ReAct
-//    loop (the only branch that is rate-limited and costs a real, billed LLM call).
-// 3. A role without that permission falls to the deterministic question-template cascade
-//    instead - never the LLM. No match there means 'unable_to_answer', the end of the line.
+// 2. The deterministic question-template cascade is tried next, for every role regardless of
+//    permission - free, no rate limit.
+// 3. Only when no template matched does a role holding candlestick_question_answer:llm_calling
+//    fall to the existing Phase 1 ReAct loop (the only branch that is rate-limited and costs a
+//    real, billed LLM call). A role without that permission ends here as 'unable_to_answer'.
 // Every outcome (success or not) is written to the cache so a repeat ask of the same question,
 // from anyone, becomes a free cache hit from then on.
 export async function askQuestion(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -97,15 +105,39 @@ export async function askQuestion(req: Request, res: Response, next: NextFunctio
   try {
     const userId = getUserId(req);
 
-    const cached = await askedQuestion.findCachedAnswer(question, horizon);
+    const cached = await askedQuestion.findCachedAnswer(question);
     if (cached) {
+      // The stored relevance badges were computed for whichever horizon this row was ORIGINALLY
+      // written under (2026-10-10) - horizon no longer participates in cache matching itself
+      // (see findCachedAnswer()'s own comment), so a hit can now legitimately come from a
+      // request under a different horizon than that. Reuse the stored badges as-is when they
+      // already match (the common case - most repeat-askers use their usual horizon - zero
+      // extra query), recompute them fresh for the current request's horizon otherwise.
+      const matchedPatterns = cached.horizon === horizon
+        ? cached.matchedPatternNames
+        : await enrichMatchedPatterns(cached.matchedPatternNames.map((m) => m.patternName), horizon);
       res.json({
         outcome: 'answered_from_kb',
         answer: cached.answerText,
         matchedEntryIds: [],
-        matchedPatterns: cached.matchedPatternNames,
+        matchedPatterns,
         reason: null,
+        resolvedVia: cached.resolvedVia,
+        fromGeneralKnowledge: cached.fromGeneralKnowledge,
       });
+      return;
+    }
+
+    const templateResult = await questionTemplate.matchTemplate(question);
+    const formattedAnswer = templateResult ? questionTemplate.formatTemplateAnswer(templateResult) : null;
+
+    if (formattedAnswer && templateResult) {
+      const matchedPatternNames = templateResult.matches.map((m) => m.patternName);
+      const matchedPatterns = await enrichMatchedPatterns(matchedPatternNames, horizon);
+      await askedQuestion.recordAskedQuestion({
+        questionText: question, horizon, answerText: formattedAnswer, matchedPatternNames: matchedPatterns, status: 'Answered', resolvedVia: 'template', fromGeneralKnowledge: false,
+      });
+      res.json({ outcome: 'answered_from_kb', answer: formattedAnswer, matchedEntryIds: [], matchedPatterns, reason: null, resolvedVia: 'template', fromGeneralKnowledge: false });
       return;
     }
 
@@ -118,8 +150,9 @@ export async function askQuestion(req: Request, res: Response, next: NextFunctio
         );
       }
 
-      const apiKey = await userSubscription.getDecryptedKey(userId, 'anthropic');
-      const result = await ask.ask(question, horizon, apiKey);
+      const provider = ((await getConfigValue('candlestick_question_answer_llm_provider')) ?? 'anthropic') as LlmProvider;
+      const apiKey = await userSubscription.getDecryptedKey(userId, provider);
+      const result = await ask.ask(question, horizon, apiKey, provider);
       // Only the LLM branch ever consumes rate-limit budget - a cache hit or a template
       // resolution costs nothing real (see candlestickQuestionAnswerRateLimit.service.ts).
       await recordRateLimitedCall(userId);
@@ -141,6 +174,8 @@ export async function askQuestion(req: Request, res: Response, next: NextFunctio
         answerText: result.answer,
         matchedPatternNames: matchedPatterns,
         status: result.outcome === 'answered_from_kb' ? 'Answered' : 'Unable_To_Answer',
+        resolvedVia: 'llm',
+        fromGeneralKnowledge: result.fromGeneralKnowledge,
       });
 
       // Fire-and-forget, same pattern as every other feature's usage-tracking call - a logging
@@ -154,25 +189,14 @@ export async function askQuestion(req: Request, res: Response, next: NextFunctio
         matchedEntryIds: result.matchedEntryIds,
         matchedPatterns,
         reason: result.reason,
+        resolvedVia: 'llm',
+        fromGeneralKnowledge: result.fromGeneralKnowledge,
       });
-      return;
-    }
-
-    const templateResult = await questionTemplate.matchTemplate(question);
-    const formattedAnswer = templateResult ? questionTemplate.formatTemplateAnswer(templateResult) : null;
-
-    if (formattedAnswer && templateResult) {
-      const matchedPatternNames = templateResult.matches.map((m) => m.patternName);
-      const matchedPatterns = await enrichMatchedPatterns(matchedPatternNames, horizon);
-      await askedQuestion.recordAskedQuestion({
-        questionText: question, horizon, answerText: formattedAnswer, matchedPatternNames: matchedPatterns, status: 'Answered',
-      });
-      res.json({ outcome: 'answered_from_kb', answer: formattedAnswer, matchedEntryIds: [], matchedPatterns, reason: null });
       return;
     }
 
     await askedQuestion.recordAskedQuestion({
-      questionText: question, horizon, answerText: null, matchedPatternNames: [], status: 'Unable_To_Answer',
+      questionText: question, horizon, answerText: null, matchedPatternNames: [], status: 'Unable_To_Answer', resolvedVia: 'none', fromGeneralKnowledge: false,
     });
     res.json({
       outcome: 'unable_to_answer',
@@ -180,6 +204,8 @@ export async function askQuestion(req: Request, res: Response, next: NextFunctio
       matchedEntryIds: [],
       matchedPatterns: [],
       reason: 'This role cannot use the free-text LLM assistant, and no matching question template was found.',
+      fromGeneralKnowledge: false,
+      resolvedVia: 'none',
     });
   } catch (err) {
     if (err instanceof CandlestickQuestionAnswerRateLimitExceededError) {
@@ -303,6 +329,21 @@ export async function listTopQuestions(req: Request, res: Response, next: NextFu
   }
 }
 
+// --- Delete Historical Questions (candlestick_question_answer:delete_history, 2026-10-10) ---
+
+export async function deleteTopQuestion(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const deleted = await askedQuestion.deleteAskedQuestion(String(req.params.id));
+    if (!deleted) {
+      res.status(404).json({ error: 'No such historical question.' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // --- Question Templates admin management (candlestick_question_answer:manage_content) ---
 
 const VALID_RESPONSE_MODES: questionTemplate.ResponseMode[] = ['single', 'list'];
@@ -321,9 +362,10 @@ export async function createTemplate(req: Request, res: Response, next: NextFunc
   const regexPattern = typeof req.body?.regexPattern === 'string' ? req.body.regexPattern.trim() : '';
   const responseMode = req.body?.responseMode;
   const answerTemplate = typeof req.body?.answerTemplate === 'string' ? req.body.answerTemplate.trim() : '';
+  const examplePhrasing = typeof req.body?.examplePhrasing === 'string' ? req.body.examplePhrasing.trim() : '';
   const filterMapping = req.body?.filterMapping;
-  if (!templateKey || !regexPattern || !answerTemplate) {
-    res.status(400).json({ error: 'templateKey, regexPattern, and answerTemplate are required.' });
+  if (!templateKey || !regexPattern || !answerTemplate || !examplePhrasing) {
+    res.status(400).json({ error: 'templateKey, regexPattern, answerTemplate, and examplePhrasing are required.' });
     return;
   }
   if (!VALID_RESPONSE_MODES.includes(responseMode)) {
@@ -337,7 +379,7 @@ export async function createTemplate(req: Request, res: Response, next: NextFunc
   try {
     const template = await questionTemplate.createTemplate({
       templateKey, regexPattern, responseMode, filterMapping,
-      answerTemplate,
+      answerTemplate, examplePhrasing,
     });
     res.status(201).json({ template });
   } catch (err) {
@@ -345,6 +387,19 @@ export async function createTemplate(req: Request, res: Response, next: NextFunc
       res.status(409).json({ error: err.message });
       return;
     }
+    next(err);
+  }
+}
+
+// --- "(i)" info popover (candlestick_question_answer:ask - same "viewing is free" gate as
+// /entries/listTopQuestions above, not :manage_content - this is for the person USING Ask, not
+// administering templates) ---
+
+export async function listQuestionShapes(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const examples = await questionTemplate.listActiveExamplePhrasings();
+    res.json({ examples });
+  } catch (err) {
     next(err);
   }
 }

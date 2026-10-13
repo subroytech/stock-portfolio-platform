@@ -2107,14 +2107,592 @@ path's own badge rendering was verified via the updated automated tests only, no
 no real Anthropic key is on file in this dev environment, the same known gap noted in the
 Phase 1/2 build logs above.
 
+## Question Templates — "(i)" info popover ✅ Done
+
+Built 2026-10-08, the deferred item from the 7-new-templates round above. `m_question_template`
+had no human-readable field - `regex_pattern` is admin-authored pattern syntax, not something to
+show an end user directly - so migrations `061`/`062`/`063` add a required `example_phrasing`
+column (plain-English example question that would actually match that template's own
+`regex_pattern`, purely descriptive/display-only, never parsed), backfilled by hand for all 10
+existing templates (confirmed each example actually matches its own regex by reading it, not
+guessed). Split into 3 files (add column → backfill → `SET NOT NULL`) for the same CockroachDB
+schema-change-visibility reason documented in migration `048`'s header - a schema change isn't
+reliably visible to dependent DML/DDL submitted in the same batch.
+
+New `GET /candlestick-question-answer/question-shapes`, gated by `candlestick_question_answer:ask`
+(not the admin-only `:manage_content` the existing `GET /templates` uses) - this is for the person
+*using* Ask, not administering templates, same "viewing is free" precedent as `/entries`/
+`/top-questions`. Returns only active templates' `example_phrasing`, never the regex/filter-mapping
+internals. New `candlestickQuestionTemplate.service.ts` function `listActiveExamplePhrasings()`;
+`createTemplate()`'s input and the Admin Console's create-template form both gained a required
+`examplePhrasing` field (same required-field precedent as `templateKey`/`regexPattern`/
+`answerTemplate`), plus a new table column so admins can see it.
+
+Frontend: a small "(i)" circle button next to the Ask form's "Question" label
+(`CandlestickQuestionAnswerPage.tsx`), reusing this page's own existing floating-popover idiom
+(the Pattern/Complexity/Category column filters) - backdrop-click-to-close, listing the fetched
+example phrasings in a floating panel. Deliberately NOT nested inside the `<label>` wrapping the
+textarea - a `<button>` is itself a labelable element, so nesting it inside the label would have
+made the implicit label→control association ambiguous (first labelable descendant wins); fixed
+with an explicit `htmlFor`/`id` pairing instead, caught before shipping, not live.
+
+11 new backend tests (1036 total), 6 new frontend tests (829 total), `tsc`/lint clean both sides.
+**Live-verified against the real dev DB and running server**: migrations `061`-`063` applied
+cleanly, all 10 rows backfilled correctly (confirmed via direct query); a throwaway `user`-role
+account (created directly, signed its own JWT, deleted after) hit the real endpoint and got a
+genuine `200` with all 10 example phrasings in the expected order.
+
+**Real, more consequential bug found immediately after, by the user manually testing as a real
+`user-premium` account (2026-10-08)**: asking two of the popover's own example phrasings ("What
+trend does Hammer need?" / "Does Piercing Line require a gap?") returned `503 "No shared
+anthropic API key is configured yet. Contact an admin."` instead of answering - `askQuestion()`'s
+Phase 2 cascade (built 2026-10-05) routed any role holding `candlestick_question_answer:llm_calling`
+straight to the LLM branch and *never* fell back to the deterministic template cascade, even on
+LLM failure. Since no account in this dev environment has ever had a real Anthropic key configured
+(noted as a known gap when Anthropic bring-your-own-key shipped, 2026-09-20), every LLM-enabled
+role got a strictly *worse* outcome than a non-premium role would for the exact same question.
+
+Fixed per explicit user direction (chose "always try templates/cache first, regardless of
+permission" over "only fall back to templates when the LLM branch itself fails") - the cascade is
+reordered so the template cascade runs unconditionally right after the cache check, for every
+role; only a question no template matches falls to the `llm_calling` check and the LLM branch.
+This is a deliberate behavior change accepted by the user: an LLM-enabled role no longer gets the
+richer AI-synthesized answer for a question a template could already answer for free - cheaper and
+more resilient for everyone, at the cost of the premium path being used less often than before.
+1 existing test updated (it had asserted the old "LLM-permitted roles never call matchTemplate"
+behavior) plus 1 new test (a template match answers directly even when `llm_calling` is granted,
+asserting the LLM/key/rate-limit paths are never touched) - 1037 backend tests total, `tsc`/lint
+clean. **Live-verified**: re-ran the user's own exact repro (a throwaway `user-premium` account,
+same two questions) against the real running dev server - both now return a real `200` answered
+from the matching template, zero Anthropic key involvement.
+
+**A third, separate round the same day**: the user then manually tested real variants of
+`mirror_lookup`'s own example phrasing - "What is opposite of Bullish Kicking?" and "What are
+opposite of Bullish Kicking?" neither matched, only the canonical "What is **the** opposite of
+X?" did. First suspected a typo in the user's own retyped question (a "opppsite" misspelling in
+an earlier draft of the report briefly looked like the real cause and was ruled out once the user
+retyped it correctly) - confirmed this was a genuine template-rigidity gap, not a spelling issue.
+Considered and rejected a general "strip common words before matching" preprocessor - risky for a
+regex-based deterministic matcher (e.g. stripping "not" would flip "is Hammer NOT bullish" into a
+false match) - in favor of auditing all 10 templates for the same specific rigidity (a hard-required
+article "the"/"a", or only one accepted verb form) and loosening just the 4 that had it: migration
+`064` (data-only corrective `UPDATE`s, same precedent as migration `060`'s own live regex fix) makes
+`mirror_lookup`'s "the" optional and accepts "are" alongside "'s"/"is"; `bias_lookup` also accepts
+"are"; `gap_requirement_lookup`/`gap_required_list` make the article "a" before "gap" optional. The
+other 6 templates already tolerated this (e.g. `signal_type_list`/`bias_list`'s own
+`(?:are|is)` + `patterns?`).
+
+**A real bug caught in this round's own new tests, not live**: the new mirror_lookup/
+gap_requirement_lookup test fixtures initially omitted the trailing `$` anchor the real migration
+SQL already had - reproducing, inside a unit test, the exact "lazy-capture-with-no-mandatory-text-
+after-it" bug class migration `057`'s own header already warns about (a capture group followed only
+by optional tokens has no reason to expand past the bare minimum, e.g. captured `"H"` instead of
+`"Hammer"`). Fixed by matching the fixtures to the real stored regex exactly.
+
+10 new backend tests (1043 total), `tsc`/lint clean. **Live-verified against the real dev DB and
+running server**: migration `064` applied cleanly; a throwaway `user-premium` account got correct
+`200` answers for all 3 of the user's original phrasings plus 2 more variants exercising the other
+loosened templates ("Does Piercing Line require gap?", "Are Hammer bullish or bearish?").
+
+## Candlestick Pattern Q&A — Admin-Switchable LLM Provider (Anthropic/OpenAI) ✅ Done
+
+Built 2026-10-08, `/plan`-approved after a short research/discussion phase (the user asked three
+follow-on questions about the existing Ask feature's LLM call before committing to a direction:
+which model is actually called, could OpenAI/Anthropic be made switchable, and how is the call
+made at all - revealing it was a hand-rolled loop against the raw `@anthropic-ai/sdk`, no
+framework). The model was already admin-switchable via Config Properties
+(`candlestick_question_answer_llm_model`) with zero code change - what was missing was the
+*provider* itself, since the loop's internals were hardwired to Anthropic's own message/tool-block
+shapes.
+
+**Library choice, explicitly discussed**: considered Pydantic AI (Python-only, not usable from
+this Node/Express backend without a third microservice), LiteLLM (primarily Python; its proxy mode
+is language-agnostic but means standing up and operating a 4th deployed service, and still leaves
+the loop itself hand-written), and LangChain.js (a real TS-native alternative, more
+"industry-standard" by name recognition, heavier/more abstraction) against **Vercel AI SDK**
+(`ai` + `@ai-sdk/anthropic` + `@ai-sdk/openai`) - chosen as the lighter-weight fit whose whole
+purpose is "switch providers by changing the model string." Confirmed before committing: a tool
+declared with no `execute` function naturally ends the AI SDK's multi-step loop, an exact
+behavioral match for this feature's two terminal tools (`provide_answer`/`unable_to_answer`,
+already never "executed" in the old code either, just inspected) - meaning the rewrite could
+preserve the existing 4-tool design exactly, not redesign it. Addressed a real lock-in concern the
+user raised directly: since both AI SDK and LangChain.js use Zod for tool schemas and nothing else
+in the system depends on which one runs the loop, a later migration (if ever needed) would stay
+bounded to the same two files this plan isolates the LLM call into.
+
+**New Config Property** `candlestick_question_answer_llm_provider` (migration `065`, string,
+default `'anthropic'` - zero behavior change on apply), alongside the existing
+`...llm_model` in the same "Candlestick Q&A" group - the user's explicit requirement was that an
+admin configure *both* platform and model, independently, from the existing Config Properties
+admin page; no new UI needed, since `ConfigPropertiesPage.tsx` already renders whatever properties
+exist generically. New `PROVIDER_PROPERTY_KEYS` validation set in `configProperty.service.ts`
+(mirrors the existing `ROLE_LIST_PROPERTY_KEYS` pattern, but a plain set-membership check, no
+second table) rejects anything other than `anthropic`/`openai`. `'openai'` added to
+`userSubscription.controller.ts`'s `ALLOWED_PROVIDERS` and `SubscriptionsPage.tsx`'s `PROVIDERS`
+list - `getDecryptedKey()`/Admin-Master Fallback needed zero changes, already fully
+provider-agnostic.
+
+**The rewrite**: `anthropicClient.service.ts` deleted outright (one caller, no test file, its own
+header comment's stated purpose - "a provider swap later stays contained to this one file" - was
+being exercised now, not preserved), replaced by `llmModel.service.ts`'s
+`getLanguageModel(provider, apiKey, modelId)` (branches `createAnthropic({apiKey})(modelId)` /
+`createOpenAI({apiKey})(modelId)`). `candlestickQuestionAnswerAsk.service.ts`'s hand-rolled `for`
+loop replaced by `generateText`/`tool`/`stepCountIs` - `ask()` gained a `provider` parameter
+(resolved once in the controller, alongside the existing model lookup, and threaded through rather
+than re-read inside the service). `filterTool`'s `NoFilterCriteriaError` now simply `throw`s -
+the AI SDK auto-converts a thrown `execute` error into a recoverable tool-error part fed back to
+the model, removing the old code's manual `is_error: true` tool_result construction outright
+(a real simplification, not just a port). **The deterministic cascade itself - cache hit →
+question-template match → only then, permission-gated, the LLM - was untouched**, double-confirmed
+with the user mid-build after a wording mix-up surfaced a worthwhile question: an LLM-resolved
+answer still gets written into the same `m_candlestick_asked_question` history table via
+`recordAskedQuestion()`, exactly like a template match does, so a repeat of the same question
+becomes a free cache hit regardless of which provider originally answered it.
+
+**A real, build-blocking discovery, not just a test-mocking inconvenience**: the latest `ai`
+major (7.x) ships **ESM-only** (`"type": "module"`, no `require` export condition at all) - this
+backend is `"type": "commonjs"` throughout (`tsconfig.json`'s `"module": "commonjs"`,
+`ts-node-dev --transpile-only`), so `require('ai')` would throw `ERR_REQUIRE_ESM` at real runtime,
+not just in Jest. Confirmed live via a direct `require()` smoke test before concluding this wasn't
+a solvable Jest config tweak. Resolved by pinning to the last dual-CJS/ESM majors instead -
+`ai@6.0.302` + `@ai-sdk/anthropic@3.0.128` + `@ai-sdk/openai@3.0.124` (all three still expose a
+`require` condition pointing at real CommonJS output, re-confirmed with the same direct `require()`
+check) - rather than `ai@7`/`@ai-sdk/*@4` as first installed. Type shapes (`createAnthropic`/
+`createOpenAI` factory signatures, `LanguageModelUsage.inputTokens`/`outputTokens`,
+`stepCountIs`/`tool` exports) were re-verified identical across the version swap before continuing.
+
+**Test strategy, a deliberate design choice**: rather than re-simulate the AI SDK's own internal
+multi-step loop (an implementation detail the SDK itself already owns and tests), the rewritten
+`candlestickQuestionAnswerAsk.service.test.ts` splits into two concerns - mocking `generateText`
+wholesale to test `ask()`'s own outcome-mapping logic (which `AskResult` branch a given mocked
+result maps to, provider/model selection), and testing the two real-logic tools' own `execute()`
+functions directly against their now-exported `searchTool`/`filterTool` objects, decoupled from
+any loop machinery. 9 new backend tests net (1052 total, after accounting for the full test-file
+rewrite), 2 new frontend assertions in an existing `SubscriptionsPage.test.tsx` test (829 total,
+unchanged - a modification, not an addition), `tsc`/lint clean both sides.
+
+**Live-verified against the real dev DB and running server**: migration `065` applied cleanly,
+both Config Properties confirmed present with `candlestick_question_answer_llm_provider` defaulted
+to `'anthropic'`; re-ran the grammar-loosening round's own template-matched questions post-rewrite
+to confirm the deterministic cascade is genuinely unaffected; forced the LLM branch with a
+non-template-matching question and confirmed a graceful `503 "No shared anthropic API key is
+configured yet"` (the plumbing up to the real provider call is intact, even though this dev
+environment has never had a real Anthropic *or* OpenAI key configured - confirmed via direct query,
+zero rows in `users_subscriptions` for either provider); then flipped the Config Property directly
+to `'openai'` and re-ran the same forced-LLM-branch call, confirming the error message changed to
+`"No shared openai API key is configured yet"` - proof the provider switch is read live and
+threaded through end-to-end, not hardcoded - before reverting the property back to its default and
+cleaning up the throwaway account. **Known gap, same class as the original Anthropic-only
+build**: a full live round-trip through either provider's real API cannot be verified in this
+environment without a real key - needs the user to supply one via My API(s) or Admin-Master
+Fallback.
+
+## My API(s) — "Get Allowed Models" ✅ Done
+
+Built 2026-10-08, same day as the provider-switch work above - a direct follow-on question from
+the user ("if I give a key, can we find out which models it has access to?"). Both OpenAI and
+Anthropic expose their own models-list endpoint tied to the key itself, and neither costs tokens
+to call.
+
+New `llmProviderModels.service.ts` - plain `fetch()` calls (no SDK needed for a one-off catalog
+lookup, unlike the generation calls in `llmModel.service.ts`): `GET https://api.openai.com/v1
+/models` with a `Bearer` header, `GET https://api.anthropic.com/v1/models` with `x-api-key`/
+`anthropic-version` headers, both mapped down to a sorted list of model IDs.
+`ProviderModelListError` carries the provider+status through to a clear "rejected by
+OpenAI/Anthropic" message rather than a raw 500. Anthropic's own endpoint paginates
+(`has_more`/`last_id`) - not handled, since the real catalog is small enough to fit one page;
+flagged as an assumption to revisit if that stops being true.
+
+New `POST /subscriptions/:provider/models` (`userSubscription.controller.ts`/`.routes.ts`), gated
+by the same `api_keys:manage_own` permission as the rest of this page - not a separate permission,
+since this is part of managing your own keys. Explicit design choice, confirmed with the user
+before building: tests whatever key is **currently typed/pasted**, not an already-saved one - the
+backend never needs to decrypt a stored key just to let someone check it, and it lets a user
+verify a key before committing Save. `apiKey` travels in the POST body, never a query string, same
+as the existing `upsert()` endpoint. A new `MODEL_LISTING_PROVIDERS` allowlist (`anthropic`/
+`openai` only - FMP/Finnhub are data providers with no model-catalog concept) 400s cleanly for the
+other two.
+
+Frontend: a "Get Allowed Models" button next to Save/Cancel in `SubscriptionsPage.tsx`'s edit
+form, shown only for the Anthropic/OpenAI rows, disabled until a key is typed. Results render
+inline as a sorted, comma-joined list with a count; an invalid key shows the backend's own
+rejection message in the same error style the Save flow already uses. Switching to a different
+provider row (or Cancel) resets the mutation state so a stale result never lingers.
+
+14 new backend tests (1062 total: 8 new direct `llmProviderModels.service.ts` tests plus 6 new
+controller tests), 4 new frontend tests (833 total), `tsc`/lint clean both sides. **Live-verified
+against the real dev server** (as an `admin-master` throwaway account, since `api_keys
+:manage_own` is admin-only by default and the `user-premium` role used for earlier checks doesn't
+hold it): a bogus OpenAI key and a bogus Anthropic key each triggered a **real outbound call to
+that provider's actual API** and came back with a genuine `401` from the provider, correctly
+mapped to a clean `400 "rejected by OpenAI/Anthropic"` - not a network error or a malformed-request
+response, which is itself good evidence the request shape (URL, headers) is correct even without a
+valid key to test the success path; FMP correctly 400'd before attempting any external call;
+missing `apiKey` 400'd cleanly. **Known gap, consistent with the rest of this session's work**:
+the success path (a real key returning a real model list) still needs the user to supply one -
+not verified live.
+
+## "Get Allowed Models" — Saved-Key Support, Readability, Pricing Links ✅ Done
+
+Built 2026-10-08, same day, three direct follow-on questions from the user after trying the
+feature above: (1) is there a challenge checking an *already-saved* key, since the edit field
+always opens empty, (2) can the output be made more readable than one comma-joined line, and
+(3) can costs be clarified for the listed models.
+
+**(1) Saved-key support.** Confirmed yes, a real gap - the masked key display (`••••••••wxyz`)
+is deliberately never the real key, so re-checking a saved key meant retyping it from scratch.
+Fixed with a second, explicit `useSavedKey: true` request flag (never inferred from an empty
+`apiKey`, to avoid an accidental silent fallback) that decrypts the caller's own stored key
+server-side and never returns it - only the resulting model list crosses back to the browser.
+New `userSubscription.service.ts` function `getOwnDecryptedKey(userId, provider)` - deliberately
+**not** `getDecryptedKey()` (which transparently falls back to the Admin-Master Fallback key for
+eligible roles) - a user clicking "check MY saved key" must see results for the key they
+themselves configured, never an admin's key they may not even know exists. New "Check Saved Key"
+button next to "Get Allowed Models", shown only when a subscription already exists for that
+provider.
+
+**(2) Readability.** Replaced the single comma-joined sentence with a bordered result panel: a
+"N models available to this key" header, then a scrollable (`max-h-48 overflow-y-auto`),
+monospace, one-model-per-row list - holds up for providers that return 50+ models (OpenAI's
+catalog includes legacy/fine-tune/embedding/audio/image variants alongside the chat models) far
+better than one long inline sentence did.
+
+**(3) Cost clarification - the real constraint, confirmed before building anything.** Checked
+both providers' actual API responses directly: **neither's models-list endpoint returns pricing
+at all** - OpenAI's only has `id`/`created`/`owned_by`, Anthropic's only has `id`/`display_name`/
+`created_at`. Presented the honest options to the user (link to official pricing pages only;
+naming-heuristic tier labels; a hardcoded $/token table; skip it) and they picked linking out -
+explicitly rejecting a hardcoded price table as a real risk ("will silently go stale... a number
+people might trust"), consistent with this app's own established aversion to presenting guessed
+figures as fact. Added a `PRICING_PAGE_URLS` map (`anthropic.com/pricing`, `platform.openai.com
+/docs/pricing`) rendered as a "View {provider} pricing ↗" link in the result panel's header, plus
+a one-line note that costs aren't in the API response - zero hardcoded dollar figures anywhere
+in this app's own code.
+
+9 new backend tests (1066 total: 2 new `getOwnDecryptedKey` tests, 2 new controller tests for
+the `useSavedKey` path), 3 new frontend tests (836 total: saved-key visibility/behavior, the
+pricing link). **A real test-timing bug caught while adding the new frontend tests, not a
+feature bug**: `findByText('FMP (Financial Modeling Prep)')` resolves on the very first
+synchronous render (the provider list itself never depends on the async subscriptions fetch),
+so a subsequent synchronous `getByText('Update key')` right after it is a real race - fixed by
+using `findByText` there too, in both the new test and (for consistency, since it was relying on
+incidental timing luck rather than a real guarantee) an existing one in the same block.
+
+`tsc`/lint clean both sides. **Live-verified against the real dev server**: saved a real (bogus)
+OpenAI key via the normal upsert endpoint, then called "Check Saved Key" with no `apiKey` in the
+body at all - confirmed the raw key never appears anywhere in the response text, confirmed a real
+outbound call still reached OpenAI's actual API (a genuine `401`, mapped to the same clean `400`
+message as the typed-key path); confirmed `useSavedKey: true` for a provider with nothing saved
+yet 400s with a clear message instead of silently falling back to anything; confirmed FMP still
+rejects `useSavedKey` the same as it rejects a typed key, since it never had a model-catalog
+concept to begin with. Throwaway account cleaned up afterward.
+
+## Candlestick Pattern Q&A — "Resolved Via" Tracking (LLM vs. Template) ✅ Done
+
+Built 2026-10-09, prompted directly by the user asking me to confirm, by hand, whether a
+specific real question they'd just asked ("What is a Piercing line?") had been answered by the
+template cascade or the LLM (it was the LLM - confirmed by reading the stored row directly,
+since none of the 10 templates' regexes match that phrasing). They then asked for this to be
+tracked and surfaced as a real indicator rather than something that needs a manual DB check
+each time.
+
+New nullable `resolved_via` column on `m_candlestick_asked_question` (migration `066`, app-
+validated `'llm' | 'template' | 'none'`, same convention as `question_status` on the same
+table) - `'none'` is the final catch-all (no template matched, caller's role can't use the LLM)
+and can only ever pair with `Unable_To_Answer`, so it can never appear in `listTopQuestions()`'s
+own Answered-only result set. `recordAskedQuestion()` gained a required `resolvedVia` param,
+threaded through from all three controller write sites (`'template'` at the template-match
+branch, `'llm'` at the LLM branch - covering both its Answered and Unable_To_Answer sub-
+outcomes, since the LLM genuinely ran either way - and `'none'` at the final catch-all).
+`findCachedAnswer()`/`listTopQuestions()` both now return it, so a cache-hit replay and Popular
+Questions rows both carry the original resolution origin forward, never recomputed - same
+"first answer wins" philosophy this whole cache already follows for `answerText` itself.
+Deliberately scoped to exactly what was asked - Popular Questions only; the immediate Ask
+answer card doesn't show it, despite the data being available there for free too.
+
+Frontend: a small "LLM" (accent-colored) / "Template" (neutral) badge per Popular Questions row,
+next to the ask-count. No badge at all for `resolvedVia: null` (a row recorded before this
+shipped) - never guessed.
+
+**Per explicit request, the entire existing history was deleted to start fresh** (13 rows,
+none of which had a `resolved_via` value since the column didn't exist yet) rather than left as
+a permanent sea of untagged legacy rows.
+
+10 new backend tests (1067 total), 1 new frontend test (837 total), `tsc`/lint clean both sides.
+**Live-verified against the real dev DB and running server, including the first genuine
+end-to-end LLM round trip this project has ever made** (every earlier verification used a
+bogus or missing key - a real OpenAI key now exists on the `admin-master` account, set up by
+the user earlier the same day): a throwaway `user-premium` account (fallback-eligible, no key
+of its own) asked a template-matched question (`resolvedVia: 'template'`, correct instant
+answer) and a genuinely novel one (`resolvedVia: 'llm'`, a real billed OpenAI call) back to
+back; `GET /top-questions` correctly surfaced `resolvedVia` on the template row and correctly
+omitted the LLM row entirely, since it resolved `Unable_To_Answer` (the model read "why do
+traders care about candlestick wicks" as not about a *specific named pattern* and correctly
+called `unable_to_answer` rather than guessing - real, reasonable model behavior, not a bug in
+this feature or the AI SDK integration). Throwaway account and both verification rows cleaned
+up afterward, leaving the history table genuinely empty as requested.
+
+## Question Templates — "What is X?" + 3 More (Round 3) ✅ Done
+
+Built 2026-10-10, prompted directly by the user noticing a real, basic gap: there was no
+template at all for the single most natural phrasing in this whole feature, "What is
+`<pattern>`?" - the existing `pattern_description` template only matched "what does X mean" /
+"describe X" / "tell me about X".
+
+**Migration `068`**: `pattern_description`'s own regex grows a 4th branch for "what is X" /
+"what's X" / "what is a/an/the X" - deliberately requiring `'s`/(whitespace+)`is` immediately
+after "what" (only whitespace in between) so it can never swallow a different template's own
+shape that merely starts with "what" followed by other words first (e.g. "what signal type is
+X", "what trend does X need") - both have a higher id than `pattern_description` and are tried
+after it, confirmed both live and in a new describe block exercising this exact collision guard.
+Its `answer_template` also got considerably richer - previously a single terse sentence
+(complexity/signal/bias only), now also states trend context, gap requirement, and the mirror
+pattern, using placeholders that already existed in `buildPlaceholders()` - zero backend code
+change needed. `example_phrasing` updated to "What is Hammer?" so the "(i)" info popover leads
+with it.
+
+**3 new templates**: `complexity_tier_lookup` ("What complexity is Hammer?" / "How many candles
+does Hammer need?"), `trend_uptrend_list` / `trend_downtrend_list` ("Which patterns need a prior
+uptrend/downtrend?", fixedFilters on `trendContext`). **Deliberately NOT added**: a
+complexity-tier list template (e.g. "which patterns are simple patterns?") - `complexityTier` is
+matched by exact equality against the DB's capitalized enum values (`'Simple'`/etc.), but a
+regex capture preserves the user's own original casing (typically lowercase) - an exact-match
+filter against that would silently return zero rows every time; fixing it would need either 4
+near-duplicate fixedFilters templates or a case-normalization step `matchTemplate()` doesn't have
+today, so skipped rather than shipping something that looks like it works but never does.
+
+12 new backend tests (1081 total, all in `candlestickQuestionTemplate.service.test.ts`, mirroring
+the existing per-regex test style - including the two collision-guard tests above), `tsc`/lint
+clean. **Live-verified against the real dev DB and running server** with a throwaway `user`-role
+account (holds `:ask` but not `:llm_calling`, same real-world shape as every prior template-only
+verification round): all 4 new/changed phrasings resolved correctly and instantly
+(`resolvedVia: "template"`, zero LLM/key dependency) - "What is Hammer?" returned the full richer
+multi-fact description, "What's a Doji?" handled a pattern with no mirror gracefully ("Its mirror
+pattern is none."), "What is the Morning Star?" confirmed the article+multi-word-name path, "How
+many candles does Hammer need?" and both uptrend/downtrend list templates returned correct real
+pattern lists; "What signal type is Hammer?" confirmed it still correctly routes to
+`signal_type_lookup`, not the broadened `pattern_description` - the collision guard holds live,
+not just in the unit tests. Throwaway account and the 7 verification rows it created were cleaned
+up by exact id afterward, leaving the real history (including a genuine question the user had
+asked between rounds) untouched.
+
+## Candlestick Pattern Q&A — "Delete Historical Questions" ✅ Done
+
+Built 2026-10-10, per explicit direction - a new Function/permission plus a UI control so a
+role can delete individual rows from the Popular Questions history
+(`m_candlestick_asked_question`) directly from the page, rather than needing direct DB access.
+
+**Migration `069`**: `candlestick_question_answer:delete_history`, set up as a **child of the
+existing `candlestick_question_answer:ask` permission** via the generic `PERMISSION_REQUIRES`
+mechanism (`roles.service.ts`, same precedent as `:llm_calling`→`:ask`) - Popular Questions only
+exists for a role that already holds `:ask`. Zero default grants, same "Admin or Admin-Master
+can grant it to any role via the normal Manage Permission screen" precedent as
+`contrarian_finder:view_history`/`usage_audit:view` - not added to `ADMIN_MASTER_ONLY_PERMISSIONS`.
+
+**Backend**: `TopQuestion` gained an `id` field (it didn't carry one at all before this -
+`listTopQuestions()`'s SQL now selects it) - needed so a delete request can target the exact row
+rather than relying on `questionText`, which isn't guaranteed unique across horizons. New
+`deleteAskedQuestion(id)` in `candlestickAskedQuestion.service.ts` (a plain `DELETE ... WHERE id
+= $1`, returning whether a row was actually removed) and `DELETE /candlestick-question-answer
+/top-questions/:id`, gated by the new permission, 404s on an unknown id.
+
+**Frontend**: `RolePermissionsPage.tsx`'s display-only `PERMISSION_PARENT` map gained the pair
+(renders indented under "Ask Candlestick Pattern Questions" in Manage Permission). A small 🗑
+icon on each Popular Questions row, rendered only when `session.permissions` includes the new
+permission - clicking it opens a per-row inline "Confirm/Cancel" state (same two-step idiom
+`FlexResolutionBanner.tsx`'s own Delete Portfolio control already uses, not a native
+`window.confirm`), and a failed delete shows an inline error without removing the row.
+
+12 new backend tests (1086 total), 6 new frontend tests (845 total), `tsc`/lint clean both sides.
+**Live-verified against the real dev DB and running server** with a throwaway role (deliberately
+NOT the shared `user` role, to avoid granting delete access to every real account on it) holding
+`:ask` but not yet `:delete_history`: confirmed `403` on the delete route beforehand; granted the
+new permission directly (DB-level equivalent of the Admin Console's own grant action); asked a
+real template-matched question to create a genuine row, then deleted it by its real id and
+confirmed via a follow-up `GET /top-questions` that it was gone while every other real row
+(including ones from the previous round's verification) stayed untouched; confirmed a realistic-
+but-unknown id cleanly `404`s. Throwaway role/user cleaned up afterward.
+
+## Candlestick Pattern Metadata Lookups — Typo-Tolerant Pattern-Name Matching ✅ Done
+
+Built 2026-10-10, prompted by a direct question about two near-duplicate questions ("Can Tasuke
+Gap..." vs "Can Tasuki Gap...") not being treated as the same. Investigated both places that
+could plausibly address this - the history/cache lookup (`findCachedAnswer()`, keyed on exact
+normalized free text) and the question-template/LLM-tool pattern-name lookup
+(`filterPatternsByMetadata()`'s `patternNameOrSynonym` filter, today an exact `ILIKE` substring
+match) - and scoped this to the latter only, per explicit direction, since fuzzy-matching
+open-ended free text (the cache) risks silently merging two genuinely different questions, while
+pattern names are a small, closed, known vocabulary (~34 names + synonyms) where that risk is
+far more boundable.
+
+**A real, measured finding changed the design mid-build**: the originally-described approach
+(Postgres/CockroachDB's `pg_trgm` `similarity()`, a blended whole-string score) was tested live
+against this app's own real pattern names *before* writing any code, and proved unsafe for this
+specific vocabulary - several genuinely different patterns that merely share most of a
+multi-word name scored *higher* than real typos: "Three Inside Up" vs "Three Outside Up" scored
+0.57 and "Upside Tasuki Gap" vs "Downside Tasuki Gap" scored 0.58, both above the 0.25 a real
+typo ("Dogi" vs "Doji") scored. No single threshold separates "same pattern, typo'd" from "a
+different, mirror-opposite pattern" when so many of this app's own pattern names differ only in
+one directional word (Bullish/Bearish, Upside/Downside, Inside/Outside, Morning/Evening,
+Rising/Falling) - the shared words dominate a blended score, drowning out the one word that
+actually carries the meaning. Verified instead that **character-level edit distance, applied
+per-word rather than to the whole string**, cleanly separates the two: every real typo tested
+landed at a 1-2 character edit distance on its own word, every genuine distinguishing-word pair
+tested landed at 3-4 - a real, measured gap, not an assumed one.
+
+**Implementation** (`candlestickQuestionAnswer.service.ts`): `filterPatternsByMetadata()` now
+tries the existing exact/`ILIKE` substring check first, unchanged - only on a genuine miss (for
+a given pattern name) does it fall back to `fuzzyMatchPatternsByName()`, which re-queries
+candidates matching every *other* given filter (ignoring the name), then filters them in
+application code via `isFuzzyWordMatch()`: the query and candidate must have the **same word
+count**, each word either identical or within a length-scaled Levenshtein distance (≤1 for
+words of 5 characters or fewer, ≤2 for longer words - short words need a tighter tolerance to
+avoid false positives). Plain in-memory Levenshtein (`levenshteinDistance()`), not a DB call -
+confirmed CockroachDB does have a built-in `levenshtein()`, but the candidate set is always tiny
+(~34 patterns' names + synonyms), so there's no reason to round-trip to the database for it.
+**Deliberately doesn't try to resolve a shortened/partial name** (e.g. bare "Tasuki Gap" for
+"Upside Tasuki Gap") - the equal-word-count requirement leaves that as the same pre-existing
+ambiguity a correctly-spelled partial name already has today (ILIKE substring-matches both
+Upside and Downside Tasuki Gap, correctly treated as ambiguous) - not a new gap this needed to
+close. Shared by both the question-template cascade and the LLM's own
+`filter_patterns_by_metadata` tool, since both call this one function - fixing it here fixes the
+typo problem for every role, not just LLM-enabled ones.
+
+8 new backend tests (1093 total, covering: the fallback never runs when the exact check already
+found rows or when no name was given at all; a one-letter typo in a multi-word name resolves
+correctly; the fallback query applies only the other filters and selects `synonyms`; a typo in a
+*synonym* also resolves; a genuinely different mirror-pattern does NOT fuzzy-match; a
+word-count-mismatched partial name is left unresolved), `tsc`/lint clean. **Live-verified against
+the real dev DB and running server** with a throwaway role (holding `:ask` only, exercising the
+template cascade, not the LLM path - the `patternNameOrSynonym` fix benefits both, but only the
+template path could be verified without a real LLM key): "What is Upside Tasuke Gap?" correctly
+resolved to "Upside Tasuki Gap"; "What is Hamer?" → "Hammer"; "Is Dogi bullish or bearish?" →
+"Doji is neutral."; the dangerous mirror-pair case specifically - "What is Downside Tasuke
+Gap?" - correctly resolved to **Downside** (bearish), never crossing over to Upside; "Is Three
+Inside Up bullish or bearish?" (exact, pre-existing) still answered correctly, confirming zero
+regression; a nonsense name ("Zzzzqqqq Pattern") correctly stayed `unable_to_answer`; the
+un-typo'd bare "Tasuki Gap" partial name correctly remained ambiguous/unresolved, same as before
+this change. Throwaway role/account and all 7 verification cache rows cleaned up afterward by
+exact id, leaving every other real history row (including rows from earlier the same day)
+untouched.
+
+**Explicitly not built, per the user's own scoping decision**: fuzzy matching for the history
+cache (`findCachedAnswer()`) or for free-text questions generally - open-ended text doesn't have
+a small, closed vocabulary to bound the risk the way pattern names do.
+
+## Candlestick Asked-Question Cache — Horizon Dropped From the Matching Key ✅ Done
+
+Built 2026-10-10, closing a real bug the user found live within minutes of the above: re-asking
+"Can Tasuke Gap be used i conjunction with other patterns?" - byte-for-byte identical to an
+already-cached question from the day before - got a fresh `unable_to_answer` from a brand-new
+LLM call instead of replaying the cached result. Root-caused by direct query, not assumed: the
+cache's uniqueness/lookup key was still `(normalized_question_text, horizon)`, and the Ask
+form's own default horizon had been changed from "Day Trading" to "All" a few turns earlier the
+same day (per explicit direction) - so the exact same question, asked after that change, hashed
+to a genuinely different cache key than before and was treated as a brand-new question.
+
+Confirmed this was no longer defensible given horizon stopped being exclusionary anywhere in
+this feature back on 2026-10-08 ("Candlestick Tutorial - Horizon Becomes Informational") - the
+underlying answer to a question no longer actually depends on which horizon was selected, so
+keying the cache on it was actively harmful, not just redundant.
+
+**Migration `070`**: drops the unique index on `(normalized_question_text, horizon)`, replaces
+it with one on `normalized_question_text` alone. `horizon` stays as a column (still recorded at
+write time), it just no longer participates in the uniqueness/lookup key. **A real, pre-existing
+duplicate already existed in the live dev DB** - exactly the pair from the bug report, one row
+per horizon - so the migration leads with a data-cleanup step before the new index can even be
+created: for each group of rows sharing a `normalized_question_text`, keeps one survivor
+(preferring a real `'Answered'` row over `'Unable_To_Answer'`, then the most recently asked),
+sums the group's `question_asked_count` onto it, deletes the rest - a complete no-op for any
+environment with no such duplicates. Confirmed live before running it for real: a dry-run
+`SELECT` against the actual duplicate pair picked the expected survivor (the more recently
+asked of the two, both `Unable_To_Answer` so tied on status) before the real migration ran.
+
+**One real subtlety, handled explicitly rather than ignored**: `matched_pattern_names`'s
+green/red relevance badges are computed once, at write time, for whichever horizon the
+*original* asker happened to use - no longer safe to blindly replay once horizon stopped being
+part of the cache key, since a hit can now legitimately come from a request under a *different*
+horizon than that. `findCachedAnswer()` (`candlestickAskedQuestion.service.ts`) drops `horizon`
+from its `WHERE` clause and `recordAskedQuestion()`'s `ON CONFLICT` target drops to just
+`(normalized_question_text)`, but `CachedAnswer` gains the row's own stored `horizon` so the
+controller (`askQuestion()`) can compare it against the current request: same horizon → reuse
+the stored badges as-is, zero extra query (the common case, since most repeat-askers use their
+usual horizon); different horizon → recompute the badges fresh via the already-existing
+`enrichMatchedPatterns()` helper (one cheap, bounded query). Popular Questions
+(`listTopQuestions()`) doesn't go through `findCachedAnswer()` at all, so it needed zero changes
+- this is scoped entirely to the Ask flow's own cache lookup.
+
+2 new backend tests (1094 total, both in `candlestickQuestionAnswer.controller.test.ts`: a
+same-horizon hit skips re-enrichment entirely, a different-horizon hit recomputes the badges
+fresh and confirms it's still a genuine cache hit, not a fresh write), several existing
+`candlestickAskedQuestion.service.test.ts` tests updated for the one-argument `findCachedAnswer`
+signature, `tsc`/lint clean. **Live-verified against the real dev DB and running server**:
+migration `070` applied cleanly (the pre-existing duplicate pair merged into one row,
+`question_asked_count` correctly summed 1+1→2, zero duplicates remained, confirmed via direct
+query); a throwaway `user`-role account (template-cascade only, no LLM dependency) asked "Is
+Hammer bullish or bearish?" under `dayTrading` (fresh write, badge `true` - Hammer is
+day-trading-relevant) → the identical text under `longTerm` (a genuine cache hit - `resolvedVia`
+still `'template'`, no fresh LLM/template work - with the badge correctly recomputed to `false`,
+since Hammer isn't long-term-relevant) → the identical text under `dayTrading` again (hit, badge
+back to `true`, reusing the original stored value) - confirmed via direct query this whole
+sequence left exactly **one** row (not three), `question_asked_count` correctly at 3, and the
+row's own persisted `matched_pattern_names` untouched at its original `dayTrading`/`true` value
+(the `longTerm` re-enrichment only ever affected that one live response, never the stored row).
+Throwaway account and the test row cleaned up afterward.
+
+## Candlestick Asked-Question Cache — A Later Success Now Upgrades a Frozen Failure ✅ Done
+
+Built 2026-10-10, closing a real bug the user found live right after switching this feature's
+configured model from `gpt-4o-mini` to `gpt-4o` to test whether a stronger model would do better
+on the kind of interpretive question that kept failing: a retry of an already-cached
+`Unable_To_Answer` question *did* get a real, correct answer from the stronger model this time
+(confirmed live, answer shown to the user) - but the stored cache row never changed at all,
+staying frozen at `Unable_To_Answer`/`null` forever, with only `question_asked_count` creeping
+up (confirmed via direct query: 3 → 6 across repeated retries, `answer_text` still `null`
+throughout). Root cause: `recordAskedQuestion()`'s `ON CONFLICT (normalized_question_text) DO
+UPDATE` only ever touched `question_asked_count`/`last_asked_at` - a later attempt's genuinely
+better outcome was silently discarded on write, every single time, even though
+`findCachedAnswer()` already retries a fresh resolution on every ask of an `Unable_To_Answer`
+row (deliberately, per the Section 14 design) specifically to give it another chance to succeed.
+The retry logic was working; the write-back of a win just wasn't.
+
+**Fix, scoped narrowly to this exact gap** (`candlestickAskedQuestion.service.ts`'s
+`recordAskedQuestion()`): the `ON CONFLICT` clause's `DO UPDATE` now also upgrades
+`question_text`/`horizon`/`answer_text`/`matched_pattern_names`/`question_status`/`resolved_via`
+/`from_general_knowledge` in place, but **only** when the existing row isn't already `'Answered'`
+and the new attempt is - via a `CASE WHEN m_candlestick_asked_question.question_status !=
+'Answered' AND EXCLUDED.question_status = 'Answered' THEN EXCLUDED.<col> ELSE
+m_candlestick_asked_question.<col> END` per upgradeable column, reusing the same guard condition
+across all seven. `question_asked_count`/`last_asked_at` stay unconditional, exactly as before -
+every conflict still bumps them regardless of whether an upgrade happens. If the existing row is
+already `'Answered'`, the guard is false and nothing but the counter/timestamp changes -
+preserving "first SUCCESSFUL answer wins," including the rare genuine race between two
+concurrent first-asks (the loser must never clobber the winner's already-stored answer with a
+possibly different one of its own). Explicitly NOT addressed by this fix, and not conflated with
+it: recognizing two *differently-worded* questions (e.g. a typo'd "Tasuke" vs the correctly-
+spelled "Tasuki") as "the same question" - that's a separate, bigger idea (LLM-judged semantic
+synonym detection) raised in the same conversation and deliberately deferred, not folded into
+this narrower exact-text-repeat fix.
+
+1 new backend test (1095 total, asserting the generated SQL's upgrade-guard `CASE` structure
+appears for every one of the seven upgradeable columns, with `question_asked_count`/
+`last_asked_at` confirmed unconditional), `tsc`/lint clean. **Live-verified against the real dev
+DB and running server** with a deliberately deterministic repro (LLM success/failure isn't
+reliably reproducible on demand, so this avoided depending on it): deactivated the
+`complexity_tier_lookup` template, asked "What complexity is Doji?" with a throwaway `user`-role
+account (template-cascade only) → correctly `Unable_To_Answer`, frozen row created; reactivated
+the template and asked the *identical* text again → this time the template matched → confirmed
+via direct query the row was genuinely upgraded in place (`question_status: 'Answered'`,
+`answer_text: 'Doji is a Simple pattern.'`, `resolved_via: 'template'`, same row id,
+`question_asked_count` correctly at 2 - not a second row); a third ask of the same text
+confirmed it now behaves as a normal fast cache hit going forward (count → 3, no re-resolution).
+Throwaway account and the test row cleaned up afterward. The real motivating row (the "Tasuke
+Gap... i conjunction" question, frozen since 2026-10-09) was deliberately left untouched for the
+user to naturally re-trigger themselves under the now-configured `gpt-4o`, rather than
+force-upgrading real user data as part of this verification.
+
 ## Next Up
 
-- **Question Templates "(i)" info popover — deferred 2026-10-08, not yet built.** Per explicit
-  direction while scoping the 7-new-templates round above: an info icon next to the Ask form's
-  "Question" label, showing a pop-up of the currently-recognized question shapes (the growing
-  `m_question_template` list), so a user on a role without `llm_calling` has some discoverability
-  into what the deterministic cascade can actually answer instead of guessing phrasings. Explicitly
-  scoped out of that round to land the template additions first.
 - **E2E suite's signup step was out of date with the real Self-Registration form — identified
   2026-10-08, fixed same day.** `e2e/steps/auth.steps.ts`'s signup step only filled
   `signup-email`/`signup-password`, but the real `SignupPage.tsx` (see "Self-Registration,

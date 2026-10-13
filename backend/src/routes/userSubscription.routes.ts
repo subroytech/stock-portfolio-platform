@@ -11,5 +11,8 @@ const router = express.Router();
 router.get('/', requirePermission('api_keys:manage_own'), userSubscriptionController.list);
 router.put('/:provider', requirePermission('api_keys:manage_own'), userSubscriptionController.upsert);
 router.delete('/:provider', requirePermission('api_keys:manage_own'), userSubscriptionController.remove);
+// "Get Allowed Models" (2026-10-08) - same permission gate, since it's part of managing your
+// own keys, not a separate function.
+router.post('/:provider/models', requirePermission('api_keys:manage_own'), userSubscriptionController.listModels);
 
 export default router;
