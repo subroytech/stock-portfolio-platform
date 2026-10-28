@@ -224,7 +224,7 @@ GitHub's servers (`.github/workflows/ci.yml`), each mirroring one piece above:
 | `backend` | Type-checks, lints, and runs all Jest tests |
 | `frontend` | Type-checks, lints, and runs all Vitest tests |
 | `analysis-service` | Installs via Poetry and runs all pytest tests |
-| `e2e` | Runs the Playwright/Cucumber browser tests against the dedicated test database (currently marked non-blocking — it can fail without blocking a merge, until it's proven stable over more runs) |
+| `e2e` | Runs the Playwright/Cucumber browser tests against the dedicated test database (a hard gate since 2026-10-08 — ran non-blocking from 2026-07-21 until then, while it proved itself stable) |
 
 If the `backend`, `frontend`, or `analysis-service` job fails, that's a hard stop —
 something is actually broken. CI uses safe, throwaway dummy values for `JWT_SECRET`/

@@ -864,7 +864,8 @@ that's designed.
 
 ### `m_candlestick_pattern` / `m_candlestick_question_answer_entry` / `user_evt_candlestick_question_answer_log`
 Added by migration `047`, 2026-09-20 through 2026-10-03 (Candlestick Pattern Q&A), with schema
-refinements in migrations `048`–`051`/`053`–`055`. A curated candlestick-*pattern* knowledge base
+refinements in migrations `048`–`051`/`053`–`055`, and the deterministic-first cascade tables
+below added by migrations `056`–`070` (2026-10-04 through 10-12). A curated candlestick-*pattern* knowledge base
 (Doji/Hammer/Engulfing/etc.), distinct from the indicator-relevance content behind the earlier
 Candlestick Quick Reference feature. Two ways to get an answer: browse an already-curated
 question (instant, direct DB read) or ask a free-text question, answered by an LLM via
@@ -902,13 +903,18 @@ pair in this feature is deliberately split across two migration files.
 | `mirror_pattern_id` | `INT8` | added by migration `054`; self-referencing FK → `m_candlestick_pattern(id)`, `ON DELETE SET NULL`, nullable. Links true directional-opposite pairs only (Bullish Engulfing ↔ Bearish Engulfing, Hammer ↔ Shooting Star) — deliberately **not** used for same-shape-different-context pairs like Hammer/Hanging Man, which share identical geometry but aren't mirrors of each other |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
 
-Migration `054`'s six columns back a planned `filter_patterns_by_metadata` tool (Phase 1 of a
-ReAct-style upgrade to the Ask path below) — deterministic, structured lookups like "which
+Migration `054`'s six columns back `filter_patterns_by_metadata` (built 2026-10-04/05, Phase 1 of
+a ReAct-style upgrade to the Ask path below) — deterministic, structured lookups like "which
 patterns are bullish continuation signals" or "what's the mirror of Tweezer Bottom," answered
-without any LLM call. Backfilled for all 34 existing patterns by migration `055`, grouped by
-identical value-tuples to keep that file auditable (e.g. every bullish, no-gap, prior-downtrend
-reversal pattern shares one `UPDATE ... WHERE pattern_name IN (...)` statement) rather than 34
-near-duplicate rows. Not yet consumed by any backend code — the tool itself is still to be built.
+without any LLM call, shared by both the LLM's own tool-calling loop and the question-template
+cascade below. Backfilled for all 34 existing patterns by migration `055`, grouped by identical
+value-tuples to keep that file auditable (e.g. every bullish, no-gap, prior-downtrend reversal
+pattern shares one `UPDATE ... WHERE pattern_name IN (...)` statement) rather than 34
+near-duplicate rows. Name/synonym lookups against this table fall back to word-by-word
+Levenshtein matching on an exact-match miss (2026-10-10), after a whole-string `pg_trgm`
+similarity approach was tested live and found unsafe for this vocabulary — several genuinely
+*different* same-shaped pattern names (e.g. "Three Inside Up" vs. "Three Outside Up") scored
+higher than real typos.
 
 **`m_candlestick_question_answer_entry`** — one or more Q&A entries per pattern. `category`
 (added by migration `048`, app-validated, no `CHECK`) is a fixed, difficulty-ordered sequence —
@@ -942,29 +948,95 @@ category_status` (composite, added by migration `048` replacing the original hor
 index once `horizon` was dropped from this table — backs both the curated picker's browse/search
 and the LLM's own `search_question_answer_entries` tool call).
 
-**`user_evt_candlestick_question_answer_log`** — one row per free-text question asked (the
-curated-picker/Browse path is a cheap read and is never logged here). Every row represents
-exactly one real, billed Anthropic call — even an `'unable_to_answer'` outcome still invoked the
-LLM — which is what backs `candlestickQuestionAnswerRateLimit.service.ts`'s per-user rate limit
-(counting rows is correct here, unlike `fmpRateLimit.service.ts`'s reuse of `user_evt_usage`,
-where one row can represent many real FMP calls). Deliberately **no TTL** set, unlike most other
-`user_evt_` tables — kept indefinitely so a future admin gap-analysis feature can mine older
-`'unable_to_answer'` rows for real content gaps, a deliberate exception to this prefix's usual
-auto-expiring convention.
+**`user_evt_candlestick_question_answer_log`** — **slimmed down by migration `059`, 2026-10-05**,
+once `m_candlestick_asked_question` (below) took over gap-analysis/content duties. Every column
+except `id`/`user_id`/`created_at` was dropped — this table's only remaining job is backing
+`candlestickQuestionAnswerRateLimit.service.ts`'s rolling-window rate limit
+(`COUNT(*) WHERE user_id = $1 AND created_at > now() - window`), which only ever touched those two
+columns. Gained this repo's **first** `ALTER TABLE ... SET (ttl_expire_after = ...)` — every
+earlier TTL elsewhere was set at `CREATE TABLE` time — set to `'1 day'`, far longer than any
+reasonable rate-limit window while still bounding the table's size. **A real behavior change**:
+only the LLM-calling branch of the resolution cascade below writes a row here now — a cache hit
+or a template match costs nothing real and must never consume rate-limit budget, unlike before
+this phase, when every ask (including `unable_to_answer`) always called the LLM and always wrote
+a row.
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `SERIAL` | PK |
 | `user_id` | `INTEGER` | FK → `users(id)`, `ON DELETE CASCADE` |
-| `question_text` | `TEXT` | |
-| `horizon` | `VARCHAR(20)` | the horizon the **asker** picked for this question — unrelated to the pattern-level horizon columns above |
-| `tier` | `INT2` | nullable |
-| `outcome` | `VARCHAR(30)` | `'answered_from_kb'` \| `'unable_to_answer'` |
-| `matched_entry_id` | `INT8` | FK → `m_candlestick_question_answer_entry(id)`, `ON DELETE SET NULL` |
-| `llm_call_details` | `JSONB` | nullable |
-| `created_at` | `TIMESTAMPTZ` | default `now()`, no TTL — see above |
+| `created_at` | `TIMESTAMPTZ` | default `now()`; `ttl_expire_after = '1 day'` — see above |
 
 Indexes: `idx_candlestick_qa_log_user_created` (composite on `(user_id, created_at DESC)`).
+
+### `m_candlestick_asked_question` / `m_question_template` — deterministic-first Ask cascade
+Added by migrations `056`–`070`, 2026-10-04 through 10-12, closing out this Section's "not yet
+consumed by any backend code" note above and, per direct follow-on request, making the LLM the
+*last* resort in the Ask path rather than the only option. Three layers now resolve a question,
+cheapest first: a cache hit on the table below, then a regex question-template match, and only
+then (permission-gated) the LLM loop described above. See `02-Functional-Code-Workflow.md`
+§2.7e for the full cascade walk-through.
+
+**`m_candlestick_asked_question`** — one row per distinct question ever resolved via Ask,
+doubling as both the answer-reuse cache (a repeat ask is served from here, never regenerated)
+and the source for the "Popular Questions" list. Originally unique on `(normalized_question_text,
+horizon)`; migration `070` (2026-10-10) dropped `horizon` from that key entirely once horizon
+stopped being exclusionary anywhere in this feature (see `m_candlestick_pattern`'s horizon
+columns below are unaffected — this is about which *cached answer* gets served, not pattern
+relevance) — `horizon` stays as a plain recorded column, just outside the uniqueness constraint.
+`question_status` is `'Answered'` (eligible for Popular Questions) or `'Unable_To_Answer'`
+(admin gap-analysis only). A migration-`070` data-cleanup step merged one real pre-existing
+duplicate pair found live in the dev DB before the new index could be created.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `SERIAL` | PK |
+| `question_text` | `TEXT` | original, as-typed wording, for display/audit |
+| `normalized_question_text` | `TEXT` | lowercase/trimmed/trailing-punctuation-stripped (`normalizeQuestionText()`) — deliberately simple, not real semantic clustering; what the uniqueness constraint and all lookups actually key on |
+| `horizon` | `VARCHAR(20)` | the horizon recorded at write time — no longer part of the uniqueness key (migration `070`) |
+| `answer_text` | `TEXT` | nullable |
+| `matched_pattern_names` | `JSONB` | nullable; each entry `{ patternName, relevantForHorizon }` — the relevance badges are computed once, at write time, for whichever horizon the row was written under, and only re-enriched on read if a cache hit's request horizon differs |
+| `question_status` | `VARCHAR(20)` | `'Answered'` \| `'Unable_To_Answer'`, app-validated |
+| `resolved_via` | `VARCHAR(20)` | added by migration `066`, nullable; `'llm'` \| `'template'` \| `'none'` — which cascade layer produced this answer, surfaced as an "LLM"/"Template" badge on Popular Questions; `'none'` can only pair with `'Unable_To_Answer'` |
+| `from_general_knowledge` | `BOOLEAN` | added by migration `067`, `NOT NULL DEFAULT false`; `true` only when the LLM itself answered from its own general knowledge rather than curated content (see `candlestickQuestionAnswerAsk.service.ts`'s loosened scope, 2026-10-09) |
+| `question_asked_count` | `INT8` | default `1`, incremented on every repeat; a migration-`070` conflict-upgrade guard (see `recordAskedQuestion()`) also lets a later *successful* attempt overwrite an existing row's `answer_text`/`question_status`/etc. in place, but only when the existing row isn't already `'Answered'` — "first successful answer wins," not "first answer, period" |
+| `last_asked_at` | `TIMESTAMPTZ` | default `now()` |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+
+Indexes: `idx_candlestick_asked_question_normalized` (unique, on `normalized_question_text` alone
+as of migration `070`; originally `(normalized_question_text, horizon)`);
+`idx_candlestick_asked_question_status_count` (composite, backs the Popular Questions query —
+`WHERE question_status = 'Answered' ORDER BY question_asked_count DESC`).
+
+**`m_question_template`** — a small, hand-curated library of recognized question *shapes* (not a
+general free-text parser), the cascade's second, LLM-free layer — available to every role
+holding `candlestick_question_answer:ask`, regardless of LLM access. `filter_mapping` is a small
+declarative DSL (`fixedFilters`/`groupFilters`, mapping a fixed value or a regex capture-group
+index onto one of `filterPatternsByMetadata()`'s existing filter fields) rather than executable
+code, so new templates can be added via the Admin Console without a deploy. 10 templates exist as
+of migration `068`. **A recurring bug class, caught twice (migrations `057` and `060`) by reading
+the applied SQL, not by any test**: a lazy `(.+?)` capture group with nothing mandatory after it
+has no reason to expand past the bare minimum — every `regex_pattern` here is deliberately
+anchored with a trailing `$`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `SERIAL` | PK |
+| `template_key` | `VARCHAR(50)` | unique |
+| `regex_pattern` | `TEXT` | matched case-insensitively against the raw question text; stored without delimiters/flags |
+| `response_mode` | `VARCHAR(10)` | `'single'` (expects exactly one matching pattern) \| `'list'` (expects zero-or-more), app-validated |
+| `filter_mapping` | `JSONB` | `{ fixedFilters, groupFilters }` — see above |
+| `answer_template` | `TEXT` | a string with `{placeholder}` tokens filled from the matched pattern(s)' own fields |
+| `example_phrasing` | `TEXT` | added by migration `061`, `NOT NULL` as of `063`; a real example question that matches this template's own `regex_pattern` — purely descriptive/display-only, backs the Ask form's "(i)" info popover |
+| `status` | `VARCHAR(20)` | default `'active'`; `'active'` \| `'inactive'`, app-validated |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
+
+**Two new permissions on the existing RBAC tables** (not new tables — rows in
+`m_function_master`/`m_role_permissions`): `candlestick_question_answer:llm_calling` (migration
+`058`, a `PERMISSION_REQUIRES` child of `:ask` — granted to every role that already held `:ask`
+at rollout so nobody downgraded) gates the LLM layer specifically; `candlestick_question_answer
+:delete_history` (migration `069`, also a child of `:ask`, zero default grants) gates deleting a
+row from Popular Questions.
 
 ## CockroachDB-specific notes
 

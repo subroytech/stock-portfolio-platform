@@ -50,7 +50,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 10-08)
+# Current Build State (as of 10-12)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place

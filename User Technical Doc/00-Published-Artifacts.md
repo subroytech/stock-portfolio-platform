@@ -23,8 +23,13 @@ matching Artifact (redeploying reuses the same link above; it never creates a ne
 API Call Ledger has no single source file, so it needs a manual re-synthesis from the current
 code any time the underlying FMP/Finnhub call logic changes meaningfully.
 
-*Published 2026-08-15. API Call Ledger added 2026-09-07. All 5 refreshed 2026-09-12, and again
+*Published 2026-08-15. API Call Ledger added 2026-09-07. All 5 refreshed 2026-09-12, again
 2026-10-04 (Platform Field Guide + Access & Roles Reference refreshed 2026-10-03 for Candlestick
 Pattern Q&A coverage; Database Atlas, Rebuild Roadmap, and API Call Ledger refreshed 2026-10-04 —
 the latter two required first backfilling real gaps in their own source docs, `Architecture.md`
-and `backend/src/db/SCHEMA.md`, which hadn't been updated for several rounds of shipped work).*
+and `backend/src/db/SCHEMA.md`, which hadn't been updated for several rounds of shipped work),
+and again 2026-10-25 (closing a 5-commit gap in `Architecture.md`/`User Manual.md`/this folder
+that had accumulated 2026-10-07 through 10-12 — Candlestick Q&A's deterministic-first answer
+cascade, question templates, and admin-switchable LLM provider. The API Call Ledger's own content
+was reconfirmed, not changed — that work touched only Anthropic/OpenAI costs, outside its
+FMP/Finnhub-only scope).*

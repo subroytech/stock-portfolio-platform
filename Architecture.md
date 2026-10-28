@@ -1,6 +1,6 @@
 ## Rebuild Plan — From Single-User Client-Side App to a Scalable Multi-User Platform
 
-**Last updated:** 2026-08-31
+**Last updated:** 2026-10-12
 
 **Why this section exists:** the user identified the single biggest shortcoming of the current app: it's a 100% client-side, single-user project (no backend, no database, no auth — `localStorage` is the only persistence layer) and therefore cannot scale beyond "one person, one browser." This doc started as a forward-looking rebuild plan and has since become a **living status document** — Section 1 tracks what's actually built, Section 2 is the immediate next action, Section 3 is the full ordered backlog. Update it as work lands rather than letting it drift back into a stale one-time plan. For a compact, fast-scan version of Section 1, see `CLAUDE.md`'s "Current Build State" — this doc carries the detail and rationale; that one carries the quick summary.
 
@@ -78,7 +78,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 10-03
+## Section 1 — Accomplished Till 10-12
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -2239,6 +2239,250 @@ as a real filter value with both patterns' curated content and diagrams renderin
 `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md` Section 13 has been built, seeded,
 and live-verified. No further candlestick pattern work is currently queued.
 
+## Candlestick Pattern Metadata + Deterministic-First Ask Cascade ✅ Done
+
+Built 2026-10-04–05, two linked phases closing a real gap in Candlestick Pattern Q&A's existing
+agentic Ask loop and then, per direct follow-on request, making the LLM the *last* resort rather
+than the first.
+
+**Phase 1 — pattern metadata + a second ReAct tool.** The model's only tool had been a plain
+`ILIKE` substring search over curated text — silently empty for structural questions ("which
+patterns are continuation signals?") or synonyms never spelled out verbatim. Six deterministic
+columns added to `m_candlestick_pattern` (`signal_type`, `directional_bias`, `requires_gap`,
+`trend_context`, `synonyms`, `mirror_pattern_id`), backfilled for all 34 patterns — `requires_gap`
+derived by reading the real detector functions, not guessed. New `filter_patterns_by_metadata`
+tool (backed by `filterPatternsByMetadata()`) runs alongside the existing search tool; the model's
+system prompt frames the two as a Thought-step choice (metadata for structural questions, search
+for interpretive ones). No REST/billing/rate-limit change — every `ask()` call still goes through
+the LLM exactly as before.
+
+**Phase 2 — cache → templates → LLM, in that order, for everyone.** Per explicit direction,
+`askQuestion()`'s cascade became: a free cache check first → a small set of DB-stored,
+admin-editable regex templates (`m_question_template`, reusing Phase 1's filter tool with zero new
+query logic) → only if the caller's role holds the new `candlestick_question_answer:llm_calling`
+permission (a `PERMISSION_REQUIRES` child of `:ask`, granted to every role that already held `:ask`
+on rollout so nobody downgraded) does it fall to the LLM. A miss on every path is an honest
+`unable_to_answer`, never a guess. New `m_candlestick_asked_question` cache table (unique on
+`(normalized_question_text, horizon)` at the time — later changed, see below) backs a new Popular
+Questions list. The old per-call usage log was slimmed to just `id`/`user_id`/`created_at` (its
+only remaining job is the rate-limit window) and got this repo's first `ALTER TABLE ... SET
+(ttl_expire_after = ...)`.
+
+Live-verified end-to-end with a throwaway admin-master account plus a role holding `:ask` without
+`:llm_calling`: the template path answered with zero LLM dependency, a repeat question was a
+genuine cache hit (`question_asked_count` incremented, not re-resolved), and an unmatchable
+question returned a role-aware `unable_to_answer` reason.
+
+**The LLM's own scope loosened slightly, 2026-10-09** (direct follow-on report: "Can Tasuki Gap
+be used in conjunction with other patterns?" correctly but unhelpfully returned
+`unable_to_answer`, since no single curated entry covers cross-pattern questions). The system
+prompt now lets the model answer from its own general candlestick-pattern knowledge when the
+curated tools genuinely have nothing addressing the specific question, rather than always
+refusing — the scope boundary itself (candlestick education only, never personalized advice or a
+buy/sell call) is untouched, and every such answer is tagged `from_general_knowledge: true`
+(migration `067`) so it's never silently indistinguishable from a curated, tool-grounded answer.
+
+## Candlestick Pattern Q&A — Reachable Without Stock Analysis Access ✅ Done
+
+Built 2026-10-07 across 3 rounds, closing a real bug: Pattern Q&A's backend route was correctly
+gated on `candlestick_question_answer:ask` alone, but both of its only UI entry points lived
+*inside* the Stock Analysis panel, hidden entirely without `stock_analysis:view` — a role holding
+`:ask` but not `:view` had a working page with no way to click into it.
+
+Round 1 made `TabShell.tsx`'s "Stock Analysis" nav link visible with **either** permission, landing
+an ask-only session directly on the Q&A page, and added a 2-item sub-tab bar (Candlestick
+Charts/Candlestick Tutorial) for sessions holding both. Round 2 replaced that sub-tab bar — which
+cost a full extra row of layout on every page for a 2-item menu only relevant on two routes — with
+a click-to-open popover reusing the same trigger/backdrop pattern already established by
+`UserPersonaBadge.tsx`/column-filter dropdowns, zero persistent layout cost. Round 3 polished the
+wording on both ends (the Charts panel's button now reads "Tutorial →"; the Q&A page's back-link
+reads "← Charts" and navigates to `/stock-analysis` when that route is actually reachable,
+falling back to plain history-back otherwise) and reworked the page into a 2-column layout
+(Browse Curated Questions | Ask Your Own Question stacked above Popular Questions).
+
+Live-verified with a throwaway `user`-role account holding exactly the real-world permission
+combination that surfaced this bug.
+
+## Question Templates — Coverage Expansion & Fixes ✅ Done
+
+Built 2026-10-08–10 across several rounds, growing the template cascade from Phase 2's original 3
+templates to 10, plus two real matching bugs found live.
+
+- **7 more templates** (`pattern_description`, `signal_type_lookup`, `gap_requirement_lookup`,
+  `trend_context_lookup`, `bias_lookup_relaxed`, `bias_list`, `gap_required_list`), closing the gap
+  where only 3 very specific phrasings matched anything. **Bug found the same round**: `ILIKE`
+  substring matching let "Doji" also match "Doji-Dragonfly"/"Doji-Gravestone"/"Doji-LongLegged",
+  silently failing a well-formed single-pattern question — fixed by narrowing to an exact
+  case-insensitive name match among multiple hits before giving up. **A second bug, caught by
+  reading the applied migration, not by tests**: every new regex lost its trailing `$` anchor to
+  the same dollar-quoting mistake migration `057` had already warned about — fixed in the
+  migration file and via a corrective live `UPDATE`.
+- **An "(i)" info popover** next to the Ask form surfacing each active template's
+  `example_phrasing` (a new required, human-readable column — `regex_pattern` itself was never fit
+  for display). **A more consequential bug found right after, reported live**: an LLM-permitted
+  role got a worse outcome than a non-premium role for the exact same question, because the
+  original Phase 2 cascade sent any `:llm_calling` role straight to the LLM branch and never fell
+  back to templates on failure — with zero Anthropic key configured anywhere in this environment at
+  the time, every LLM-enabled role 503'd on a question a template could have answered for free.
+  Fixed, per explicit direction, by running the template cascade unconditionally for every role
+  before the `:llm_calling` check — a deliberate behavior change (a template match now always wins
+  over a richer LLM answer) accepted as cheaper and more resilient for everyone. **A third round**
+  loosened 4 templates' rigid "the"/"a"/single-verb-form requirements (`mirror_lookup`,
+  `bias_lookup`, `gap_requirement_lookup`, `gap_required_list`) after real variant phrasings
+  ("What is opposite of X?", "are opposite") failed to match the original, stricter wording.
+- **"What is X?" + 3 more** (Round 3, 2026-10-10): the single most natural phrasing in the whole
+  feature — "What is `<pattern>`?" — had no template at all until this round, added as a 4th branch
+  on `pattern_description` with a collision guard so it can never swallow a lower-priority
+  template's own "what ...” shape. 3 new templates (`complexity_tier_lookup`,
+  `trend_uptrend_list`, `trend_downtrend_list`). A complexity-tier list template was deliberately
+  **not** added — `complexityTier` is matched by exact equality against capitalized enum values, but
+  a regex capture preserves the user's original casing, so it would silently return zero rows every
+  time without a case-normalization step the matcher doesn't have.
+
+10 templates total. Live-verified at each round against the real dev DB and running server with
+throwaway `:ask`-only accounts — every new/fixed phrasing resolved correctly and instantly, with
+zero LLM/key dependency, and the collision guards held live, not just in unit tests.
+
+## Candlestick Tutorial — Horizon Becomes Informational, Plus "All" Horizon Option ✅ Done
+
+Built 2026-10-08, `/plan`-approved, closing a usability gap: perfectly well-formed questions
+("What does Three Inside Up mean?") were returning a bare `unable_to_answer` because the user's
+selected Trading Horizon was treated as **exclusionary** — a pattern not tagged for the selected
+horizon was silently dropped from the result set, with nothing distinguishing "the engine doesn't
+understand" from "this pattern just isn't tagged for your horizon." Per explicit direction, widened
+from a single-lookup-only fix to cover every path — list-mode templates and the free-text LLM path
+too.
+
+Horizon stops filtering anywhere in this feature and becomes purely informational: a match is
+resolved first, then annotated via a new `getPatternHorizonRelevance()` enrichment step, called
+once per successful resolution. The cache-hit branch replays the already-enriched shape stored at
+write time rather than re-querying (correct, since the cache key then still included horizon). New
+`"All"` horizon option (feature-scoped `AskHorizon` type, not a widening of the shared `HorizonId`
+used elsewhere) lets a user ask without committing to one, rendering a neutral badge. Frontend
+`HorizonRelevanceBadges` renders green/red/neutral chips per matched pattern in both the Ask answer
+card and Popular Questions.
+
+Live-verified: the same question under three different horizons correctly produced three different
+badge colors (and a genuine cache hit on the repeat), and a list-mode question returned several
+patterns the old exclusionary filter would have silently dropped entirely.
+
+## Candlestick Pattern Q&A — Admin-Switchable LLM Provider (Anthropic/OpenAI) ✅ Done
+
+Built 2026-10-08, `/plan`-approved after a short research phase into whether the hand-rolled
+Anthropic-only Ask loop could be made provider-switchable. Considered Pydantic AI (Python-only),
+LiteLLM (a 4th deployed service), and LangChain.js against **Vercel AI SDK** — chosen as the
+lighter-weight fit, confirming first that a tool with no `execute` function naturally ends the
+SDK's multi-step loop, an exact match for this feature's two terminal tools.
+
+New Config Property `candlestick_question_answer_llm_provider` (string, default `'anthropic'`,
+validated against a small allowlist) alongside the existing `...llm_model` property — an admin
+configures platform and model independently from the existing Config Properties page, no new UI
+needed. `'openai'` added to the key-provider allowlist (`ALLOWED_PROVIDERS`/`SubscriptionsPage`).
+`anthropicClient.service.ts` deleted outright, replaced by `llmModel.service.ts`'s
+`getLanguageModel(provider, apiKey, modelId)`; the hand-rolled loop replaced by `generateText`/
+`tool`/`stepCountIs`. **A real, build-blocking discovery**: the latest `ai` major ships ESM-only,
+incompatible with this backend's CommonJS build — resolved by pinning to the last dual-CJS/ESM
+majors (`ai@6.0.302` + `@ai-sdk/anthropic@3.0.128` + `@ai-sdk/openai@3.0.124`), confirmed via a
+direct `require()` smoke test before committing. The deterministic cascade (cache → templates →
+permission-gated LLM) was untouched by this rewrite.
+
+Live-verified: forced the LLM branch and confirmed the error message's provider name changed when
+the Config Property was flipped from `anthropic` to `openai` and back — proof the switch is read
+live and threaded through end-to-end, even with no real key configured in this environment yet.
+
+## My API(s) — "Get Allowed Models" ✅ Done
+
+Built 2026-10-08, two rounds, a direct follow-on question ("if I give a key, can we find out which
+models it has access to?"). New `llmProviderModels.service.ts` calls each provider's own
+models-list endpoint directly (plain `fetch`, no SDK needed for a one-off catalog lookup) — `GET
+/subscriptions/:provider/models`, gated by the same `api_keys:manage_own` permission as the rest of
+the page, tests whichever key is currently typed, never an already-saved one, so the backend never
+needs to decrypt a stored key just to check it.
+
+**Round 2**, three more follow-ons the same day: (1) **saved-key support** — a new, explicit
+`useSavedKey: true` flag (never inferred from an empty field) calls a new, deliberately
+non-fallback-aware `getOwnDecryptedKey()` so a user checking "their" key never sees results for an
+admin's fallback key they may not know exists; (2) **readability** — replaced one comma-joined
+sentence with a scrollable, one-model-per-row panel; (3) **pricing** — confirmed directly against
+both providers' real API responses that neither's models-list endpoint returns pricing at all, so
+rather than hardcode a $/token table (explicitly rejected by the user as a real staleness risk),
+added direct links to each provider's own official pricing page.
+
+Live-verified against the real dev server: a bogus key for each provider triggered a genuine
+outbound call and came back with the provider's real `401`, correctly mapped to a clean `400`
+rather than a raw error — good evidence the request shape itself is correct even without a valid
+key to test the success path.
+
+## Candlestick Pattern Q&A — "Resolved Via" Tracking + "Delete Historical Questions" ✅ Done
+
+Built 2026-10-09–10, two small additions to the Popular Questions history.
+
+**"Resolved Via"**: prompted by the user manually confirming, by hand, whether a specific real
+question had been answered by a template or the LLM. New nullable `resolved_via` column
+(`'llm' | 'template' | 'none'`) on `m_candlestick_asked_question`, threaded through all three
+controller write sites, surfaced as a small "LLM"/"Template" badge on each Popular Questions row.
+The entire pre-existing history (13 untagged rows) was deleted per explicit request rather than
+left as permanently-untagged legacy data. **Live-verified with this project's first genuine
+end-to-end LLM round trip** — a real OpenAI key now exists on the admin-master account — confirming
+both a template-matched question (`resolvedVia: 'template'`) and a genuinely novel one
+(`resolvedVia: 'llm'`, a real billed call) resolved and tagged correctly.
+
+**"Delete Historical Questions"**: a new `candlestick_question_answer:delete_history` permission
+(zero default grants, child of `:ask`) plus a 🗑 icon with an inline confirm/cancel step on each
+Popular Questions row, backed by `DELETE /candlestick-question-answer/top-questions/:id`. Live-
+verified: `403` before granting, a real row created and deleted by id while every other row stayed
+untouched, and a realistic-but-unknown id cleanly `404`s.
+
+## Candlestick Pattern Metadata Lookups — Typo-Tolerant Pattern-Name Matching ✅ Done
+
+Built 2026-10-10, prompted by a direct report that "Tasuke Gap" (a typo) and "Tasuki Gap" (correct)
+weren't treated as the same pattern. Scoped deliberately to pattern-name lookups only, not the
+open-ended free-text cache — a small, closed vocabulary (~34 names + synonyms) bounds the risk far
+better than fuzzy-matching arbitrary questions would.
+
+**A measured finding changed the design mid-build**: `pg_trgm` whole-string similarity scoring,
+tested live against this app's own real pattern names before writing any code, proved unsafe —
+several genuinely *different* patterns that merely share most of a multi-word name (e.g. "Three
+Inside Up" vs. "Three Outside Up") scored *higher* than a real typo ("Dogi" vs. "Doji"). Switched
+to **character-level edit distance applied per-word**, which cleanly separated every real typo
+tested (1–2 character distance on the differing word) from every genuine distinguishing-word pair
+(3–4 character distance). `filterPatternsByMetadata()` tries the existing exact/`ILIKE` check
+first, falling back to word-by-word Levenshtein matching only on a genuine miss — shared by both
+the question-template cascade and the LLM's own filter tool.
+
+Live-verified: "Upside Tasuke Gap" → "Upside Tasuki Gap"; the dangerous mirror-pair case
+specifically ("Downside Tasuke Gap") correctly resolved to Downside, never crossing to Upside; a
+nonsense name correctly stayed unresolved.
+
+## Candlestick Asked-Question Cache — Key & Upgrade Fixes ✅ Done
+
+Built 2026-10-10, two bugs found live within the same day, both in `m_candlestick_asked_question`'s
+caching logic.
+
+**Horizon dropped from the matching key**: re-asking an identical question under the Ask form's new
+default horizon ("All," changed earlier the same day) missed what should have been a cache hit,
+because the unique/lookup key was still `(normalized_question_text, horizon)` — now defensible to
+drop, since horizon stopped being exclusionary anywhere in this feature the same day (see above).
+Migration `070` drops horizon from the key entirely (after a data-cleanup step merging one
+real pre-existing duplicate pair found in the live dev DB), while `findCachedAnswer()` still
+recomputes the relevance badges fresh when a hit comes from a *different* horizon than the one
+that originally wrote the row.
+
+**A later success now upgrades a frozen failure**: switching the configured model to a stronger one
+got a real correct answer on retry of an already-cached `Unable_To_Answer` question — but the
+stored row never changed, staying frozen forever while only its ask-count crept up. The retry logic
+was already deliberately re-resolving on every ask of a failed row; the write-back of a win just
+silently discarded it. Fixed with an `ON CONFLICT ... DO UPDATE` guard that upgrades the stored
+answer/status/pattern-match columns only when the existing row isn't already `'Answered'` and the
+new attempt is — preserving "first *successful* answer wins" including the rare genuine race
+between two concurrent first-asks.
+
+Both live-verified against the real dev DB with throwaway accounts: the horizon fix confirmed one
+row surviving three repeat asks under three different horizons with correctly-recomputed badges
+each time; the upgrade fix confirmed via a deterministic repro (deactivating then reactivating a
+template) that a frozen failure genuinely flips to a stored success in place, same row id, without
+creating a duplicate.
+
 ---
 
 ## Section 2 — Next Step
@@ -2259,6 +2503,25 @@ per-chart period/month controls). What's left, in rough priority order:
   `backend/src/routes/*.ts` files (method, path, auth/permission gate, request/response shape,
   distinctive error codes) — was built 2026-10-04 (Documentation Phase 2), deliberately distinct
   from the published "API Call Ledger" artifact's outbound-FMP/Finnhub-cost question.
+- **E2E suite's signup step was out of date with the real Self-Registration form — identified and
+  fixed 2026-10-08.** `e2e/steps/auth.steps.ts`'s signup step predated the mandatory first/last
+  name, policy-compliant password, and 5-security-question picks the real `SignupPage.tsx` now
+  requires, so every scenario starting from signup timed out waiting for a button that could never
+  become clickable. Fixed by filling every mandatory field plus a new
+  `e2e/scripts/activate-user.ts` (a freshly self-registered account is `'pending'`/roleless, so the
+  `Then` step also now asserts the pending-review banner is *not* visible — a direct regression
+  guard against a latent false-pass, since `/` renders either the dashboard or the pending-review
+  page under the same route). **Confirmed green on the next CI run the same day, including all 3
+  e2e scenarios** — `continue-on-error: true` was removed from the `e2e` job in
+  `.github/workflows/ci.yml` immediately after, making it a genuine hard gate for the first time
+  since the suite was scaffolded 2026-07-21.
+- **Documentation catch-up, 2026-10-25.** This Section 1 and the four `User Technical Doc/`
+  files/`User Manual.md` had gone 5 commits (2026-10-08 → 10-12, the entire Candlestick Pattern
+  Metadata/Ask-cascade/LLM-provider-switch body of work above) without an update, even though
+  `CLAUDE.md` itself stayed current the whole time — closed in this pass. **How to apply**: if
+  this gap recurs, check `git log -1 --format=%ci -- Architecture.md` against the actual latest
+  commit date before assuming the docs are current; `CLAUDE.md` being current is not proof the
+  other docs are.
 - **Two small known-leftover cleanups**, both flagged and deliberately left alone rather than
   touched speculatively: an orphaned `apiKeys:bringMyOwn` permission (a naming inconsistency
   from before `api_keys:manage_own` was settled on — documented in `User Manual.md`, harmless,
@@ -2306,7 +2569,13 @@ per-chart period/month controls). What's left, in rough priority order:
    live against the real test DB. **Deliberately still deferred**: the actual analysis tools
    (Momentum/Contrarian Finder/Long-Term Analysis/Contrarian Comeback returning real results)
    and the cross-tab launchers need either a live FMP test key in CI or Playwright
-   route-mocking to exercise meaningfully — neither decided yet.
+   route-mocking to exercise meaningfully — neither decided yet. **`continue-on-error: true`
+   removed, 2026-10-08**: the signup step had silently drifted out of date with the real
+   Self-Registration form (see Section 2's documentation-catch-up note above for the fix), and
+   because the `e2e` job tolerated failure the whole time, that drift ran for weeks before anyone
+   noticed. Fixed and confirmed green across all 3 scenarios on the very next CI run, then the
+   job was made a genuine hard gate — a future regression now fails the build instead of passing
+   through silently.
 2. **Long-Term Analysis — built greenfield in Python. ✅ Done 2026-07-26** — see Section 1 for full detail. No existing backend service to migrate away from (the source app only has `lt-analysis.html` + the `lt-mt-stock-analyzer` skill), so this was new logic, not an extraction — proved the Node-gateway-to-Python pattern for real. Test gate: `pytest` coverage on the analysis logic itself was the correctness bar, since there was no legacy JS output to diff against.
 3. **Contrarian Comeback Analysis — built greenfield in Python. ✅ Done 2026-07-28** — see Section 1 for full detail. Deferred from Phase 3: the full gate-check/fundamental-health/scoring/thesis workflow from `contrarian-analysis.html`, ~500+ lines of logic with zero backend equivalent today. Sized like item 1 (this doc's item numbering, not the E2E item above), not a quick port — same rationale for going straight to Python rather than a throwaway Node version. Test gate: same as item 2, `pytest` coverage is the correctness bar.
 4. **Momentum Analysis — extracted from `momentum.service.ts`. ✅ Done 2026-07-29** — see Section 1 for full detail. `calcKellySizing` was not ported (stays client-side). Test gate: the relevant Jest fixtures ported 1:1 into pytest, value-for-value — the TS version stays in place, unmodified, as the rollback path.

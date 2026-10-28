@@ -133,21 +133,31 @@ provider)` — so the fallback lives entirely there, not in any of the 8 call si
    fallback came up empty gets "contact an admin" instead, since they may not even have
    `api_keys:manage_own` to add their own.
 
-**Extended to a third provider, 2026-09-20**: Candlestick Pattern Q&A's free-text Ask now
-resolves the caller's `anthropic` key through this exact same `getDecryptedKey(userId,
-'anthropic')` call, with no new fallback logic — a role already on the
-`api_key_fallback_eligible_roles` Config Property list gets Anthropic fallback automatically
-the moment `admin-master` has their own Anthropic key on file. `anthropicClient.service.ts`
-takes the resolved key as an explicit per-call argument rather than caching one client, so
-different callers' requests can never cross-use each other's key.
+**Extended to a third (and fourth) provider, 2026-09-20 / 2026-10-08**: Candlestick Pattern
+Q&A's free-text Ask resolves the caller's `anthropic` *or* `openai` key through this exact same
+`getDecryptedKey()` call, with no new fallback logic — a role already on the
+`api_key_fallback_eligible_roles` Config Property list gets the fallback key automatically the
+moment `admin-master` has their own key on file for that provider. **Which provider is actually
+called is itself admin-configurable**: `llmModel.service.ts` (which replaced the Anthropic-only
+`anthropicClient.service.ts`) resolves both a provider and a model from two independent Config
+Properties (Admin Console → Config Properties → "Candlestick Q&A" group —
+`candlestick_question_answer_llm_provider` and `...llm_model`), so switching providers is a
+config change, not a deploy.
 
-**Spend control, not yet built**: unlike FMP/Finnhub, an Anthropic key is real, metered dollar
-cost per question rather than a plan-tier quota, so before loading a real balance onto the
-account the platform owner asked whether the app could show `admin-master` the account's
-remaining $ balance. Confirmed no such query exists in Anthropic's API (Console-only, human
-read) — see `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md` Section 9.4/11.9 for
-the full finding and the recommended self-tracked budget-cap alternative, which has not been
-built yet.
+**"Get Allowed Models"** — on the My API(s) tab, editing an Anthropic or OpenAI row shows a "Get
+Allowed Models" button (enabled once a key is typed) and, if you already have a saved key for
+that provider, a "Check Saved Key" button too — both call the provider's own real API and show a
+scrollable list of every model your key can access, with a link to that provider's official
+pricing page (neither provider's models-list endpoint actually returns pricing, so nothing here
+is a guessed number). "Check Saved Key" never sends your raw key back to the browser — only the
+resulting model list crosses back.
+
+**Spend control, not yet built**: unlike FMP/Finnhub, an LLM key is real, metered dollar cost per
+question rather than a plan-tier quota, so before loading a real balance onto the account the
+platform owner asked whether the app could show `admin-master` the account's remaining $
+balance. Confirmed no such query exists in either provider's API (Console-only, human read) —
+see `Requirements/Candlestick-Pattern-Q&A-Module-Requirements.md` Section 9.4/11.9 for the full
+finding and the recommended self-tracked budget-cap alternative, which has not been built yet.
 
 ## UI visibility rules
 
@@ -538,13 +548,15 @@ same pattern name is what you'll find if you look it up in Pattern Q&A below.
 
 ## Candlestick Pattern Q&A
 
-**Status: implemented and live-verified, 2026-09-20 through 2026-10-03.** A single permission,
+**Status: implemented and live-verified, 2026-09-20 through 2026-10-10.** A single permission,
 `candlestick_question_answer:ask`, gates the whole feature — viewing/browsing and asking your own
 question both require it, zero default grants, same "Admin or Admin-Master can grant to any role"
-pattern as Stock Analysis/Usage Audit. Reached via the "Pattern Q&A →" link on the Candlestick
-Charts panel, or "Ask about patterns →" inside an open chart (which closes the chart and takes you
-there, since patterns aren't tied to one specific symbol). There are two completely independent
-ways to get an answer:
+pattern as Stock Analysis/Usage Audit. **Reachable even without `stock_analysis:view`** (fixed
+2026-10-07): the "Stock Analysis" nav link shows up with either permission; a session holding
+*both* gets a "Stock Analysis ▾" popover to choose between Candlestick Charts and Candlestick
+Tutorial (this page's own nav name), a session holding only `:ask` lands directly on this page.
+Also reachable via "Tutorial →" on the Candlestick Charts panel, or "Ask about patterns →" inside
+an open chart. There are two completely independent ways to get an answer:
 
 ### Browse Curated Questions
 
@@ -565,30 +577,65 @@ nothing here ever calls an LLM.
 
 ### Ask Your Own Question
 
-A free-text box for a question not already covered by the curated table above. Pick a **Trading
-Horizon** first — **Day-Trading**, **Swing Trading**, or **Long-Term Investment** — since the
-answer is scoped to that horizon's own curated content (a pattern's write-up can be tagged relevant
-to one, two, or all three horizons; asking from a horizon a pattern isn't tagged for means that
-pattern's content won't be considered). Behind the scenes, your question goes through a real
-multi-step search: the LLM searches the curated knowledge base (possibly more than once, refining
-its search), then either synthesizes an answer strictly from what it found, or tells you plainly
-that the curated content doesn't cover your question — it is **never** allowed to answer from its
-own general knowledge, and never gives personalized trading advice on top of pattern education.
+A free-text box for a question not already covered by the curated table above, plus an "(i)"
+button next to the "Question" label showing real example phrasings the engine already recognizes
+(added 2026-10-08, since the regex patterns behind those matches aren't something a user could
+otherwise guess). Pick a **Trading Horizon** — **Day-Trading**, **Swing Trading**, **Long-Term
+Investment**, or **All**. As of 2026-10-08, horizon is purely **informational**, never
+exclusionary: every matched pattern name shows a small colored badge next to it — green if it's
+relevant to your chosen horizon, red if it isn't, neutral if you picked "All" (nothing to compare
+against) — instead of silently dropping a pattern from the answer just because it isn't tagged
+for your horizon. This fixed real cases like "What does Three Inside Up mean?" returning a flat
+"can't answer" under Day-Trading for no visible reason.
 
-**Rate-limited per user** — a shared budget across every question you ask, admin-configurable
-(Admin Console → Config Properties → "Candlestick Q&A" group — currently 10 questions per rolling
-10-minute window; `admin`/`admin-master` are exempt entirely). The button's own label currently
-says "uses 1 of your daily limit," which is a holdover from an earlier design — the real window is
-the shorter, admin-configurable one described above, not a calendar day. Browsing curated
-questions never counts against this limit, only asking your own does.
+**Behind the scenes, an answer is resolved through three layers, cheapest first — this is
+invisible to you except in how fast/cheap an answer arrives**:
 
-### Managing the curated content (admin)
+1. **Cache** — if anyone has asked the exact same question before (regardless of which horizon
+   they used), you get the stored answer instantly, no LLM call.
+2. **Question templates** — a small, admin-maintained library of recognized question *shapes*
+   ("What is X?", "Is X bullish or bearish?", "Which patterns need a prior uptrend?", etc. — see
+   the "(i)" popover above for the current list) answers instantly and for free, with zero LLM
+   involvement, for every role that holds `:ask` — even one without LLM access at all.
+3. **The LLM** — only reached if no template matches, and only for a role additionally holding
+   `candlestick_question_answer:llm_calling` (a child permission of `:ask` — granting `:ask`
+   alone gets you cache + templates only). The LLM searches the curated knowledge base, possibly
+   more than once, refining its search, and prefers building its answer from that curated
+   content whenever it addresses the question. **As of 2026-10-09**, if the curated content has
+   nothing on the specific question (e.g. "can Tasuki Gap be combined with other patterns?" — a
+   cross-pattern question no single curated entry covers), it may answer from its own general
+   candlestick-pattern knowledge instead of refusing — always flagged internally as
+   `fromGeneralKnowledge: true` so this is never silently indistinguishable from a curated
+   answer. It still never answers anything outside candlestick-pattern education, and never gives
+   personalized trading advice, regardless of which source the answer came from.
 
-A separate permission, `candlestick_question_answer:manage_content`, controls a small Admin Console
-screen for adding new patterns and their curated Q&A entries directly (content created this way is
-Approved immediately — there's no pending-review queue for admin-authored content today). This is
-how every pattern described in the Pattern Detection section above got its curated write-up and
-diagram in the first place.
+Every resolution (including a template answer) is recorded, so a repeat of the exact same
+question — by anyone, under any horizon — is a free cache hit going forward.
+
+**Rate-limited per user** — but only the LLM layer above actually counts against it, since cache
+hits and template answers are both free. A shared budget across every LLM question you ask,
+admin-configurable (Admin Console → Config Properties → "Candlestick Q&A" group — currently 10
+questions per rolling 10-minute window; `admin`/`admin-master` are exempt entirely). Browsing
+curated questions never counts against this limit either way.
+
+### Popular Questions
+
+Below the Ask form, a list of the most-asked questions so far (by how many times each has been
+asked, not when), each already expanded with its stored answer and a small "LLM" (richer,
+AI-synthesized) or "Template" (instant, deterministic) badge showing how it was originally
+resolved. If you hold `candlestick_question_answer:delete_history` (a child of `:ask`, zero
+default grants — an admin grants it the same way as any other permission), a small 🗑 icon on
+each row lets you remove it from the list with an inline confirm step.
+
+### Managing the curated content & question templates (admin)
+
+A separate permission, `candlestick_question_answer:manage_content`, controls a small Admin
+Console screen for adding new patterns and their curated Q&A entries directly (content created
+this way is Approved immediately — there's no pending-review queue for admin-authored content
+today). This is how every pattern described in the Pattern Detection section above got its
+curated write-up and diagram in the first place. The same admin page also has a **Question
+Templates** section — create/activate/deactivate the regex-based templates the second cascade
+layer above uses, each with a required example phrasing shown to end users via the "(i)" popover.
 
 ## Known leftover, not cleaned up yet
 

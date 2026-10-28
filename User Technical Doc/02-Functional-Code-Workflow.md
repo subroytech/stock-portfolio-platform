@@ -477,6 +477,90 @@ notify the parent list component at all, and deliberately leaves the current int
 pattern-picker selections untouched rather than resetting them the way opening a brand-new chart
 from the left-hand panel does.
 
+## 2.7e Pattern Q&A becomes deterministic-first, with an admin-switchable LLM provider, 2026-10-04
+## through 2026-10-12
+
+The Ask feature described in 2.7d above was always a genuine agentic LLM loop. This round, across
+several linked builds, made the LLM the *last* resort instead of the only option, and made which
+LLM provider gets called an admin config choice rather than a hardcoded one.
+
+**Resolution is now a 3-layer cascade, cheapest first**, all inside `askQuestion()`
+(`candlestickQuestionAnswer.controller.ts`):
+
+1. **Cache** (`candlestickAskedQuestion.service.ts`'s `findCachedAnswer()`) — a lookup against
+   `m_candlestick_asked_question`, keyed on `normalized_question_text` alone (horizon was dropped
+   from the key 2026-10-10 — see below). A hit replays the stored answer/resolution origin
+   verbatim, except it re-enriches the per-pattern horizon-relevance badges on the fly if the
+   current request's horizon differs from the one the row was originally written under.
+2. **Question templates** (`candlestickQuestionTemplate.service.ts`'s `matchTemplate()`) — tries
+   every active row in `m_question_template` (admin-managed, one regex + a declarative
+   `fixedFilters`/`groupFilters` mapping onto `filterPatternsByMetadata()`'s own filter fields) in
+   priority order, substituting matched capture groups into a stored `answer_template` string.
+   Runs **unconditionally for every role holding `:ask`**, regardless of whether that role also
+   has LLM access — this was a deliberate fix (2026-10-08) after discovering the original design
+   sent any LLM-permitted role straight past this cheap, free layer, making it strictly worse off
+   than a non-LLM role for any question a template could already answer.
+3. **The LLM** (`candlestickQuestionAnswerAsk.service.ts`'s `ask()`) — reached only on a template
+   miss, and only if the caller's role additionally holds `candlestick_question_answer
+   :llm_calling` (a `PERMISSION_REQUIRES` child of `:ask`, same generic parent/child mechanism
+   `contrarian_finder:scan_history` already established). A miss here is an honest
+   `unable_to_answer`, never a guess.
+
+Every resolution — including a template match or an `unable_to_answer` — is written to the cache
+via `recordAskedQuestion()`, so even a repeat of a previously-*failed* question gets a fresh
+attempt (and, since 2026-10-10, a successful retry now genuinely overwrites a frozen failure in
+place — see below — rather than being silently discarded).
+
+**`filterPatternsByMetadata()` grew two matching improvements it now shares with both the
+template layer and the LLM's own `filter_patterns_by_metadata` tool** (added in the earlier
+2026-10-04/05 phase, backed by 6 new deterministic columns on `m_candlestick_pattern` —
+`signal_type`, `directional_bias`, `requires_gap`, `trend_context`, `synonyms`,
+`mirror_pattern_id`):
+
+- **Horizon became informational, not exclusionary** (2026-10-08) — a pattern no longer gets
+  silently dropped from a result just because it isn't tagged relevant for the request's chosen
+  horizon. Instead, `getPatternHorizonRelevance()` annotates each already-matched pattern name
+  with `true`/`false`/`null` (the last when horizon is `'all'`), rendered as a colored badge on
+  the frontend.
+- **Typo-tolerant pattern-name matching** (2026-10-10) — an exact/`ILIKE` check runs first,
+  falling back to word-by-word Levenshtein distance only on a genuine miss. A whole-string
+  `pg_trgm` similarity approach was tried and rejected after live testing showed it scored
+  genuinely *different* same-shaped pattern names (e.g. "Three Inside Up" vs. "Three Outside Up")
+  higher than real typos — per-word edit distance cleanly separated the two cases instead.
+
+**LLM provider and model are both independent Config Properties** (2026-10-08) —
+`candlestick_question_answer_llm_provider` (`'anthropic'` \| `'openai'`) and `...llm_model`.
+`llmModel.service.ts`'s `getLanguageModel(provider, apiKey, modelId)` is the one place that
+branches on provider, built on Vercel AI SDK's `generateText`/`tool`/`stepCountIs` rather than a
+hand-rolled loop — replacing the Ask service's previous direct `@anthropic-ai/sdk` usage and the
+now-deleted `anthropicClient.service.ts`. A tool declared with no `execute` function naturally
+ends the SDK's own multi-step loop, which is why both terminal tools (`provide_answer`/
+`unable_to_answer`) needed no redesign, just a library swap. **Pinned to `ai@6.0.302` +
+`@ai-sdk/anthropic@3.0.128` + `@ai-sdk/openai@3.0.124`** specifically — the newer majors ship
+ESM-only, which this backend's CommonJS build (`ts-node-dev --transpile-only`, `tsconfig.json`'s
+`"module": "commonjs"`) cannot `require()` at runtime.
+
+**`llmProviderModels.service.ts`** is a separate, simpler piece — plain `fetch()` calls (no SDK
+needed for a one-off catalog lookup) against each provider's own models-list endpoint, backing
+`POST /subscriptions/:provider/models` on the My API(s) page ("Get Allowed Models"/"Check Saved
+Key"). `getOwnDecryptedKey()` (as distinct from the regular `getDecryptedKey()`) deliberately
+never falls back to the Admin-Master Fallback key here — checking "my" key must never silently
+show results for someone else's key.
+
+**Two cache-table fixes, 2026-10-10, both in `candlestickAskedQuestion.service.ts`**:
+
+- **Horizon dropped from the matching key** (migration `070`) — once horizon stopped filtering
+  anything (above), keeping it in the cache's uniqueness constraint was actively harmful: the
+  identical question, asked under a different horizon than before, missed a cache hit it should
+  have gotten. The migration also merges one real pre-existing duplicate pair found live in the
+  dev DB before dropping the old `(text, horizon)` index.
+- **A later success now upgrades a frozen failure** — `recordAskedQuestion()`'s `ON CONFLICT ...
+  DO UPDATE` previously only ever bumped `question_asked_count`/`last_asked_at`; a retry that
+  actually succeeded (e.g. after an admin reconfigured the model or activated a template) never
+  wrote its better outcome back, leaving the row frozen at `Unable_To_Answer` forever. Fixed with
+  a `CASE WHEN ... question_status != 'Answered' AND EXCLUDED.question_status = 'Answered'`
+  guard per upgradeable column — "first *successful* answer wins," not "first answer, period."
+
 ---
 
 ## 2.8 Feature map — where to look for each screen
@@ -495,7 +579,7 @@ from the left-hand panel does.
 | Contrarian Comeback | `ContrarianComebackPage.tsx` | `analysis.routes.ts` | `contrarianComebackData.service.ts` (+ Python) |
 | Stock Analysis (4 quadrants) | `StockAnalysisPage.tsx`, `StockAnalysisQuadrant.tsx`, `StockPreviewBody.tsx` | `stockPreview.routes.ts` | `marketData.service.ts` |
 | Stock Analysis (Candlestick Charts + Pattern Detection) | `CandlestickSymbolList.tsx`, `CandlestickPopup.tsx` (symbol switcher, 4-tier pattern pickers/badges) | `candlestick.routes.ts` | `candlestick.service.ts`, `candlestickIndicators.service.ts`, `candlestickRateLimit.service.ts`, `fmpIntradayCache.service.ts` — detection itself is frontend-only, pure functions in `frontend/src/lib/candlestickPatternDetection.ts`/`candlestickComplexPatternDetection.ts`/`candlestickPatternDiagrams.ts` |
-| Candlestick Pattern Q&A (Browse + Ask) | `CandlestickQuestionAnswerPage.tsx` (user), `AdminCandlestickQuestionAnswerPage.tsx` (admin, gated by `candlestick_question_answer:manage_content`) | `candlestickQuestionAnswer.routes.ts` (gated by `candlestick_question_answer:ask`) | `candlestickQuestionAnswer.service.ts` (Browse/content CRUD), `candlestickQuestionAnswerAsk.service.ts` (the agentic Ask loop), `candlestickQuestionAnswerRateLimit.service.ts`, `anthropicClient.service.ts` |
+| Candlestick Pattern Q&A (Browse + Ask + Popular Questions) | `CandlestickQuestionAnswerPage.tsx` (user), `AdminCandlestickQuestionAnswerPage.tsx` (admin, gated by `candlestick_question_answer:manage_content`, also hosts the Question Templates section) | `candlestickQuestionAnswer.routes.ts` (gated by `candlestick_question_answer:ask`; delete-history route gated by `:delete_history`; models-listing route is on `userSubscription.routes.ts` instead) | `candlestickQuestionAnswer.service.ts` (Browse/content CRUD + metadata filter/fuzzy-match), `candlestickQuestionAnswerAsk.service.ts` (the LLM leg of the cascade, via `llmModel.service.ts`), `candlestickQuestionTemplate.service.ts` (deterministic template matching), `candlestickAskedQuestion.service.ts` (the asked-question cache/Popular Questions), `candlestickQuestionAnswerRateLimit.service.ts`, `llmProviderModels.service.ts` ("Get Allowed Models") |
 | Support Tickets | `SupportWidget.tsx` (every user), `AdminSupportTicketsPage.tsx` (admin, gated by `support:manage`) | `supportTicket.routes.ts` | `supportTicket.service.ts` |
 | Usage Audit (admin) | `UsageAuditPage.tsx` (an Admin Console tab), `UsageDashboardCards.tsx`/`UsagePieChart.tsx`/`UsageBarChart.tsx` (Dashboard sub-tab's 6 independently-controlled charts) | `usageAudit.routes.ts` (incl. `GET /usage-audit/day`) | `usageTracking.service.ts` |
 | Admin Console | `AdminPage.tsx` and its sub-pages (`RolesPage`, `RolePermissionsPage`, `UserRolesPage`, `FunctionsPage`, `MasterDataPage`, `PortfolioTemplateApprovalPage`, `ConfigPropertiesPage`) | `roles.routes.ts`, `functionMaster.routes.ts`, `users.routes.ts`, `portfolioTemplate.routes.ts`, `configProperty.routes.ts` | `roles.service.ts`, `functionMaster.service.ts`, `users.service.ts`, `configProperty.service.ts` |

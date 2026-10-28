@@ -1,7 +1,8 @@
 # 4. REST API Reference
 
-**Status: compiled 2026-10-04, verified directly against the current route and controller
-source files (not inferred from the frontend or from memory).**
+**Status: compiled 2026-10-04, updated 2026-10-25 to add the 7 routes that landed 2026-10-05
+through 10-08 — verified directly against the current route and controller source files (not
+inferred from the frontend or from memory).**
 
 This is a complete, endpoint-by-endpoint reference for every backend route: HTTP method, full
 path, auth/permission gate, request shape, and response shape. It answers a different question
@@ -12,10 +13,13 @@ response contract. This document has almost no content overlap with it: a route 
 `POST /auth/login` appears here in full detail but never in the Ledger at all, since it makes no
 outbound API call.
 
-**Total: 97 routes across 19 files** in `backend/src/routes/`. (A past count of "79" in this
+**Total: 104 routes across 19 files** in `backend/src/routes/`. (A past count of "79" in this
 project's own notes was written before several rounds of feature work since — Flex Quota,
 Candlestick Charts, Candlestick Pattern Q&A, Usage Audit, Run History, and others all added
-routes afterward. This document reflects the current, actual count.)
+routes afterward; a count of "97" followed, written 2026-10-04, before Question Templates'
+`GET/POST /templates` + `PUT /templates/:id/status`, Popular Questions' `GET /top-questions` +
+`DELETE /top-questions/:id`, `GET /question-shapes`, and `POST /subscriptions/:provider/models`
+added 7 more. This document reflects the current, actual count.)
 
 ## Conventions used below
 
@@ -133,9 +137,9 @@ The only route file with any public (non-`requireAuth`) routes.
   renewalDate: string|null, createdAt, updatedAt }] }`
 
 **`PUT /subscriptions/:provider`** — Gate: requireAuth + `requirePermission('api_keys:manage_own')`
-- Request: param `provider` (must be `fmp`, `finnhub`, or `anthropic`); body `apiKey` (string),
-  `planTier` (string, optional), `status` (string, optional, default `active`), `renewalDate`
-  (string, optional)
+- Request: param `provider` (must be `fmp`, `finnhub`, `anthropic`, or `openai`); body `apiKey`
+  (string), `planTier` (string, optional), `status` (string, optional, default `active`),
+  `renewalDate` (string, optional)
 - Response: `{ subscription: { provider, maskedKey, planTier, status, renewalDate, createdAt,
   updatedAt } }` — the raw key is never echoed back, only the masked form.
 - Notes: `400` unknown provider or missing/empty `apiKey`.
@@ -144,6 +148,18 @@ The only route file with any public (non-`requireAuth`) routes.
 - Request: param `provider` (string)
 - Response: `{ success: true }`
 - Notes: `404` if no subscription exists for that user/provider.
+
+**`POST /subscriptions/:provider/models`** — Gate: requireAuth + `requirePermission('api_keys:manage_own')` — added 2026-10-08 ("Get Allowed Models")
+- Request: param `provider` (must be `anthropic` or `openai` — `MODEL_LISTING_PROVIDERS`; FMP/
+  Finnhub have no model-catalog concept); body either `apiKey` (string, tests the currently
+  typed/pasted key, never decrypts a stored one) or `useSavedKey: true` (decrypts the caller's
+  own stored key server-side via `getOwnDecryptedKey()` — deliberately not fallback-aware, so a
+  user checking "their" key never sees an admin's fallback key's results)
+- Response: `{ models: string[] }` — a sorted list of model IDs, fetched live from that
+  provider's own models-list endpoint; never returns pricing (neither provider's API exposes it).
+- Notes: `400` unsupported provider, missing both `apiKey` and `useSavedKey`, or no saved key on
+  file when `useSavedKey: true`; `400` (mapped from the provider's own rejection, e.g. a bad key)
+  with a message naming the provider, e.g. "rejected by OpenAI."
 
 ---
 
@@ -467,21 +483,45 @@ The only route file with any public (non-`requireAuth`) routes.
 ## 13. Candlestick Pattern Q&A — `candlestickQuestionAnswer.routes.ts`, mounted at `/candlestick-question-answer`
 
 **`GET /candlestick-question-answer/entries`** — Gate: requireAuth + `requirePermission('candlestick_question_answer:ask')`
-- Request: query `query` (optional), `horizon` (optional, one of `dayTrading`/`mediumTerm`/
-  `longTerm`), `tier` (optional, one of `101`/`201`/`301`)
+- Request: query `query` (optional), `tier` (optional, one of `101`/`201`/`301`)
 - Response: `{ entries: [...] }`
-- Notes: `400` invalid `horizon` value. Powers Browse — instant, free, no LLM call.
+- Notes: Powers Browse — instant, free, no LLM call. (`horizon` was removed from this route's own
+  query params 2026-10-08 once horizon stopped filtering anything in this feature — see
+  `02-Functional-Code-Workflow.md` §2.7e — it had never actually been applied by `searchEntries()`
+  even before that, only by the LLM's own search tool.)
 
 **`POST /candlestick-question-answer/ask`** — Gate: requireAuth + `requirePermission('candlestick_question_answer:ask')`
-- Request: `question` (string), `horizon` (one of `dayTrading`/`mediumTerm`/`longTerm`)
-- Response (answered): `{ outcome: 'answered_from_kb', answer: string, matchedEntryIds: string[],
-  matchedPatterns: string[], reason: null }`
-- Response (unable): `{ outcome: 'unable_to_answer', answer: null, matchedEntryIds: [],
-  matchedPatterns: [], reason: string }`
+- Request: `question` (string), `horizon` (one of `dayTrading`/`mediumTerm`/`longTerm`/`all`)
+- Response: `{ outcome: 'answered_from_kb' | 'unable_to_answer', answer: string | null,
+  matchedEntryIds: string[], matchedPatterns: { patternName: string, relevantForHorizon:
+  boolean | null }[], reason: string | null, resolvedVia: 'llm' | 'template' | 'none',
+  fromGeneralKnowledge: boolean }` — `relevantForHorizon` is `null` when `horizon` is `'all'` or
+  the relation isn't known; `resolvedVia` says which of the 3 cascade layers answered (see
+  §2.7e): a cache hit, a deterministic question template (free, no LLM, available to every role
+  holding `:ask`), or the LLM (only reached on a template miss, and only for a role additionally
+  holding `candlestick_question_answer:llm_calling`).
 - Notes: `400` empty question or invalid horizon; `429` the Ask-specific rate limit is exceeded
-  (currently 10 questions/10 minutes); `503` no Anthropic key available. The only route in this
-  file making a real, billed LLM call — see `02-Functional-Code-Workflow.md` §2.7c for the
-  underlying agentic tool-calling loop.
+  (currently 10 questions/10 minutes) — **only ever thrown on the LLM branch**, a cache hit or
+  template match never consumes rate-limit budget; `503` no API key available for the
+  admin-configured provider (Anthropic or OpenAI, via the `candlestick_question_answer
+  _llm_provider` Config Property). Every outcome, including a template match or
+  `unable_to_answer`, is written to `m_candlestick_asked_question` so an identical repeat question
+  from anyone becomes a free cache hit afterward.
+
+**`GET /candlestick-question-answer/top-questions`** — Gate: requireAuth + `requirePermission('candlestick_question_answer:ask')` — added 2026-10-05 ("Popular Questions")
+- Request: none
+- Response: `{ questions: [{ id, questionText, answerText, matchedPatternNames: { patternName,
+  relevantForHorizon }[], questionAskedCount, lastAskedAt, resolvedVia, fromGeneralKnowledge }] }`
+  — only rows with `question_status = 'Answered'`, ordered by `questionAskedCount` descending.
+
+**`DELETE /candlestick-question-answer/top-questions/:id`** — Gate: requireAuth + `requirePermission('candlestick_question_answer:delete_history')` — added 2026-10-10
+- Request: param `id`
+- Response: `{ success: true }`
+- Notes: `404` unknown id. A narrower, separate permission from the read above — a `PERMISSION_REQUIRES` child of `:ask`, zero default grants.
+
+**`GET /candlestick-question-answer/question-shapes`** — Gate: requireAuth + `requirePermission('candlestick_question_answer:ask')` — added 2026-10-08 (the "(i)" info popover)
+- Request: none
+- Response: `{ examples: string[] }` — each active question template's `examplePhrasing` only, never its regex/filter-mapping internals.
 
 **`GET /candlestick-question-answer/patterns`** — Gate: requireAuth + `requirePermission('candlestick_question_answer:manage_content')`
 - Request: none
@@ -510,6 +550,25 @@ The only route file with any public (non-`requireAuth`) routes.
 - Request: param `id`; body `status` (`Approved` or `Rejected`)
 - Response: `{ success: true }`
 - Notes: `400` any other status value; `404` unknown entry id.
+
+**`GET /candlestick-question-answer/templates`** — Gate: requireAuth + `requirePermission('candlestick_question_answer:manage_content')` — added 2026-10-05 (Question Templates, Phase 2)
+- Request: none
+- Response: `{ templates: [{ id, templateKey, regexPattern, responseMode: 'single' | 'list',
+  filterMapping: { fixedFilters, groupFilters }, answerTemplate, examplePhrasing, status:
+  'active' | 'inactive' }] }`
+
+**`POST /candlestick-question-answer/templates`** — Gate: requireAuth + `requirePermission('candlestick_question_answer:manage_content')`
+- Request: `templateKey`, `regexPattern`, `answerTemplate`, `examplePhrasing` (all strings,
+  required), `responseMode` (`single` or `list`), `filterMapping` (object with at least one of
+  `fixedFilters`/`groupFilters`)
+- Response: `201 { template: {...} }`
+- Notes: `400` missing required fields or invalid `responseMode`/`filterMapping`; `409` duplicate
+  `templateKey`.
+
+**`PUT /candlestick-question-answer/templates/:id/status`** — Gate: requireAuth + `requirePermission('candlestick_question_answer:manage_content')`
+- Request: param `id`; body `status` (`active` or `inactive`)
+- Response: `{ success: true }`
+- Notes: `400` any other status value.
 
 ---
 

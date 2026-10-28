@@ -79,11 +79,13 @@ using TypeScript project references.
 
 Covered in more detail in `01-Environment-Details.md` §1.6 — the short version: every push
 and pull request to `master` automatically runs all four suites above in parallel on
-GitHub's servers. The `backend`, `frontend`, and `analysis-service` jobs are **hard
-gates** — if any test fails, or `typecheck`/`lint` fails, that's flagged clearly. The `e2e`
-job currently runs too, but is marked non-blocking (`continue-on-error: true`) until it's
-proven stable across enough runs to fully trust — a deliberate, temporary safety valve, not
-a decision to skip E2E long-term.
+GitHub's servers. All four jobs — `backend`, `frontend`, `analysis-service`, and, **as of
+2026-10-08, `e2e` too** — are hard gates: if any test fails, or `typecheck`/`lint` fails,
+that's flagged clearly and blocks the build. The `e2e` job ran with `continue-on-error: true`
+from 2026-07-21 until 2026-10-08 while it proved itself stable; that safety valve was removed
+once a real signup-step regression (caught and fixed the same day, see
+`02-Functional-Code-Workflow.md`) demonstrated the suite itself was trustworthy, and the
+non-blocking window had actually let that regression run for weeks unnoticed.
 
 ---
 
@@ -126,7 +128,37 @@ and neither substitutes for the other.
 
 ---
 
-## 3.6 Current state (as of 2026-09-19)
+## 3.6 Current state (as of 2026-10-12)
+
+- **1095 backend / 845 frontend tests passing** (up from 904/516 as of 2026-09-19), `tsc`/lint
+  clean both sides. Almost all of this growth is from the Candlestick Pattern Q&A module's
+  2026-10-04 through 10-12 work (see `02-Functional-Code-Workflow.md` §2.7e): new backend test
+  files/coverage for `candlestickQuestionTemplate.service.ts` (template matching + the two
+  substring-collision/grammar bug fixes), `candlestickAskedQuestion.service.ts` (the asked-
+  question cache, including the horizon-dropped-from-key and frozen-failure-upgrade fixes),
+  `llmModel.service.ts`/`llmProviderModels.service.ts` (the AI-SDK rewrite and "Get Allowed
+  Models"), and `candlestickQuestionAnswer.service.ts`'s metadata filter/typo-tolerant matching;
+  new frontend coverage for the Stock-Analysis-independent nav popover (`TabShell.test.tsx`), the
+  horizon-relevance badges, the "(i)" info popover, and Popular Questions' delete control.
+- `candlestickQuestionAnswerAsk.service.test.ts` was substantially rewritten, not just extended,
+  when the hand-rolled Anthropic loop was replaced by Vercel AI SDK's `generateText` — rather than
+  re-simulate the SDK's own internal multi-step loop (its own tested implementation detail), the
+  rewrite mocks `generateText` wholesale for `ask()`'s outcome-mapping logic, and tests the two
+  real-logic tools' `execute()` functions directly and independently of any loop machinery.
+- **A real, live-caught bug worth noting for future test design, 2026-10-08**: a brand-new LLM-
+  permitted role got a *worse* outcome than a non-LLM role for the same question, because the
+  original cascade sent `:llm_calling` roles straight past the free template layer — every
+  existing test passed, because none of them exercised "a role with LLM access asks a question a
+  template could already answer." Fixed by making the template layer run unconditionally; a new
+  test explicitly asserts the LLM/key/rate-limit paths are never touched when a template matches,
+  specifically to guard against this exact regression recurring.
+- **A real regex bug caught by reading an applied migration file, not by any test**, twice
+  (migrations `057` and `060`): a lazy capture group (`(.+?)`) with nothing mandatory after it in
+  the pattern silently matches far less text than intended, because it has no reason to expand
+  past the bare minimum. Worth remembering for any future admin-authored question template:
+  always anchor with a trailing `$` when the capture group is followed only by optional tokens.
+
+## 3.6a Previous state (as of 2026-09-19)
 
 - **904 backend / 516 frontend tests passing** (up from 845/488 as of 2026-09-12), `tsc`/lint
   clean both sides. New backend test files from the Candlestick Charts build (2026-09-18):
@@ -161,7 +193,7 @@ and neither substitutes for the other.
   service file can load safely underneath any mocking style without ever touching a real
   connection.
 
-## 3.6a Previous state (as of 2026-09-12)
+## 3.6b Previous state (as of 2026-09-12)
 
 - **845 backend / 488 frontend tests passing** (up from 817/483 as of 2026-09-07), `tsc`/lint
   clean both sides. New/rewritten backend test files from the 2026-09-09 through 2026-09-12
@@ -182,7 +214,7 @@ and neither substitutes for the other.
   connection — a reminder that some classes of bugs are only visible via live verification
   against the real DB, not unit tests with a mocked pool, however thorough.
 
-## 3.6b Previous state (as of 2026-09-07)
+## 3.6c Previous state (as of 2026-09-07)
 
 - **817 backend / 483 frontend tests passing** (up from 689/413 as of 2026-08-31), `tsc`/lint
   clean both sides. New test files added for the four features shipped 2026-09-07: backend's
@@ -195,7 +227,7 @@ and neither substitutes for the other.
   Monthly Summary + Function/FMP/Finnhub Split" entry) — a good example of a test file needing
   a real rewrite, not just new cases added, when the underlying design itself changes.
 
-## 3.6c Previous state (as of 2026-08-31)
+## 3.6d Previous state (as of 2026-08-31)
 
 - All four CI jobs (backend, frontend, analysis-service, e2e) have been green together
   multiple times (see `CLAUDE.md`'s "Contrarian Finder Stock Universe" entry onward).
