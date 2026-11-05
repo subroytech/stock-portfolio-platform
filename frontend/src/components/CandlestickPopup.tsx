@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type FormEvent, type MutableRefObject, type ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Chart } from 'react-chartjs-2';
 import '../lib/chartSetup';
 import {
@@ -40,6 +40,7 @@ type PopupView = 'candlestick' | 'quickReference';
 
 export default function CandlestickPopup({ symbol, initialInterval, onClose }: CandlestickPopupProps) {
   const navigate = useNavigate();
+  const location = useLocation();
   const { data: session } = useSession();
   // Candlestick Pattern Q&A (Phase 1) - gated Function, zero default grants, same
   // hidden-not-shown pattern used everywhere else in this app for a permission the caller
@@ -308,7 +309,7 @@ export default function CandlestickPopup({ symbol, initialInterval, onClose }: C
           {canCandlestickQuestionAnswer && (
             <button
               type="button"
-              onClick={() => { onClose(); navigate('/candlestick-question-answer'); }}
+              onClick={() => { onClose(); navigate('/candlestick-question-answer', { state: { from: location.pathname } }); }}
               data-testid="candlestick-ask-about-patterns"
               className="text-sm font-medium text-accent underline decoration-accent/50 underline-offset-2 transition-colors hover:text-accent-hover hover:decoration-accent"
             >

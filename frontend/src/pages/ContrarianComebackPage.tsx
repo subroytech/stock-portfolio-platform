@@ -19,6 +19,7 @@ import {
 } from '../api/contrarianComeback';
 import { ApiError } from '../api/client';
 import StockPreviewChart from '../components/StockPreviewChart';
+import CandlestickPopup from '../components/CandlestickPopup';
 import { formatCompactCurrency } from '../lib/format';
 
 const BREAKDOWN_TYPES: { value: string; label: string; desc: string; tier: 'green' | 'yellow' | 'red' }[] = [
@@ -647,15 +648,24 @@ function ValueDislocationCard({ vd }: { vd: ValueDislocation }) {
 // else - symbol/company/sector, headline stats, and verdict badges. Split
 // out so ContrarianComebackPage can render it next to the ticker form,
 // matching Long-Term Analysis's own top-card layout.
-function HeaderStats({ result }: { result: ContrarianComebackSubmitResult }) {
+function HeaderStats({ result, onOpenCandlestick }: { result: ContrarianComebackSubmitResult; onOpenCandlestick: (symbol: string) => void }) {
   const score = result.score;
   return (
     <div className="flex-1 border-t border-border pt-4 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-xl font-bold text-text-primary">{result.symbol}</p>
-          <p className="text-sm text-text-secondary">{result.companyName} {result.exchange ? `· ${result.exchange}` : ''}</p>
-          <p className="text-xs text-text-muted">{result.sector}</p>
+          <span className="text-xl font-bold text-text-primary">{result.symbol}</span>
+          <span className="ml-2 text-sm text-text-secondary">
+            {result.companyName} {result.exchange ? `· ${result.exchange}` : ''}
+          </span>
+          <button
+            type="button"
+            onClick={() => onOpenCandlestick(result.symbol)}
+            className="ml-2 text-xs font-medium text-accent hover:underline"
+          >
+            Candlestick chart →
+          </button>
+          <p className="mt-1 text-xs text-text-muted">{result.sector}</p>
         </div>
         <div className="flex gap-6 text-right">
           <div>
@@ -792,6 +802,7 @@ interface CcEntryState {
 export default function ContrarianComebackPage() {
   const [ticker, setTicker] = useState('');
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
+  const [candlestickSymbol, setCandlestickSymbol] = useState<string | null>(null);
   const [pendingSymbol, setPendingSymbol] = useState<string | null>(null);
 
   const gate = useContrarianComebackGate();
@@ -905,7 +916,9 @@ export default function ContrarianComebackPage() {
             </button>
           </form>
 
-          {activeEntry?.submitResult && activeEntry.submitResult.format === 'A' && <HeaderStats result={activeEntry.submitResult} />}
+          {activeEntry?.submitResult && activeEntry.submitResult.format === 'A' && (
+            <HeaderStats result={activeEntry.submitResult} onOpenCandlestick={setCandlestickSymbol} />
+          )}
         </div>
 
         {!activeEntry?.gateResult && !gate.isPending && !gate.isError && (
@@ -970,6 +983,9 @@ export default function ContrarianComebackPage() {
       </main>
 
       {previewSymbol && <StockPreviewChart symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />}
+      {candlestickSymbol && (
+        <CandlestickPopup symbol={candlestickSymbol} initialInterval="1day" onClose={() => setCandlestickSymbol(null)} />
+      )}
     </>
   );
 }

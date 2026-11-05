@@ -1,5 +1,5 @@
 import { Fragment, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   useSearchCuratedEntries, useAskCandlestickQuestion, useTopQuestions, useDeleteTopQuestion, useQuestionShapes, CATEGORIES, COMPLEXITY_TIERS,
   type Category, type ComplexityTier, type AskHorizon, type MatchedPatternWithHorizonRelevance, type ResolvedVia,
@@ -25,12 +25,22 @@ const HORIZON_LABELS: Record<AskHorizon, string> = {
 // inside CandlestickSymbolList (Stock Analysis tab) or the shortcut inside CandlestickPopup.tsx.
 export default function CandlestickQuestionAnswerPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { data: session } = useSession();
   // Whether to send "Back" straight to Candlestick Charts (2026-10-07) - only when the session
   // actually holds stock_analysis:view, since an ask-only session (candlestick_question_answer
   // :ask without stock_analysis:view, the exact gap Stock Analysis's popover entry point was
   // built for) has no Charts page to go back to at all.
   const canStockAnalysis = session?.permissions?.includes('stock_analysis:view') ?? false;
+  // The real originating tab (2026-11-01) - CandlestickPopup.tsx now passes its own
+  // location.pathname forward as router state whenever "Ask about patterns" is clicked, so this
+  // page can send Back to wherever the popup was actually opened from (Contrarian Comeback,
+  // Long-Term Analysis, or Stock Analysis itself) instead of always assuming Stock Analysis.
+  // Falls back to the pre-existing canStockAnalysis/navigate(-1) logic when state is absent -
+  // e.g. reached directly via the "Stock Analysis ▾" popover's own "Candlestick Tutorial" link.
+  const fromPath = (location.state as { from?: string } | null)?.from ?? null;
+  const backTarget = fromPath ?? (canStockAnalysis ? '/stock-analysis' : null);
+  const backLabel = backTarget === '/stock-analysis' ? '← Charts' : '← Back';
   const [browseSearch, setBrowseSearch] = useState('');
   // Tracks which entry's answer is expanded inline, directly under its own question - not a
   // separate "selected answer" block at the bottom of the list (2026-09-21, explicit direction).
@@ -121,19 +131,21 @@ export default function CandlestickQuestionAnswerPage() {
 
   return (
     <main className="flex flex-col gap-4 p-4 sm:p-6">
-      {/* Back link - a direct "← Charts" link to /stock-analysis when the session can actually
-          reach it (2026-10-07, explicit direction), since that's a predictable destination
-          rather than whatever happens to be in browser history. Falls back to generic
-          history-back for an ask-only session with no Charts access at all. Same hyperlink
-          styling as CandlestickPopup.tsx's own Back/Ask-about-patterns links, for visual
-          consistency across this feature. */}
+      {/* Back link - prefers the real originating tab (fromPath, see above) over a hardcoded
+          "/stock-analysis" guess, since Contrarian Comeback/Long-Term Analysis sessions
+          typically also hold stock_analysis:view and would otherwise be bounced to Stock
+          Analysis instead of back where they actually came from. Falls back to the original
+          2026-10-07 canStockAnalysis/navigate(-1) logic when there's no state to read (e.g.
+          reached directly via the "Stock Analysis ▾" popover). Same hyperlink styling as
+          CandlestickPopup.tsx's own Back/Ask-about-patterns links, for visual consistency
+          across this feature. */}
       <button
         type="button"
-        onClick={() => (canStockAnalysis ? navigate('/stock-analysis') : navigate(-1))}
+        onClick={() => (backTarget ? navigate(backTarget) : navigate(-1))}
         data-testid="candlestick-qa-back"
         className="self-start text-sm font-medium text-accent underline decoration-accent/50 underline-offset-2 transition-colors hover:text-accent-hover hover:decoration-accent"
       >
-        {canStockAnalysis ? '← Charts' : '← Back'}
+        {backLabel}
       </button>
 
       <div className="flex flex-col gap-6 lg:flex-row lg:items-start">

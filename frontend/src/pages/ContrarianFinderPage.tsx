@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
-  STRENGTH_LIST_QUERY_KEY, useContrarianBatchScan, useStockUniverse, useRunHistoryDetail, getRunCompleteness,
+  STRENGTH_LIST_QUERY_KEY, useContrarianBatchScan, useStockUniverse, useRunHistoryDetail, useRunHistoryList, getRunCompleteness,
   type ScanResult, type RunHistoryListItem,
 } from '../api/contrarianFinder';
 import { ApiError } from '../api/client';
 import { useSession } from '../api/auth';
 import { useApiKeysModal } from '../lib/apiKeysModal';
-import { formatAsOf } from '../lib/format';
+import { formatAsOf, formatElapsedSince } from '../lib/format';
 import { useTickerHandoff } from '../lib/tickerHandoff';
 import ContrarianFinderResultsTable from '../components/ContrarianFinderResultsTable';
 import StrengthListTable from '../components/StrengthListTable';
@@ -75,6 +75,11 @@ export default function ContrarianFinderPage() {
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
   const [archivedRunId, setArchivedRunId] = useState<string | null>(null);
   const archivedRun = useRunHistoryDetail(archivedRunId);
+  // Fetched eagerly (not just once the drawer opens) so the "View Archived Runs" button can show
+  // a live count - a deliberate reversal of that hook's own original lazy-fetch rationale, traded
+  // for this. Metadata only (no results blobs), and shares the drawer's own query key, so opening
+  // the drawer afterward reuses this exact cache entry at zero extra cost.
+  const runHistoryList = useRunHistoryList(canViewHistory);
   const isArchiveMode = archivedRunId != null;
   // While a selected archive is still loading, effectiveData intentionally
   // stays undefined rather than silently falling back to the live scan -
@@ -196,7 +201,7 @@ export default function ContrarianFinderPage() {
                   data-testid="archived-run-view-other"
                   className="rounded-btn bg-warning/20 px-2.5 py-1 text-xs font-semibold text-warning transition-colors hover:bg-warning/30"
                 >
-                  🕘 View Archived Runs
+                  🕘 View Archived {runHistoryList.data ? `(#${runHistoryList.data.runs.length} Runs)` : ''}
                 </button>
               )}
               <button
@@ -226,9 +231,14 @@ export default function ContrarianFinderPage() {
         {!isArchiveMode && !scan.isPending && scan.data?.params && (() => {
           const { expectedTotal, isComplete } = getRunCompleteness(scan.data.params, scan.data.scanned, scan.data.universeSize);
           return (
-            <p className={`text-xs italic ${isComplete ? 'text-text-secondary' : 'font-medium not-italic text-warning'}`}>
-              Last scan used: {scan.data.params.threshold}% threshold · {scan.data.params.scanDays}-day window · batch size {scan.data.params.batchSize} · max {scan.data.params.maxBatches} batches · {scan.data.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
-              {scan.data.completedAt && <> · run {formatAsOf(scan.data.completedAt)}</>}
+            <p data-testid="last-scan-caption" className={`text-xs italic ${isComplete ? 'text-text-secondary' : 'font-medium not-italic text-warning'}`}>
+              {scan.data.completedAt && (
+                <>
+                  <strong className="rounded bg-yellow-300 px-1 font-semibold text-green-800">last ran {formatElapsedSince(scan.data.completedAt)}</strong> -{' '}
+                </>
+              )}
+              {scan.data.params.threshold}% threshold · {scan.data.params.scanDays}-day window · batch size {scan.data.params.batchSize} · max {scan.data.params.maxBatches} batches · {scan.data.params.qualityPreset === 'relaxed' ? 'Relaxed' : 'Standard'} quality
+              {scan.data.completedAt && <> · <span className="underline">run {formatAsOf(scan.data.completedAt)}</span></>}
               {' '}· {scan.data.scanned} of {expectedTotal} scanned
               {!isComplete && ' — partial run, interrupted before it finished'}
             </p>
@@ -277,7 +287,7 @@ export default function ContrarianFinderPage() {
                 data-testid="view-archived-runs-button"
                 className="rounded-btn bg-sky-500/10 px-3 py-1.5 text-sm font-medium text-sky-600 transition-colors hover:bg-sky-500/20"
               >
-                🕘 View Archived Runs
+                🕘 View Archived {runHistoryList.data ? `(#${runHistoryList.data.runs.length} Runs)` : ''}
               </button>
             )}
 

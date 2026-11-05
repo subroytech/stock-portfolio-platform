@@ -30,6 +30,21 @@ export function formatAsOf(isoTimestamp: string): string {
   return new Date(isoTimestamp).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+// "3 days and 7 hours ago" - a plain elapsed-time readout computed once at render time (no
+// live-ticking interval), same precedent as formatAsOf above never re-rendering on its own.
+export function formatElapsedSince(isoTimestamp: string): string {
+  const diffMs = Date.now() - new Date(isoTimestamp).getTime();
+  if (diffMs < 0) return 'just now';
+  const totalHours = Math.floor(diffMs / 3_600_000);
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  if (days === 0 && hours === 0) return 'less than an hour ago';
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days} day${days === 1 ? '' : 's'}`);
+  if (hours > 0) parts.push(`${hours} hour${hours === 1 ? '' : 's'}`);
+  return `${parts.join(' and ')} ago`;
+}
+
 // Ported from the source app's 4-tier decline severity scale (index.html's
 // .cf-chg-15/20/25/35 classes, contrarian-finder.js's chgCls ternary) —
 // mapped onto this app's warning/danger tokens (no dedicated "orange" token

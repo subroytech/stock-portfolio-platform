@@ -53,12 +53,12 @@ const SNAPSHOT = {
   companyName: 'Apple Inc.',
 };
 
-function renderPopup(props: Partial<React.ComponentProps<typeof CandlestickPopup>> = {}) {
+function renderPopup(props: Partial<React.ComponentProps<typeof CandlestickPopup>> = {}, initialEntries: string[] = ['/']) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const onClose = vi.fn();
   const utils = render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={initialEntries}>
         <CandlestickPopup symbol="AAPL" initialInterval="1day" onClose={onClose} {...props} />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -256,19 +256,21 @@ describe('CandlestickPopup', () => {
       expect(screen.queryByTestId('candlestick-ask-about-patterns')).not.toBeInTheDocument();
     });
 
-    test('closes the popup and navigates to the Q&A tab when clicked', async () => {
+    test('closes the popup and navigates to the Q&A tab, carrying its own current page forward as router state so that page\'s own Back link can return here instead of guessing', async () => {
       vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
         if (path === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['candlestick_question_answer:ask'] });
         if (path === '/candlestick/AAPL/1day') return Promise.resolve(SNAPSHOT);
         return Promise.resolve({});
       });
-      const { onClose } = renderPopup();
+      // Opened from Contrarian Comeback, not Stock Analysis - proves the forwarded path is the
+      // popup's own real location, not a hardcoded assumption.
+      const { onClose } = renderPopup({}, ['/contrarian-comeback']);
       await screen.findByTestId('candlestick-price-chart');
 
       await userEvent.click(await screen.findByTestId('candlestick-ask-about-patterns'));
 
       expect(onClose).toHaveBeenCalledTimes(1);
-      expect(mockNavigate).toHaveBeenCalledWith('/candlestick-question-answer');
+      expect(mockNavigate).toHaveBeenCalledWith('/candlestick-question-answer', { state: { from: '/contrarian-comeback' } });
     });
 
     test('shares one wrapping group with Quick Reference, so the two can never wrap onto separate lines (the real bug fixed 2026-09-25)', async () => {

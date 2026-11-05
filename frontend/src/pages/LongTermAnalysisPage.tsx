@@ -5,6 +5,7 @@ import { formatCurrency } from '../lib/format';
 import { useIncomingTicker } from '../lib/tickerHandoff';
 import { useTickerHistory } from '../lib/tickerHistory';
 import StockPreviewChart from '../components/StockPreviewChart';
+import CandlestickPopup from '../components/CandlestickPopup';
 import TickerSubTabs from '../components/TickerSubTabs';
 
 const RATING_STYLES: Record<string, string> = {
@@ -59,6 +60,7 @@ function ConvictionCard({ horizon, result, maxScore }: ConvictionCardProps) {
 export default function LongTermAnalysisPage() {
   const [ticker, setTicker] = useState('');
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
+  const [candlestickSymbol, setCandlestickSymbol] = useState<string | null>(null);
   const [pendingSymbol, setPendingSymbol] = useState<string | null>(null);
   const analysis = useLongTermAnalysis();
   const history = useTickerHistory<LongTermAnalysisResult>({ storageKey: 'longTermAnalysis:history' });
@@ -168,6 +170,13 @@ export default function LongTermAnalysisPage() {
                     <span className="ml-2 text-sm text-text-secondary">
                       {data.companyName ?? ''}{data.exchange ? ` · ${data.exchange}` : ''}
                     </span>
+                    <button
+                      type="button"
+                      onClick={() => setCandlestickSymbol(data.symbol)}
+                      className="ml-2 text-xs font-medium text-accent hover:underline"
+                    >
+                      Candlestick chart →
+                    </button>
                     <p className="mt-1 text-xs text-text-muted">
                       {na(data.sector)} · {na(data.industry)}
                     </p>
@@ -400,6 +409,9 @@ export default function LongTermAnalysisPage() {
       </main>
 
       {previewSymbol && <StockPreviewChart symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />}
+      {candlestickSymbol && (
+        <CandlestickPopup symbol={candlestickSymbol} initialInterval="1day" onClose={() => setCandlestickSymbol(null)} />
+      )}
     </>
   );
 }

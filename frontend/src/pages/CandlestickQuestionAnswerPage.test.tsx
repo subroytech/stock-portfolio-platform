@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, type InitialEntry } from 'react-router-dom';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import * as client from '../api/client';
 import { ApiError } from '../api/client';
@@ -23,11 +23,11 @@ const TOP_QUESTIONS = [
   { id: 'q2', questionText: 'Is Hammer bullish or bearish?', answerText: 'Hammer is bullish.', matchedPatternNames: [{ patternName: 'Hammer', relevantForHorizon: null }], questionAskedCount: 5, lastAskedAt: 't1', resolvedVia: 'llm' },
 ];
 
-function renderPage() {
+function renderPage(initialEntries?: InitialEntry[]) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={initialEntries}>
         <CandlestickQuestionAnswerPage />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -72,6 +72,24 @@ describe('CandlestickQuestionAnswerPage', () => {
     await userEvent.click(back);
 
     expect(mockNavigate).toHaveBeenCalledWith('/stock-analysis');
+  });
+
+  test('reached via router state from Contrarian Comeback (or Long-Term Analysis), the Back link returns there - even when the session also holds stock_analysis:view, which would otherwise send it to /stock-analysis instead (2026-11-01 fix)', async () => {
+    vi.spyOn(client, 'apiFetch').mockImplementation((path: string) => {
+      if (path === '/auth/me') return Promise.resolve({ id: '1', email: 'a@b.com', roles: ['user'], permissions: ['stock_analysis:view'] });
+      if (path.startsWith('/candlestick-question-answer/entries')) return Promise.resolve({ entries: [] });
+      if (path === '/candlestick-question-answer/top-questions') return Promise.resolve({ questions: [] });
+      return Promise.resolve({});
+    });
+    renderPage([{ pathname: '/candlestick-question-answer', state: { from: '/contrarian-comeback' } }]);
+
+    const back = screen.getByTestId('candlestick-qa-back');
+    // state.from takes priority over the stock_analysis:view-derived default, so the label
+    // never flips to "← Charts" here even once the session resolves - it stays "← Back".
+    await waitFor(() => expect(back).toHaveTextContent('← Back'));
+    await userEvent.click(back);
+
+    expect(mockNavigate).toHaveBeenCalledWith('/contrarian-comeback');
   });
 
   test('browsing a curated question shows its answer inline, with no extra network call beyond the initial list fetch', async () => {

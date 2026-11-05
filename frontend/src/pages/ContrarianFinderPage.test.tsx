@@ -166,9 +166,13 @@ describe('ContrarianFinderPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Run scan' }));
     await screen.findByText('Candidates (1)');
 
-    expect(screen.getByText(
-      /Last scan used: 15% threshold · 7-day window · batch size 125 · max 5 batches · Standard quality · run /,
-    )).toBeInTheDocument();
+    // Queried by data-testid, not by text content - the caption now mixes plain text with a
+    // <strong>/<span> for the bolded "last ran"/underlined "run <date>" styling, which splits
+    // the text across elements and breaks getByText's own default matching (jest-dom's
+    // toHaveTextContent checks the full element, nested markup included).
+    expect(screen.getByTestId('last-scan-caption')).toHaveTextContent(
+      /15% threshold · 7-day window · batch size 125 · max 5 batches · Standard quality · run /,
+    );
 
     // Change the live threshold and an Advanced field without re-running -
     // the read-only line must keep reflecting what actually produced these results.
@@ -177,9 +181,9 @@ describe('ContrarianFinderPage', () => {
     await userEvent.click(screen.getByRole('button', { name: /Advanced/i }));
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Scan window' }), '14');
 
-    expect(screen.getByText(
-      /Last scan used: 15% threshold · 7-day window · batch size 125 · max 5 batches · Standard quality · run /,
-    )).toBeInTheDocument();
+    expect(screen.getByTestId('last-scan-caption')).toHaveTextContent(
+      /15% threshold · 7-day window · batch size 125 · max 5 batches · Standard quality · run /,
+    );
   });
 
   test('retained scan parameters survive navigating away and back, and a full page refresh', async () => {
@@ -191,11 +195,11 @@ describe('ContrarianFinderPage', () => {
 
     first.unmount();
     const second = renderPage(first.queryClient); // same-tab nav
-    expect(screen.getByText(/Last scan used: 15% threshold/)).toBeInTheDocument();
+    expect(screen.getByTestId('last-scan-caption')).toHaveTextContent(/15% threshold/);
 
     second.unmount();
     renderPage(); // fresh QueryClient - simulates a full page reload, sessionStorage intact
-    expect(screen.getByText(/Last scan used: 15% threshold/)).toBeInTheDocument();
+    expect(screen.getByTestId('last-scan-caption')).toHaveTextContent(/15% threshold/);
   });
 
   test('does not crash on pre-existing persisted scan data that predates the retained-parameters field', () => {
@@ -204,7 +208,8 @@ describe('ContrarianFinderPage', () => {
     }));
     renderPage();
     expect(screen.getByText('Candidates (1)')).toBeInTheDocument();
-    expect(screen.queryByText(/Last scan used:/)).not.toBeInTheDocument();
+    // No `params`, so the whole last-run caption line is skipped entirely.
+    expect(screen.queryByTestId('last-scan-caption')).not.toBeInTheDocument();
   });
 
   test('missing FMP key shows a 503 message with a button to add one', async () => {
@@ -352,9 +357,9 @@ describe('ContrarianFinderPage', () => {
 
       expect(await screen.findByText('Candidates (1)')).toBeInTheDocument();
       expect(screen.getAllByText('ZZZ').length).toBeGreaterThan(0);
-      expect(screen.getByText(
-        /Last scan used: 25% threshold · 7-day window · batch size 125 · max 3 batches · Standard quality · run /,
-      )).toBeInTheDocument();
+      expect(screen.getByTestId('last-scan-caption')).toHaveTextContent(
+        /25% threshold · 7-day window · batch size 125 · max 3 batches · Standard quality · run /,
+      );
       expect(apiFetchSpy).toHaveBeenCalledWith('/contrarian-finder/last-scan');
     });
 
@@ -405,7 +410,7 @@ describe('ContrarianFinderPage', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Run scan' }));
       await screen.findByText('Candidates (1)');
 
-      const line = await screen.findByText(/Last scan used:/);
+      const line = await screen.findByTestId('last-scan-caption');
       expect(line).toHaveTextContent('3 of 3 scanned');
       expect(line).not.toHaveTextContent('partial');
       expect(line.className).not.toContain('text-warning');
@@ -423,7 +428,7 @@ describe('ContrarianFinderPage', () => {
       vi.spyOn(client, 'apiFetch').mockResolvedValue({ lastScan: null }); // the unconditional mount-time fallback GET
       renderPage();
 
-      const line = screen.getByText(/Last scan used:/);
+      const line = screen.getByTestId('last-scan-caption');
       expect(line).toHaveTextContent('125 of 458 scanned');
       expect(line).toHaveTextContent(/partial run/i);
       expect(line.className).toContain('text-warning');
