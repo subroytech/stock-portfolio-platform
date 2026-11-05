@@ -1,6 +1,6 @@
 ## Rebuild Plan — From Single-User Client-Side App to a Scalable Multi-User Platform
 
-**Last updated:** 2026-10-12
+**Last updated:** 2026-11-04
 
 **Why this section exists:** the user identified the single biggest shortcoming of the current app: it's a 100% client-side, single-user project (no backend, no database, no auth — `localStorage` is the only persistence layer) and therefore cannot scale beyond "one person, one browser." This doc started as a forward-looking rebuild plan and has since become a **living status document** — Section 1 tracks what's actually built, Section 2 is the immediate next action, Section 3 is the full ordered backlog. Update it as work lands rather than letting it drift back into a stale one-time plan. For a compact, fast-scan version of Section 1, see `CLAUDE.md`'s "Current Build State" — this doc carries the detail and rationale; that one carries the quick summary.
 
@@ -78,7 +78,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 10-12
+## Section 1 — Accomplished Till 11-04
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -2482,6 +2482,38 @@ row surviving three repeat asks under three different horizons with correctly-re
 each time; the upgrade fix confirmed via a deterministic repro (deactivating then reactivating a
 template) that a frozen failure genuinely flips to a stored success in place, same row id, without
 creating a duplicate.
+
+## Contrarian Finder — Elapsed-Time Caption + Archive Count; Candlestick Chart on LT Analysis/Contrarian Comeback ✅ Done
+
+Built 2026-11-01–04, three small requested updates, frontend-only.
+
+**Contrarian Finder**: the "Last scan used" caption now leads with a bold, yellow-highlighted
+"last ran X days and Y hours ago" (new `formatElapsedSince()` helper) ahead of the existing
+threshold/window/batch-size/run-timestamp text; both "View Archived Runs" buttons now show a live
+`(#NN Runs)` count, which required promoting `useRunHistoryList()` from a lazy, drawer-open-only
+fetch to an eager one for any viewer holding `contrarian_finder:view_history` — a deliberate,
+acknowledged reversal of that hook's own original "no need to pull this on every page load"
+design, traded for the live count (same query key, so the drawer still reuses the fetch for free).
+
+**Candlestick chart reuse**: Long-Term Analysis and Contrarian Comeback both gained a
+"Candlestick chart →" link next to the ticker's company name, opening the same `CandlestickPopup`
+Stock Analysis already uses (`initialInterval="1day"`, full interactivity inherited for free).
+Contrarian Comeback's ticker/company-name block was restructured onto one line to match
+Long-Term Analysis's existing layout.
+
+**A real bug found and fixed while wiring this up**: `CandlestickPopup.tsx`'s "Ask about
+patterns →" link always sent the Pattern Q&A page's own Back button to a hardcoded
+`/stock-analysis` — silently correct only because Stock Analysis had been its one and only caller
+until now. Fixed by having the popup forward its own `location.pathname` as router state on that
+navigate call (the same `location.state` convention `ImportPreviewPage.tsx` already uses
+elsewhere), with `CandlestickQuestionAnswerPage.tsx`'s Back link preferring that forwarded path
+over its old hardcoded guess — fixing the bug for the pre-existing Stock Analysis flow too, not
+just the two new entry points.
+
+7 new frontend tests (852 total). One existing-test gotcha hit along the way: `getByText(regex)`
+stopped matching once the caption's text was split across new `<strong>`/`<span>` elements for
+the bold/underline styling — fixed by querying a new `data-testid` + `toHaveTextContent` instead.
+`tsc`/lint clean.
 
 ---
 

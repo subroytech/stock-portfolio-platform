@@ -50,7 +50,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 10-12)
+# Current Build State (as of 11-04)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -2690,6 +2690,55 @@ Throwaway account and the test row cleaned up afterward. The real motivating row
 Gap... i conjunction" question, frozen since 2026-10-09) was deliberately left untouched for the
 user to naturally re-trigger themselves under the now-configured `gpt-4o`, rather than
 force-upgrading real user data as part of this verification.
+
+## Contrarian Finder — Elapsed-Time Caption + Archive Count; Candlestick Chart on LT Analysis/Contrarian Comeback ✅ Done
+
+Built 2026-11-01 through 11-04, three small requested UI updates bundled into one round.
+
+**Contrarian Finder caption + archive count**: the "Last scan used" line now leads with a bold,
+highlighted "last ran X days and Y hours ago" (new `formatElapsedSince()` helper in
+`lib/format.ts`, computed once at render time, no live ticking) instead of only showing an
+absolute timestamp — per explicit styling direction, deep green text on a yellow background so
+it's genuinely hard to miss. Both "View Archived Runs" buttons (the main toolbar and the
+archive-mode banner) now show a live `(#NN Runs)` count — per a later follow-up, re-worded from
+an initial "(NN Available)" draft. Getting the count required promoting `useRunHistoryList()`
+from its original lazy, drawer-open-only fetch to an eager one (whenever the viewer holds
+`contrarian_finder:view_history`) — a deliberate, acknowledged reversal of that hook's own
+original "no need to pull the list on every page load" rationale, traded for the live count.
+Same query key either way, so opening the drawer afterward still reuses that fetch for free.
+
+**Candlestick chart on Long-Term Analysis / Contrarian Comeback**: both pages gained a
+"Candlestick chart →" link, placed inline next to the ticker's company name (after a follow-up
+request moved it off its own line), opening the exact same `CandlestickPopup` component Stock
+Analysis already uses — `initialInterval="1day"`, full symbol-switcher/timeframe/indicator/
+pattern/"Ask about patterns" behavior inherited for free, since it's the identical component.
+Contrarian Comeback's `HeaderStats` ticker block was also restructured per explicit request so
+the company name sits on the same line as the ticker, matching Long-Term Analysis's own layout,
+rather than each on its own line.
+
+**A real, verified bug found and fixed while wiring this up, not just a cosmetic add**:
+`CandlestickPopup.tsx`'s "Ask about patterns →" link always sent the Pattern Q&A page's own Back
+button to a hardcoded `/stock-analysis` — correct only for the one place this popup had ever been
+opened from before. Confirmed live in conversation that both new entry points would hit this
+(Contrarian Comeback/Long-Term Analysis sessions commonly also hold `stock_analysis:view`,
+exactly the condition that triggers the hardcoded redirect). Fixed by having `CandlestickPopup`
+forward its own `useLocation().pathname` as router state (`navigate(..., { state: { from } })`,
+the same `location.state` convention `ImportPreviewPage.tsx` already uses elsewhere in this
+codebase) on that navigate call; `CandlestickQuestionAnswerPage.tsx`'s Back link now prefers that
+forwarded path over its old hardcoded guess, falling back to the original
+`canStockAnalysis`/`navigate(-1)` logic only when no state is present (e.g. reached via the
+"Stock Analysis ▾" nav popover directly). This also fixes the bug for the pre-existing Stock
+Analysis flow, which was only silently correct there by coincidence.
+
+7 new frontend tests (852 total, up from 845) — `formatElapsedSince()`'s own edge cases
+(singular/plural, exact-day, under-an-hour, clock-skew), a strengthened "Ask about patterns" test
+that now renders from a non-trivial path to prove the forwarded state is real (not just
+coincidentally `/`), and a new regression test proving Back returns to Contrarian Comeback even
+when the session also holds `stock_analysis:view`. One pre-existing test-design gotcha hit along
+the way: `getByText(regex)` stopped matching once the caption's text was split across new
+`<strong>`/`<span>` elements for the bold/underline styling — fixed by querying a new
+`data-testid="last-scan-caption"` + `toHaveTextContent` instead, which (unlike `getByText`)
+correctly looks at the full element regardless of internal markup. `tsc`/lint clean both sides.
 
 ## Next Up
 

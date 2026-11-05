@@ -103,6 +103,10 @@ since viewing history and running a scan are unrelated capabilities. It's also *
 admin-master-restricted the way `config_properties:manage`/`users:impersonate` are — any role
 holding `permissions:manage` (i.e. `admin` or `admin-master`) can grant it to any other role.
 
+**Two small readability additions, 2026-11-04**: the "Last scan used" caption now leads with a
+highlighted "last ran X days and Y hours ago" readout, and the archive link itself now shows a
+live count — "🕘 View Archived (#NN Runs)" — instead of a bare, unlabeled button.
+
 ## "Functional Access" = `contrarian_finder:scan`
 
 Both `user-contra-withKey` and `user-contra-wokey` are granted "Functional Access," while only
@@ -505,6 +509,17 @@ from their original "Candlestick..." labels 2026-09-19, in anticipation of this 
 eventually covering more than just this one feature). Merely opening the chart, or switching to a
 timeframe that's already been looked up recently, never counts against this limit — only the
 explicit "Fetch fresh data"/"Refresh" action does.
+
+### Also reachable from Long-Term Analysis and Contrarian Comeback
+
+**Status: implemented and live-verified, 2026-11-04.** Both pages now show a "Candlestick
+chart →" link right next to the analyzed ticker's company name, opening the exact same
+full-screen chart described above — same six timeframes, same nine indicators, same symbol
+switcher — defaulting to the 1 Day view. This doesn't require `stock_analysis:view`; both pages
+were already reachable by any signed-in user, so this is simply a new way in, not a new gate.
+The chart's own "Ask about patterns →" shortcut also correctly returns you to whichever of the
+two pages you actually came from, not Stock Analysis, if you follow it into Candlestick Pattern
+Q&A and then click Back.
 
 ### Switching symbols without closing the chart
 

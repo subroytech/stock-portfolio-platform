@@ -128,7 +128,26 @@ and neither substitutes for the other.
 
 ---
 
-## 3.6 Current state (as of 2026-10-12)
+## 3.6 Current state (as of 2026-11-04)
+
+- **1095 backend / 852 frontend tests passing** (up from 1095/845 as of 2026-10-12) — backend
+  untouched this round, all 7 new tests are frontend-only, from three small Contrarian Finder/
+  Candlestick-reuse UI updates (see `CLAUDE.md`'s matching dated entry): `formatElapsedSince()`'s
+  own edge cases (singular/plural, exact-day, under-an-hour, clock-skew), a strengthened
+  `CandlestickPopup.tsx` "Ask about patterns" test that now renders from a non-trivial route (not
+  just `/`) to prove the forwarded router state is real, and a new regression test proving the
+  Pattern Q&A page's Back link returns to Contrarian Comeback even when the session also holds
+  `stock_analysis:view`. `tsc`/lint clean both sides.
+- **A real testing-library gotcha hit while adding the elapsed-time caption**: `getByText(regex)`
+  stopped matching Contrarian Finder's "Last scan used" line once its text was split across new
+  `<strong>`/`<span>` elements (added for bold/underline styling) — RTL's default text matching
+  does not aggregate text split across sibling elements the way a human reading the rendered page
+  would. Fixed by querying a new `data-testid="last-scan-caption"` and asserting with jest-dom's
+  `toHaveTextContent` instead, which correctly reads an element's full text regardless of internal
+  markup — worth remembering any time inline styling (bold/underline/color spans) gets added to
+  previously-plain-text UI that existing tests already query by text content.
+
+## 3.6a Previous state (as of 2026-10-12)
 
 - **1095 backend / 845 frontend tests passing** (up from 904/516 as of 2026-09-19), `tsc`/lint
   clean both sides. Almost all of this growth is from the Candlestick Pattern Q&A module's
@@ -158,7 +177,7 @@ and neither substitutes for the other.
   past the bare minimum. Worth remembering for any future admin-authored question template:
   always anchor with a trailing `$` when the capture group is followed only by optional tokens.
 
-## 3.6a Previous state (as of 2026-09-19)
+## 3.6b Previous state (as of 2026-09-19)
 
 - **904 backend / 516 frontend tests passing** (up from 845/488 as of 2026-09-12), `tsc`/lint
   clean both sides. New backend test files from the Candlestick Charts build (2026-09-18):
@@ -193,7 +212,7 @@ and neither substitutes for the other.
   service file can load safely underneath any mocking style without ever touching a real
   connection.
 
-## 3.6b Previous state (as of 2026-09-12)
+## 3.6c Previous state (as of 2026-09-12)
 
 - **845 backend / 488 frontend tests passing** (up from 817/483 as of 2026-09-07), `tsc`/lint
   clean both sides. New/rewritten backend test files from the 2026-09-09 through 2026-09-12
@@ -214,7 +233,7 @@ and neither substitutes for the other.
   connection — a reminder that some classes of bugs are only visible via live verification
   against the real DB, not unit tests with a mocked pool, however thorough.
 
-## 3.6c Previous state (as of 2026-09-07)
+## 3.6d Previous state (as of 2026-09-07)
 
 - **817 backend / 483 frontend tests passing** (up from 689/413 as of 2026-08-31), `tsc`/lint
   clean both sides. New test files added for the four features shipped 2026-09-07: backend's
@@ -227,7 +246,7 @@ and neither substitutes for the other.
   Monthly Summary + Function/FMP/Finnhub Split" entry) — a good example of a test file needing
   a real rewrite, not just new cases added, when the underlying design itself changes.
 
-## 3.6d Previous state (as of 2026-08-31)
+## 3.6e Previous state (as of 2026-08-31)
 
 - All four CI jobs (backend, frontend, analysis-service, e2e) have been green together
   multiple times (see `CLAUDE.md`'s "Contrarian Finder Stock Universe" entry onward).
