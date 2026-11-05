@@ -1,0 +1,13 @@
+-- Candlestick Pattern Q&A - the system prompt now lets the LLM answer from its own general
+-- candlestick-pattern knowledge when the curated content/tools have nothing addressing the
+-- specific question, instead of always refusing (2026-10-09, direct follow-on to a real user
+-- report: "Can Tasuki Gap be used in conjunction with other patterns?" correctly got
+-- unable_to_answer, since no curated entry covers cross-pattern confluence - a deliberate
+-- trade-off the user asked to loosen).
+--
+-- This column is the transparency mechanism for that loosening: NOT NULL DEFAULT false (a
+-- single uniform default, unlike resolved_via/example_phrasing's per-row-distinct backfills -
+-- no multi-file split needed here) so every answer can be labeled as curated-grounded or not.
+-- Always false for a template/none-resolved row; only ever true when the LLM itself set
+-- from_general_knowledge: true on its own provide_answer call.
+ALTER TABLE m_candlestick_asked_question ADD COLUMN from_general_knowledge BOOLEAN NOT NULL DEFAULT false;

@@ -65,36 +65,33 @@ function findHeaderRowIndex(rows: string[][]): number {
   return 0;
 }
 
-export function parseGenericCsv(text: string): ParseResult {
-  const aoa = Papa.parse<string[]>(text, { skipEmptyLines: true }).data;
-  if (!aoa.length) throw new Error('CSV appears to be empty or could not be parsed.');
+// Shared by parseGenericCsv() (map resolved via HEADER_ALIASES/mapHeaders()) and
+// flexParser.service.ts's parseFlexCsv() (map resolved from a user-defined/saved
+// column mapping instead) - the actual value parsing, numeric coercion, purchase-price
+// fallback, sector resolution, and cost-basis/gain-loss derivation are identical
+// regardless of how `map` (field -> column index) got built, so Flex produces
+// byte-identical HoldingEntry output using this same, already-tested logic rather
+// than a parallel implementation.
+// handles "(123.45)" as -123.45 — Pending Activity/cash-equivalent balances can be net
+// negative. Exported so flexParser.service.ts's cash-marker detection reuses the exact same
+// parenthetical-negative parsing instead of duplicating it.
+export function parseCashAmt(v: unknown): number | null {
+  if (v == null) return null;
+  let s = String(v).trim();
+  let neg = false;
+  if (/^\(.*\)$/.test(s)) { neg = true; s = s.slice(1, -1); }
+  const n = parseNum(s);
+  return n == null ? null : (neg ? -Math.abs(n) : n);
+}
 
-  const headerRowIdx = findHeaderRowIndex(aoa);
-  const headers = aoa[headerRowIdx];
-  const rows = aoa.slice(headerRowIdx + 1).map((row) => Object.fromEntries(headers.map((h, i) => [h, row[i] ?? ''])));
-  if (!rows.length) throw new Error('CSV appears to be empty or could not be parsed.');
-
-  const map = mapHeaders(headers);
-
+export function buildHoldingsFromMappedRows(rows: Record<string, string>[], map: Record<string, number>): ParseResult {
   const hasPurchasePrice = 'purchasePrice' in map;
   const hasMarketValue = 'marketValue' in map;
   const hasGainLoss = 'gainLossDollar' in map;
-  const missing = ['symbol', 'quantity', 'currentPrice'].filter((f) => !(f in map));
-  if (missing.length) throw new Error(`Missing required columns: ${missing.join(', ')}. Headers found: ${headers.join(', ')}`);
 
   const data: HoldingEntry[] = [];
   const errors: string[] = [];
   let cashTotal = 0;
-
-  // handles "(123.45)" as -123.45 — Pending Activity can be net negative
-  function parseCashAmt(v: unknown): number | null {
-    if (v == null) return null;
-    let s = String(v).trim();
-    let neg = false;
-    if (/^\(.*\)$/.test(s)) { neg = true; s = s.slice(1, -1); }
-    const n = parseNum(s);
-    return n == null ? null : (neg ? -Math.abs(n) : n);
-  }
 
   rows.forEach((row, i) => {
     const vals = Object.values(row);
@@ -154,6 +151,23 @@ export function parseGenericCsv(text: string): ParseResult {
 
   if (!data.length) throw new Error('No valid rows found. ' + (errors[0] || ''));
   return { data, errors, cashAmount: cashTotal };
+}
+
+export function parseGenericCsv(text: string): ParseResult {
+  const aoa = Papa.parse<string[]>(text, { skipEmptyLines: true }).data;
+  if (!aoa.length) throw new Error('CSV appears to be empty or could not be parsed.');
+
+  const headerRowIdx = findHeaderRowIndex(aoa);
+  const headers = aoa[headerRowIdx];
+  const rows = aoa.slice(headerRowIdx + 1).map((row) => Object.fromEntries(headers.map((h, i) => [h, row[i] ?? ''])));
+  if (!rows.length) throw new Error('CSV appears to be empty or could not be parsed.');
+
+  const map = mapHeaders(headers);
+
+  const missing = ['symbol', 'quantity', 'currentPrice'].filter((f) => !(f in map));
+  if (missing.length) throw new Error(`Missing required columns: ${missing.join(', ')}. Headers found: ${headers.join(', ')}`);
+
+  return buildHoldingsFromMappedRows(rows, map);
 }
 
 export function isRobinhoodTxt(text: string): boolean {
