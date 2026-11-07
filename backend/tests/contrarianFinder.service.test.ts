@@ -12,6 +12,7 @@ import {
   buildBatches, filterCandidates, resolveQuality, assembleUniverse, scanStock, scanBatch,
   fetchStockData, assembleScanBatch, getUniverseTable, refreshTickerDataBatch,
   saveLastScan, getLastScan, listRunHistory, getRunById, appendRunProgress, CF_MAX,
+  getHeldSymbolSyncCandidates, syncHeldSymbolsToUniverse,
 } from '../src/services/contrarianFinder.service';
 
 const mockQuery = pool.query as unknown as jest.Mock;
@@ -124,6 +125,45 @@ describe('assembleUniverse', () => {
     const symbols = universe.map((u) => u.symbol);
     expect(new Set(symbols).size).toBe(CF_MAX); // no duplicates even at the cap boundary
   });
+
+  test('includes USER_HELD constituents as the final tier, after every curated source (2026-11-06)', async () => {
+    mockQuery.mockReset(); // isolate .mock.calls - the shared beforeEach's mockImplementation alone doesn't clear call history across tests
+    mockQuery.mockImplementation((_text: string, params: string[]) => {
+      const indexId = params[0];
+      const constituents: Record<string, string[]> = { ...MOCK_CONSTITUENTS, USER_HELD: ['IBIT', 'SOUN'] };
+      const rows = (constituents[indexId] || []).map((symbol) => ({ symbol }));
+      return Promise.resolve({ rows });
+    });
+
+    const universe = await assembleUniverse();
+    const ibit = universe.find((u) => u.symbol === 'IBIT');
+    expect(ibit).toEqual({ symbol: 'IBIT', tier: 5, source: 'USER_HELD' });
+    // Tier 5 entries must land after every curated tier - prove it by position, not just presence:
+    // nothing from a curated tier (<=4) should appear after the first tier-5 entry.
+    const firstUserHeldIndex = universe.findIndex((u) => u.tier === 5);
+    expect(firstUserHeldIndex).toBeGreaterThan(-1);
+    expect(universe.slice(firstUserHeldIndex).some((u) => u.tier <= 4)).toBe(false);
+  });
+
+  test('the CF_MAX short-circuit also applies to the USER_HELD tier - the query is skipped entirely once the universe is already full', async () => {
+    mockQuery.mockReset(); // isolate .mock.calls from the previous test's own USER_HELD call
+    mockQuery.mockImplementation((_text: string, params: string[]) => {
+      const indexId = params[0];
+      const perIndexCount: Record<string, number> = {
+        DJ30: 30, NDX100: 100, SP500: 400, XLK: 100, XLV: 100,
+        XLF: 100, XLY: 100, XLI: 100, XLC: 100, XLP: 100, XLE: 100, XLB: 100, XLU: 100, XLRE: 100,
+        USER_HELD: 50,
+      };
+      const count = perIndexCount[indexId] ?? 0;
+      const rows = Array.from({ length: count }, (_, i) => ({ symbol: `${indexId}_${i}` }));
+      return Promise.resolve({ rows });
+    });
+
+    const universe = await assembleUniverse();
+    expect(universe.length).toBe(CF_MAX);
+    expect(universe.some((u) => u.source === 'USER_HELD')).toBe(false);
+    expect(mockQuery.mock.calls.some((call) => call[1]?.[0] === 'USER_HELD')).toBe(false);
+  });
 });
 
 describe('getUniverseTable', () => {
@@ -214,7 +254,7 @@ describe('refreshTickerDataBatch', () => {
     expect(mockQuery).toHaveBeenCalledTimes(1);
     const [sql, params] = mockQuery.mock.calls[0];
     expect(sql).toContain('ON CONFLICT (symbol) DO UPDATE');
-    expect(params).toEqual(['AAPL', 'Apple Inc.', 'Technology', 3e12, 'ZZZ', 'Zzz Co', 'Finance', 1e9]);
+    expect(params).toEqual(['AAPL', 'Apple Inc.', 'Technology', 3e12, false, 'ZZZ', 'Zzz Co', 'Finance', 1e9, false]);
   });
 
   test('mode "missing" only fetches/upserts symbols the DB reports as missing (has no row, or a null field)', async () => {
@@ -227,7 +267,7 @@ describe('refreshTickerDataBatch', () => {
     expect(result).toEqual({ updated: 1, skipped: 1 });
     expect(mockQuery).toHaveBeenCalledTimes(2); // the missing-lookup, then the upsert
     const upsertParams = mockQuery.mock.calls[1][1];
-    expect(upsertParams).toEqual(['ZZZ', 'Zzz Co', 'Finance', 1e9]); // AAPL never even queried from FMP
+    expect(upsertParams).toEqual(['ZZZ', 'Zzz Co', 'Finance', 1e9, false]); // AAPL never even queried from FMP
   });
 
   test('mode "missing" with nothing missing skips the FMP call and upsert entirely', async () => {
@@ -248,6 +288,170 @@ describe('refreshTickerDataBatch', () => {
     mockProfiles({ AAPL: { companyName: 'Apple Inc.', sector: 'Technology', marketCap: 3e12 } }); // ZZZ absent
     const result = await refreshTickerDataBatch(stocks, 'fake-key', 'all');
     expect(result).toEqual({ updated: 1, skipped: 1 });
+  });
+});
+
+describe('getHeldSymbolSyncCandidates', () => {
+  test('queries distinct tx_holdings symbols LEFT JOINed against m_tickers, treating the literal \'Unknown\' sentinel as equivalent to NULL', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [{ symbol: 'IBIT', already_in_universe: false }] });
+
+    const result = await getHeldSymbolSyncCandidates();
+
+    const [sql] = mockQuery.mock.calls[0];
+    expect(sql).toMatch(/DISTINCT symbol FROM tx_holdings/);
+    expect(sql).toMatch(/LEFT JOIN m_tickers/);
+    expect(sql).toMatch(/t\.sector = 'Unknown'/);
+    expect(result).toEqual([{ symbol: 'IBIT', alreadyInUniverse: false }]);
+  });
+});
+
+describe('syncHeldSymbolsToUniverse', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+
+  function mockProfiles(bySymbol: Record<string, { companyName?: string; sector?: string; marketCap?: number; isEtf?: boolean }>) {
+    global.fetch = jest.fn((url: string) => {
+      const symbol = new URL(url).searchParams.get('symbol') ?? '';
+      const p = bySymbol[symbol];
+      return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(p ? [p] : []) });
+    }) as unknown as typeof fetch;
+  }
+
+  test('a genuinely new stock is validated live via FMP, enriched into m_tickers, and added to the USER_HELD universe', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ symbol: 'ACHR', already_in_universe: false }] }) // candidates
+      .mockResolvedValueOnce({ rows: [] }) // crypto prefilter - not crypto
+      .mockResolvedValueOnce({ rows: [] }) // refreshTickerDataBatch's own upsert (return value unused)
+      .mockResolvedValueOnce({ rows: [{ symbol: 'ACHR', is_etf: false }] }) // enrichedRows
+      .mockResolvedValueOnce({ rows: [{ count: '458' }] }) // countRows
+      .mockResolvedValueOnce({ rows: [] }); // the USER_HELD insert
+    mockProfiles({ ACHR: { companyName: 'Archer Aviation Inc.', sector: 'Industrials', marketCap: 3e9, isEtf: false } });
+
+    const result = await syncHeldSymbolsToUniverse('fake-key');
+
+    expect(result).toEqual({
+      added: ['ACHR'], alreadyInUniverse: [], excludedAsEtf: [], excludedAsCrypto: [],
+      validationFailed: [], capExceeded: [],
+    });
+    const [insertSql, insertParams] = mockQuery.mock.calls[mockQuery.mock.calls.length - 1];
+    expect(insertSql).toContain("INSERT INTO m_index_constituent (index_id, symbol) VALUES ('USER_HELD', $1)");
+    expect(insertParams).toEqual(['ACHR']);
+  });
+
+  test('a known-crypto symbol (sector already \'Crypto\' in tx_holdings) is excluded before any FMP call is spent', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ symbol: 'BTC', already_in_universe: false }] }) // candidates
+      .mockResolvedValueOnce({ rows: [{ symbol: 'BTC' }] }); // crypto prefilter - IS crypto
+    const fetchSpy = jest.fn();
+    global.fetch = fetchSpy as unknown as typeof fetch;
+
+    const result = await syncHeldSymbolsToUniverse('fake-key');
+
+    expect(result).toEqual({
+      added: [], alreadyInUniverse: [], excludedAsEtf: [], excludedAsCrypto: ['BTC'],
+      validationFailed: [], capExceeded: [],
+    });
+    expect(fetchSpy).not.toHaveBeenCalled(); // zero FMP cost for a symbol already known to be crypto
+    expect(mockQuery).toHaveBeenCalledTimes(2); // candidates + crypto check only - no FMP/enrichment/count queries
+  });
+
+  test('FMP confirms isEtf: true - the symbol is enriched into m_tickers but excluded from the scan universe', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ symbol: 'IBIT', already_in_universe: false }] }) // candidates
+      .mockResolvedValueOnce({ rows: [] }) // crypto prefilter
+      .mockResolvedValueOnce({ rows: [] }) // refreshTickerDataBatch's own upsert
+      .mockResolvedValueOnce({ rows: [{ symbol: 'IBIT', is_etf: true }] }) // enrichedRows
+      .mockResolvedValueOnce({ rows: [{ count: '458' }] }); // countRows
+    mockProfiles({ IBIT: { companyName: 'iShares Bitcoin Trust', sector: 'Financial Services', marketCap: 5e10, isEtf: true } });
+
+    const result = await syncHeldSymbolsToUniverse('fake-key');
+
+    expect(result).toEqual({
+      added: [], alreadyInUniverse: [], excludedAsEtf: ['IBIT'], excludedAsCrypto: [],
+      validationFailed: [], capExceeded: [],
+    });
+    // No insert query - excludedAsEtf never reaches the eligibleForAdd/insert step.
+    expect(mockQuery.mock.calls.some((call) => call[0].includes('INSERT INTO m_index_constituent'))).toBe(false);
+  });
+
+  test('a symbol FMP returns no profile data for at all lands in validationFailed - the live validation gate (e.g. a private or delisted symbol)', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ symbol: 'SPCX', already_in_universe: false }] }) // candidates
+      .mockResolvedValueOnce({ rows: [] }) // crypto prefilter
+      // refreshTickerDataBatch's upsert is skipped entirely (entries.length === 0, no profile data)
+      .mockResolvedValueOnce({ rows: [] }) // enrichedRows - SPCX never got enriched
+      .mockResolvedValueOnce({ rows: [{ count: '458' }] }); // countRows
+    mockProfiles({}); // FMP returns nothing for SPCX
+
+    const result = await syncHeldSymbolsToUniverse('fake-key');
+
+    expect(result).toEqual({
+      added: [], alreadyInUniverse: [], excludedAsEtf: [], excludedAsCrypto: [],
+      validationFailed: ['SPCX'], capExceeded: [],
+    });
+    // Confirms refreshTickerDataBatch's own upsert never ran - exactly 4 queries total
+    // (candidates, crypto check, enrichedRows, countRows), not 5.
+    expect(mockQuery).toHaveBeenCalledTimes(4);
+  });
+
+  test('eligible stocks beyond CF_MAX headroom land in capExceeded, not added', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ symbol: 'NEW1', already_in_universe: false }, { symbol: 'NEW2', already_in_universe: false }] }) // candidates
+      .mockResolvedValueOnce({ rows: [] }) // crypto prefilter
+      .mockResolvedValueOnce({ rows: [] }) // refreshTickerDataBatch's own upsert
+      .mockResolvedValueOnce({ rows: [{ symbol: 'NEW1', is_etf: false }, { symbol: 'NEW2', is_etf: false }] }) // enrichedRows
+      .mockResolvedValueOnce({ rows: [{ count: '599' }] }) // countRows - only 1 slot of headroom left
+      .mockResolvedValueOnce({ rows: [] }); // the USER_HELD insert for NEW1 only
+    mockProfiles({
+      NEW1: { companyName: 'New One Inc.', sector: 'Technology', marketCap: 1e9, isEtf: false },
+      NEW2: { companyName: 'New Two Inc.', sector: 'Technology', marketCap: 1e9, isEtf: false },
+    });
+
+    const result = await syncHeldSymbolsToUniverse('fake-key');
+
+    expect(result).toEqual({
+      added: ['NEW1'], alreadyInUniverse: [], excludedAsEtf: [], excludedAsCrypto: [],
+      validationFailed: [], capExceeded: ['NEW2'],
+    });
+  });
+
+  test('always runs refreshTickerDataBatch in mode "all", not "missing" - mode "missing"\'s IS-NULL-only filter would never re-attempt a symbol already holding a stale literal \'Unknown\' row (the IBIT-shaped case)', async () => {
+    mockQuery.mockReset();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ symbol: 'IBIT', already_in_universe: false }] }) // candidates
+      .mockResolvedValueOnce({ rows: [] }) // crypto prefilter
+      .mockResolvedValueOnce({ rows: [] }) // refreshTickerDataBatch's own upsert
+      .mockResolvedValueOnce({ rows: [{ symbol: 'IBIT', is_etf: true }] }) // enrichedRows
+      .mockResolvedValueOnce({ rows: [{ count: '458' }] }); // countRows
+    mockProfiles({ IBIT: { companyName: 'iShares Bitcoin Trust', sector: 'Financial Services', marketCap: 5e10, isEtf: true } });
+
+    await syncHeldSymbolsToUniverse('fake-key');
+
+    // mode 'missing' issues a distinctive `unnest($1::text[])` lookup before ever calling FMP -
+    // asserting it never appears proves refreshTickerDataBatch ran in mode 'all' instead, which
+    // skips straight to the FMP call regardless of IBIT's own pre-existing stale 'Unknown' row.
+    for (const call of mockQuery.mock.calls) {
+      expect(call[0]).not.toMatch(/unnest/i);
+    }
+  });
+
+  test('no candidates at all short-circuits before any query beyond the initial candidate lookup', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // candidates - nothing needs attention
+
+    const result = await syncHeldSymbolsToUniverse('fake-key');
+
+    expect(result).toEqual({
+      added: [], alreadyInUniverse: [], excludedAsEtf: [], excludedAsCrypto: [],
+      validationFailed: [], capExceeded: [],
+    });
+    expect(mockQuery).toHaveBeenCalledTimes(1);
   });
 });
 

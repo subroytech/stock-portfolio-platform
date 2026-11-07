@@ -75,7 +75,7 @@ export async function getQuotes(symbols: string[], apiKey: string): Promise<Quot
       fmpDailyCache.getOrFetch(
         sym, 'quote', `GET /quote?symbol=${sym}`,
         () => fmpGet<any>(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${apiKey}`, { timeoutMs: 15000 }),
-        { forceFresh: fmpDailyCache.isMarketOpenNow() },
+        { forceFresh: fmpDailyCache.isMarketOpenNow(), requireFreshAfterOpen: true },
       ).then((cacheResult) => {
         const data = cacheResult.data;
         if (!data) return { sym, quote: null, wasCached: cacheResult.wasCached };
@@ -122,6 +122,7 @@ export interface TickerProfile {
   name: string;
   sector: string;
   marketCap: number | null;
+  isEtf: boolean;
 }
 
 // One call per symbol via FMP's /profile endpoint, same one-call-per-symbol
@@ -141,7 +142,7 @@ export async function getProfiles(symbols: string[], apiKey: string): Promise<Re
         if (!data) return null;
         const p = Array.isArray(data) ? data[0] : data;
         if (!p) return null;
-        return { sym, name: p.companyName || '', sector: p.sector || '', marketCap: p.marketCap ?? null };
+        return { sym, name: p.companyName || '', sector: p.sector || '', marketCap: p.marketCap ?? null, isEtf: p.isEtf === true };
       })
     )
   );
@@ -149,8 +150,8 @@ export async function getProfiles(symbols: string[], apiKey: string): Promise<Re
   const map: Record<string, TickerProfile> = {};
   for (const r of results) {
     if (r.status === 'fulfilled' && r.value && (r.value.name || r.value.sector || r.value.marketCap != null)) {
-      const { sym, name, sector, marketCap } = r.value;
-      map[sym] = { name, sector, marketCap };
+      const { sym, name, sector, marketCap, isEtf } = r.value;
+      map[sym] = { name, sector, marketCap, isEtf };
     }
   }
 

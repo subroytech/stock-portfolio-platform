@@ -228,7 +228,7 @@ export async function fetchLongTermAnalysisData(
     // the same day-cache once the market closes, since a closing price is final for the day.
     fmpDailyCache.getOrFetch(symbol, 'quote', `GET /quote?symbol=${symbol}`,
       () => fmpGet<any>(`${env.fmpBaseUrl}/quote?symbol=${symbol}&apikey=${fmpKey}`),
-      { forceFresh: fmpDailyCache.isMarketOpenNow() }),
+      { forceFresh: fmpDailyCache.isMarketOpenNow(), requireFreshAfterOpen: true }),
     // limit=5, not 3 - Contrarian Comeback (Phase 2) wants 4 periods from this same cached row;
     // fetching the superset once and slicing per-consumer avoids caching per-limit variants of
     // the same underlying data. Sliced back to 3 below, unchanged output shape.

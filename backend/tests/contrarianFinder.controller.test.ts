@@ -5,6 +5,8 @@ jest.mock('../src/services/contrarianFinder.service', () => ({
   assembleScanBatch: jest.fn(),
   getUniverseTable: jest.fn(),
   refreshTickerDataBatch: jest.fn(),
+  getHeldSymbolSyncCandidates: jest.fn(),
+  syncHeldSymbolsToUniverse: jest.fn(),
   saveLastScan: jest.fn(),
   appendRunProgress: jest.fn(),
   getLastScan: jest.fn(),
@@ -39,6 +41,8 @@ const mockAssembleUniverse = cf.assembleUniverse as jest.Mock;
 const mockAssembleScanBatch = cf.assembleScanBatch as jest.Mock;
 const mockGetUniverseTable = cf.getUniverseTable as jest.Mock;
 const mockRefreshTickerDataBatch = cf.refreshTickerDataBatch as jest.Mock;
+const mockGetHeldSymbolSyncCandidates = cf.getHeldSymbolSyncCandidates as jest.Mock;
+const mockSyncHeldSymbolsToUniverse = cf.syncHeldSymbolsToUniverse as jest.Mock;
 const mockSaveLastScan = cf.saveLastScan as jest.Mock;
 const mockAppendRunProgress = cf.appendRunProgress as jest.Mock;
 const mockGetLastScan = cf.getLastScan as jest.Mock;
@@ -74,6 +78,10 @@ beforeEach(() => {
   mockGetUniverseTable.mockReset();
   mockRefreshTickerDataBatch.mockReset();
   mockRefreshTickerDataBatch.mockResolvedValue({ updated: 5, skipped: 1 });
+  mockGetHeldSymbolSyncCandidates.mockReset();
+  mockGetHeldSymbolSyncCandidates.mockResolvedValue([]);
+  mockSyncHeldSymbolsToUniverse.mockReset();
+  mockSyncHeldSymbolsToUniverse.mockResolvedValue({ added: [], alreadyInUniverse: [], excludedAsEtf: [], excludedAsCrypto: [], validationFailed: [], capExceeded: [] });
   mockSaveLastScan.mockReset();
   mockSaveLastScan.mockResolvedValue('run-1');
   mockAppendRunProgress.mockReset();
@@ -308,6 +316,66 @@ describe('POST /contrarian-finder/ticker-data-refresh-batch', () => {
     expect(res1.status).toBe(400);
     const res2 = await request(app).post('/contrarian-finder/ticker-data-refresh-batch').set('Cookie', authCookie).send({ batchIndex: 'nope' });
     expect(res2.status).toBe(400);
+  });
+});
+
+describe('GET /contrarian-finder/held-symbol-sync-preview', () => {
+  test('401 without a session cookie', async () => {
+    const res = await request(app).get('/contrarian-finder/held-symbol-sync-preview');
+    expect(res.status).toBe(401);
+  });
+
+  test('403 for a signed-in user without the contrarian_finder:scan permission', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).get('/contrarian-finder/held-symbol-sync-preview').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(mockGetHeldSymbolSyncCandidates).not.toHaveBeenCalled();
+  });
+
+  test('200 returns the candidate list as-is from the service', async () => {
+    mockGetHeldSymbolSyncCandidates.mockResolvedValue([
+      { symbol: 'IBIT', alreadyInUniverse: false },
+      { symbol: 'AAPL', alreadyInUniverse: true },
+    ]);
+    const res = await request(app).get('/contrarian-finder/held-symbol-sync-preview').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ candidates: [
+      { symbol: 'IBIT', alreadyInUniverse: false },
+      { symbol: 'AAPL', alreadyInUniverse: true },
+    ] });
+  });
+});
+
+describe('POST /contrarian-finder/held-symbol-sync', () => {
+  test('401 without a session cookie', async () => {
+    const res = await request(app).post('/contrarian-finder/held-symbol-sync');
+    expect(res.status).toBe(401);
+  });
+
+  test('403 for a signed-in user without the contrarian_finder:scan permission', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).post('/contrarian-finder/held-symbol-sync').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(mockSyncHeldSymbolsToUniverse).not.toHaveBeenCalled();
+  });
+
+  test('503 when the caller has no FMP key on file', async () => {
+    mockGetDecryptedKey.mockRejectedValue(new userSubscription.MissingUserApiKeyError('No fmp API key on file.'));
+    const res = await request(app).post('/contrarian-finder/held-symbol-sync').set('Cookie', authCookie);
+    expect(res.status).toBe(503);
+    expect(mockSyncHeldSymbolsToUniverse).not.toHaveBeenCalled();
+  });
+
+  test('200 returns the service\'s 6-bucket sync result as-is', async () => {
+    const result = {
+      added: ['SOUN'], alreadyInUniverse: ['AAPL'], excludedAsEtf: ['IBIT'],
+      excludedAsCrypto: ['BTC'], validationFailed: ['SPCX'], capExceeded: [],
+    };
+    mockSyncHeldSymbolsToUniverse.mockResolvedValue(result);
+    const res = await request(app).post('/contrarian-finder/held-symbol-sync').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(result);
+    expect(mockSyncHeldSymbolsToUniverse).toHaveBeenCalledWith('fake-fmp-key');
   });
 });
 

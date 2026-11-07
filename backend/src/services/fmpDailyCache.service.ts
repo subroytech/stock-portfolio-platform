@@ -35,11 +35,45 @@ export function isMarketOpenNow(date: Date = new Date()): boolean {
   return minutesSinceMidnight >= 9 * 60 + 30 && minutesSinceMidnight < 16 * 60;
 }
 
+// Weekday + at/after 9:30am America/New_York - deliberately NOT capped at market close (unlike
+// isMarketOpenNow above), since this answers a different question: "has today's opening bell
+// already rung," not "is the market open right now." Used by requireFreshAfterOpen below to spot
+// a 'quote' row that was fetched before today's session started - it still necessarily reflects
+// the PRIOR day's close at that point, since no new tick exists yet, but it gets tagged with
+// today's cache_date all the same.
+function isAtOrAfterTodaysOpen(date: Date): boolean {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: EASTERN_TZ, weekday: 'short', hour: 'numeric', minute: 'numeric', hourCycle: 'h23',
+  }).formatToParts(date);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  if (get('weekday') === 'Sat' || get('weekday') === 'Sun') return false;
+  const minutesSinceMidnight = parseInt(get('hour'), 10) * 60 + parseInt(get('minute'), 10);
+  return minutesSinceMidnight >= 9 * 60 + 30;
+}
+
+// A same-day cache_date alone isn't sufficient for 'quote' lookups: a row fetched pre-market
+// (e.g. 1:44am) still correctly reflects the PRIOR session's close at that moment (nothing
+// fresher exists yet), but gets stamped with TODAY's cache_date all the same - left unchecked,
+// that stale pre-open snapshot silently blocks every real fetch for the rest of the day, even
+// long after today's own close has genuinely happened. Confirmed live 2026-11-06: NVDA's cached
+// quote was actually Thursday's 4:00pm close, tagged as Friday's data, because nobody refreshed
+// during Friday's own 9:30-4:00 window. Scoped to 'quote' only (via requireFreshAfterOpen, set
+// by getQuotes() alone) - every other cached api_name (profile, historical-price-eod, grades,
+// ...) is fine with "whatever was true earlier today" and doesn't need this extra check.
+function isCacheRowFreshEnough(updatedAt: string, requireFreshAfterOpen: boolean | undefined): boolean {
+  if (!requireFreshAfterOpen) return true;
+  const now = new Date();
+  if (!isAtOrAfterTodaysOpen(now)) return true; // nothing fresher could exist yet today anyway
+  return isAtOrAfterTodaysOpen(new Date(updatedAt));
+}
+
 interface GetOrFetchOptions {
   // Set true for calls that must stay live during market hours (quote) - skips the cache-date
   // check for reading, but the result still gets written through afterward so the next
   // after-hours lookup benefits immediately.
   forceFresh?: boolean;
+  // Set true for 'quote' lookups only - see isCacheRowFreshEnough above.
+  requireFreshAfterOpen?: boolean;
 }
 
 export interface GetOrFetchResult<T> {
@@ -73,12 +107,12 @@ export async function getOrFetch<T>(
     const today = getEasternDateString();
 
     if (!opts.forceFresh) {
-      const { rows } = await pool.query<{ api_result: T; cache_date: string }>(
-        'SELECT api_result, cache_date::text FROM m_fmp_daily_cache WHERE symbol = $1 AND api_name = $2',
+      const { rows } = await pool.query<{ api_result: T; cache_date: string; updated_at: string }>(
+        'SELECT api_result, cache_date::text, updated_at FROM m_fmp_daily_cache WHERE symbol = $1 AND api_name = $2',
         [symbol, apiName],
       );
       const row = rows[0];
-      if (row && row.cache_date === today) {
+      if (row && row.cache_date === today && isCacheRowFreshEnough(row.updated_at, opts.requireFreshAfterOpen)) {
         return { data: row.api_result, wasCached: true };
       }
     }

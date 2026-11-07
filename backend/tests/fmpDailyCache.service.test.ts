@@ -139,4 +139,64 @@ describe('getOrFetch', () => {
 
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
+
+  // requireFreshAfterOpen (2026-11-07): a same-day row isn't trustworthy for 'quote' lookups if
+  // it was fetched before today's market open - at that moment it still necessarily reflects
+  // the PRIOR session's close, yet gets tagged with today's cache_date all the same. Confirmed
+  // live: a quote fetched at 1:44am Friday was still Thursday's 4pm close, and silently blocked
+  // every real fetch for the rest of Friday since nobody happened to refresh during Friday's own
+  // 9:30-4:00 window.
+  describe('requireFreshAfterOpen', () => {
+    afterEach(() => jest.useRealTimers());
+
+    test('a same-day row written BEFORE today\'s open is treated as a miss once today\'s open has passed', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-11-06T22:00:00Z')); // Fri 5pm ET - well after today's open
+      const today = getEasternDateString();
+      mockQuery
+        .mockResolvedValueOnce({ rows: [{ api_result: { price: 100 }, cache_date: today, updated_at: '2026-11-06T06:44:00.000Z' }] }) // Fri 1:44am ET
+        .mockResolvedValueOnce({ rows: [] });
+      const fetchFn = jest.fn().mockResolvedValue({ price: 175 });
+
+      const result = await getOrFetch('AAPL', 'quote', 'GET /quote?symbol=AAPL', fetchFn, { requireFreshAfterOpen: true });
+
+      expect(result).toEqual({ data: { price: 175 }, wasCached: false });
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    });
+
+    test('a same-day row written AFTER today\'s open is still a genuine cache hit', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-11-06T22:00:00Z')); // Fri 5pm ET
+      const today = getEasternDateString();
+      mockQuery.mockResolvedValueOnce({ rows: [{ api_result: { price: 100 }, cache_date: today, updated_at: '2026-11-06T15:00:00.000Z' }] }); // Fri 10am ET
+      const fetchFn = jest.fn();
+
+      const result = await getOrFetch('AAPL', 'quote', 'GET /quote?symbol=AAPL', fetchFn, { requireFreshAfterOpen: true });
+
+      expect(result).toEqual({ data: { price: 100 }, wasCached: true });
+      expect(fetchFn).not.toHaveBeenCalled();
+    });
+
+    test('a pre-market row is still accepted as-is before today\'s own open has arrived - nothing fresher could exist yet', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-11-06T07:00:00Z')); // Fri 2am ET - before today's open
+      const today = getEasternDateString();
+      mockQuery.mockResolvedValueOnce({ rows: [{ api_result: { price: 100 }, cache_date: today, updated_at: '2026-11-06T06:44:00.000Z' }] });
+      const fetchFn = jest.fn();
+
+      const result = await getOrFetch('AAPL', 'quote', 'GET /quote?symbol=AAPL', fetchFn, { requireFreshAfterOpen: true });
+
+      expect(result).toEqual({ data: { price: 100 }, wasCached: true });
+      expect(fetchFn).not.toHaveBeenCalled();
+    });
+
+    test('ignored entirely when requireFreshAfterOpen is not set - a pre-market row is accepted as a normal cache hit', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-11-06T22:00:00Z')); // Fri 5pm ET
+      const today = getEasternDateString();
+      mockQuery.mockResolvedValueOnce({ rows: [{ api_result: { price: 100 }, cache_date: today, updated_at: '2026-11-06T06:44:00.000Z' }] });
+      const fetchFn = jest.fn();
+
+      const result = await getOrFetch('AAPL', 'profile', 'GET /profile?symbol=AAPL', fetchFn);
+
+      expect(result).toEqual({ data: { price: 100 }, wasCached: true });
+      expect(fetchFn).not.toHaveBeenCalled();
+    });
+  });
 });

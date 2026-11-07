@@ -142,6 +142,22 @@ describe('getPortfolio', () => {
     const result = await getPortfolio('user-1', '1');
     expect(result?.cashAmount).toBe(0);
   });
+
+  // 2026-11-06: holdings' sector is now a live LEFT JOIN against m_tickers (the documented
+  // "single source of truth" for ticker name/sector), falling back to tx_holdings' own frozen
+  // snapshot - NULLIF(t.sector, 'Unknown') is required, not plain COALESCE, so an unenriched
+  // m_tickers row (still holding the literal 'Unknown' placeholder) doesn't wrongly win over a
+  // real value already sitting in tx_holdings.sector.
+  test('the holdings query joins m_tickers for a live sector, treating its own \'Unknown\' placeholder as equivalent to NULL', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1', name: 'Fidelity', broker: null, created_at: 't1', updated_at: 't1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    await getPortfolio('user-1', '1');
+    const [holdingsSql] = mockQuery.mock.calls[1];
+    expect(holdingsSql).toMatch(/LEFT JOIN m_tickers/);
+    expect(holdingsSql).toMatch(/NULLIF\(t\.sector, 'Unknown'\)/);
+  });
 });
 
 describe('updatePortfolio', () => {
@@ -372,6 +388,20 @@ describe('refreshPrices', () => {
   test('throws PortfolioNotFoundError when not owned', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     await expect(refreshPrices('user-1', 'nope')).rejects.toBeInstanceOf(PortfolioNotFoundError);
+  });
+
+  // Same live-sector join as getPortfolio() above (2026-11-06) - refreshPrices() reads its own
+  // holdings separately, so this needed its own matching fix, not just getPortfolio()'s.
+  test('its own holdings query also joins m_tickers for a live sector, same as getPortfolio', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] })
+      .mockResolvedValueOnce({ rows: [] });
+    mockGetQuotes.mockResolvedValue({ quotes: {}, realCalls: 0 });
+
+    await refreshPrices('user-1', '1');
+    const [holdingsSql] = mockQuery.mock.calls[1];
+    expect(holdingsSql).toMatch(/LEFT JOIN m_tickers/);
+    expect(holdingsSql).toMatch(/NULLIF\(t\.sector, 'Unknown'\)/);
   });
 
   test('persists price_updated_at only for holdings that got a quote, leaves the rest untouched', async () => {

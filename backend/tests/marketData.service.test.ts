@@ -67,19 +67,19 @@ describe('getProfiles', () => {
   // unlike /quote (used for backfillTickerData.ts/refreshTickerDataBatch() -
   // see marketData.service.ts's comment on why /profile was chosen over
   // /quote for this).
-  test('maps companyName/sector/marketCap from each symbol\'s /profile response', async () => {
+  test('maps companyName/sector/marketCap/isEtf from each symbol\'s /profile response', async () => {
     global.fetch = jest.fn((url: string) => {
       const symbol = new URL(url).searchParams.get('symbol');
       const body = symbol === 'AAPL'
         ? [{ companyName: 'Apple Inc.', sector: 'Technology', marketCap: 3000000000000 }]
-        : [{ companyName: 'Microsoft Corporation', sector: 'Technology', marketCap: 2500000000000 }];
+        : [{ companyName: 'iShares Fund', sector: 'Technology', marketCap: 2500000000000, isEtf: true }];
       return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(body) });
     }) as unknown as typeof fetch;
 
     const result = await getProfiles(['AAPL', 'MSFT'], 'fake-key');
     expect(result).toEqual({
-      AAPL: { name: 'Apple Inc.', sector: 'Technology', marketCap: 3000000000000 },
-      MSFT: { name: 'Microsoft Corporation', sector: 'Technology', marketCap: 2500000000000 },
+      AAPL: { name: 'Apple Inc.', sector: 'Technology', marketCap: 3000000000000, isEtf: false },
+      MSFT: { name: 'iShares Fund', sector: 'Technology', marketCap: 2500000000000, isEtf: true },
     });
   });
 
@@ -89,7 +89,7 @@ describe('getProfiles', () => {
     }) as unknown as typeof fetch;
 
     const result = await getProfiles(['AAPL'], 'fake-key');
-    expect(result.AAPL).toEqual({ name: 'Apple Inc.', sector: 'Technology', marketCap: null });
+    expect(result.AAPL).toEqual({ name: 'Apple Inc.', sector: 'Technology', marketCap: null, isEtf: false });
   });
 
   test('a symbol with no profile data (null/empty response) is simply absent from the result map', async () => {
@@ -100,7 +100,7 @@ describe('getProfiles', () => {
     }) as unknown as typeof fetch;
 
     const result = await getProfiles(['AAPL', 'ZZZ'], 'fake-key');
-    expect(result).toEqual({ AAPL: { name: 'Apple Inc.', sector: 'Technology', marketCap: 3000000000000 } });
+    expect(result).toEqual({ AAPL: { name: 'Apple Inc.', sector: 'Technology', marketCap: 3000000000000, isEtf: false } });
     expect(result.ZZZ).toBeUndefined();
   });
 
@@ -124,15 +124,15 @@ describe('getQuotes', () => {
     mockIsMarketOpenNow.mockReturnValue(true);
     mockGetOrFetch.mockResolvedValue({ data: null, wasCached: false });
     await getQuotes(['AAPL', 'MSFT'], 'fake-key');
-    expect(mockGetOrFetch).toHaveBeenCalledWith('AAPL', 'quote', expect.any(String), expect.any(Function), { forceFresh: true });
-    expect(mockGetOrFetch).toHaveBeenCalledWith('MSFT', 'quote', expect.any(String), expect.any(Function), { forceFresh: true });
+    expect(mockGetOrFetch).toHaveBeenCalledWith('AAPL', 'quote', expect.any(String), expect.any(Function), { forceFresh: true, requireFreshAfterOpen: true });
+    expect(mockGetOrFetch).toHaveBeenCalledWith('MSFT', 'quote', expect.any(String), expect.any(Function), { forceFresh: true, requireFreshAfterOpen: true });
   });
 
   test('forceFresh is false once the market is closed, letting a same-day cache hit apply', async () => {
     mockIsMarketOpenNow.mockReturnValue(false);
     mockGetOrFetch.mockResolvedValue({ data: null, wasCached: true });
     await getQuotes(['AAPL'], 'fake-key');
-    expect(mockGetOrFetch).toHaveBeenCalledWith('AAPL', 'quote', expect.any(String), expect.any(Function), { forceFresh: false });
+    expect(mockGetOrFetch).toHaveBeenCalledWith('AAPL', 'quote', expect.any(String), expect.any(Function), { forceFresh: false, requireFreshAfterOpen: true });
   });
 
   test('parses a raw FMP quote array (whatever fmpDailyCache resolved with) into a normalized Quote', async () => {

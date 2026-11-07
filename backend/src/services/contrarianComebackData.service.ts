@@ -214,7 +214,7 @@ export async function fetchContrarianComebackData(
     // longTermAnalysisData.service.ts's own subject quote.
     fmpDailyCache.getOrFetch(symbol, 'quote', `GET /quote?symbol=${symbol}`,
       () => fmpGet<any>(`${env.fmpBaseUrl}/quote?symbol=${symbol}&apikey=${fmpKey}`),
-      { forceFresh: fmpDailyCache.isMarketOpenNow() }),
+      { forceFresh: fmpDailyCache.isMarketOpenNow(), requireFreshAfterOpen: true }),
     // limit=5, not 4 - shares the exact same cached row longTermAnalysisData.service.ts already
     // fetches (its own superset-fetch rule), sliced to 4 periods here instead of 3.
     fmpDailyCache.getOrFetch(symbol, 'income-statement', `GET /income-statement?symbol=${symbol}&period=annual&limit=5`,

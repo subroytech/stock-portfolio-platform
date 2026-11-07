@@ -154,6 +154,36 @@ export async function tickerDataRefreshBatch(req: Request, res: Response, next: 
   }
 }
 
+// Master Data "Sync Portfolio-Held Tickers" - preview step. Cheap read, same
+// requirePermission('contrarian_finder:scan') gate as the rest of Master Data, not the
+// no-gate style of getUniverse above, since this exposes which symbols every user's
+// portfolio holds (bare symbols only - never amounts, portfolio names, or who holds what).
+export async function getHeldSymbolSyncPreview(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const candidates = await cf.getHeldSymbolSyncCandidates();
+    res.json({ candidates });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Master Data "Sync Portfolio-Held Tickers" - confirm step. A single request (no
+// batch/pacing machinery) - the realistic candidate count here is an order of magnitude
+// below CF_BATCH, which other features already process in one request with no issue.
+export async function syncHeldSymbols(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const key = await userSubscription.getDecryptedKey(getUserId(req), 'fmp');
+    const result = await cf.syncHeldSymbolsToUniverse(key);
+    res.json(result);
+  } catch (err) {
+    if (err instanceof userSubscription.MissingUserApiKeyError) {
+      res.status(503).json({ error: err.message });
+      return;
+    }
+    next(err);
+  }
+}
+
 // Persists the results of a scan the caller just finished running client-side
 // (see api/contrarianFinder.ts's useContrarianBatchScan) - fire-and-forget
 // from the frontend's perspective, called once at the very end of a

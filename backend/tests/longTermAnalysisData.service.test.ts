@@ -192,7 +192,7 @@ describe('fetchLongTermAnalysisData', () => {
     await fetchLongTermAnalysisData('AAPL', 'fake-fmp-key', undefined);
 
     const subjectQuoteCall = mockGetOrFetch.mock.calls.find((c) => c[0] === 'AAPL' && c[1] === 'quote');
-    expect(subjectQuoteCall?.[4]).toEqual({ forceFresh: true });
+    expect(subjectQuoteCall?.[4]).toEqual({ forceFresh: true, requireFreshAfterOpen: true });
     const profileCall = mockGetOrFetch.mock.calls.find((c) => c[1] === 'profile');
     expect(profileCall?.[4]).toBeUndefined();
     // Peer quotes are day-cached like everything else, not forced fresh - a user isn't staring

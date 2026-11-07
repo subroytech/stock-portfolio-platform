@@ -91,6 +91,11 @@ export async function assembleUniverse(): Promise<UniverseEntry[]> {
     if (universe.length >= CF_MAX) break;
     (await fetchConstituents(etf)).forEach((s) => add(s, 4, etf));
   }
+  // Tier 5: symbols synced in from user portfolio holdings (syncHeldSymbolsToUniverse below) -
+  // last, so the curated sources always fill the universe first.
+  if (universe.length < CF_MAX) {
+    (await fetchConstituents('USER_HELD')).forEach((s) => add(s, 5, 'USER_HELD'));
+  }
 
   return universe;
 }
@@ -115,7 +120,7 @@ export interface UniverseTable {
 
 // Fixed display order (not DB row order, which Postgres/CockroachDB doesn't
 // guarantee) - matches the seed script's INDEX_DESCRIPTIONS ordering.
-const UNIVERSE_INDEX_ORDER = ['DJ30', 'NDX100', 'SP500', ...CF_ETF_LIST];
+const UNIVERSE_INDEX_ORDER = ['DJ30', 'NDX100', 'SP500', ...CF_ETF_LIST, 'USER_HELD'];
 
 // A reference table for the Contrarian Finder page's "Stock Universe" section
 // - distinct from assembleUniverse() above, which stays capped/dedup'd/single
@@ -189,20 +194,141 @@ export async function refreshTickerDataBatch(
   const entries = Object.entries(profiles).filter(([, p]) => p.name || p.sector || p.marketCap != null);
 
   if (entries.length > 0) {
-    const values = entries.map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`).join(', ');
-    const params = entries.flatMap(([symbol, p]) => [symbol, p.name || null, p.sector || null, p.marketCap]);
+    // is_etf always gets the fresh value, not COALESCE-guarded like the other three columns -
+    // FMP always returns a definite true/false whenever it returns a profile at all, so
+    // there's never a "missing field, keep the old value" case to protect against here.
+    const values = entries.map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`).join(', ');
+    const params = entries.flatMap(([symbol, p]) => [symbol, p.name || null, p.sector || null, p.marketCap, p.isEtf]);
     await pool.query(
-      `INSERT INTO m_tickers (symbol, name, sector, market_cap) VALUES ${values}
+      `INSERT INTO m_tickers (symbol, name, sector, market_cap, is_etf) VALUES ${values}
        ON CONFLICT (symbol) DO UPDATE SET
          name = COALESCE(excluded.name, m_tickers.name),
          sector = COALESCE(excluded.sector, m_tickers.sector),
          market_cap = COALESCE(excluded.market_cap, m_tickers.market_cap),
+         is_etf = excluded.is_etf,
          updated_at = now()`,
       params,
     );
   }
 
   return { updated: entries.length, skipped: symbols.length - entries.length };
+}
+
+export interface HeldSymbolSyncCandidate {
+  symbol: string;
+  alreadyInUniverse: boolean;
+}
+
+// Distinct tx_holdings symbols needing attention: either not yet in m_index_constituent under
+// any index_id, or m_tickers has no usable row yet. The literal string 'Unknown' is treated as
+// equivalent to NULL - parser.service.ts writes that exact sentinel into both
+// tx_holdings.sector and m_tickers.sector when it has no real data, so a plain IS NULL check
+// (what refreshTickerDataBatch's 'missing' mode uses) would never re-attempt a symbol that
+// already has a stale 'Unknown' row sitting in m_tickers (e.g. an ETF held in a portfolio but
+// never scanned or ticker-refreshed before).
+export async function getHeldSymbolSyncCandidates(): Promise<HeldSymbolSyncCandidate[]> {
+  const { rows } = await pool.query<{ symbol: string; already_in_universe: boolean }>(`
+    SELECT h.symbol,
+           EXISTS (SELECT 1 FROM m_index_constituent ic WHERE ic.symbol = h.symbol) AS already_in_universe
+    FROM (SELECT DISTINCT symbol FROM tx_holdings) h
+    LEFT JOIN m_tickers t ON t.symbol = h.symbol
+    WHERE NOT EXISTS (SELECT 1 FROM m_index_constituent ic WHERE ic.symbol = h.symbol)
+       OR t.symbol IS NULL OR t.name IS NULL
+       OR t.sector IS NULL OR t.sector = 'Unknown'
+       OR t.market_cap IS NULL
+    ORDER BY h.symbol
+  `);
+  return rows.map((r) => ({ symbol: r.symbol, alreadyInUniverse: r.already_in_universe }));
+}
+
+export interface SyncHeldSymbolsResult {
+  added: string[];             // newly inserted into m_index_constituent under USER_HELD
+  alreadyInUniverse: string[]; // enriched only - already present in some index
+  excludedAsEtf: string[];     // enriched in m_tickers, but FMP confirms isEtf - not added
+  excludedAsCrypto: string[]; // identified as crypto before any FMP call was spent on them
+  validationFailed: string[]; // FMP returned nothing usable at all - the live validation gate
+  capExceeded: string[];      // validated and stock-eligible, but CF_MAX was already full
+}
+
+const EMPTY_SYNC_RESULT: SyncHeldSymbolsResult = {
+  added: [], alreadyInUniverse: [], excludedAsEtf: [], excludedAsCrypto: [], validationFailed: [], capExceeded: [],
+};
+
+// Admin Console "Master Data" action: pulls tx_holdings symbols the scan universe doesn't know
+// about yet into m_index_constituent under the USER_HELD index, after validating each one live
+// via FMP - never a hardcoded exclusion list, so a symbol that's genuinely a real, currently-
+// tradeable stock gets added regardless of what any past snapshot assumed, and a symbol that
+// isn't (private, delisted, or simply unrecognized by FMP) is excluded automatically by the
+// same check. ETFs and crypto are identified and excluded from the SCAN UNIVERSE specifically
+// (per explicit direction) - they still get their m_tickers row enriched either way, so
+// Portfolio's own sector display benefits regardless of which bucket a symbol lands in.
+export async function syncHeldSymbolsToUniverse(apiKey: string): Promise<SyncHeldSymbolsResult> {
+  const candidates = await getHeldSymbolSyncCandidates();
+  if (candidates.length === 0) return EMPTY_SYNC_RESULT;
+
+  // Crypto pre-filter, cheap and done before spending any FMP call: a symbol already resolved
+  // to sector='Crypto' at import time (parser.service.ts's own crypto detection) doesn't need
+  // a live profile lookup to know it's not a stock. This is a convenience fast-path, not the
+  // sole gate - anything it misses still falls through to validationFailed below, since FMP's
+  // equity /profile endpoint has no concept of a bare crypto symbol like BTC/ETH to begin with.
+  const symbols = candidates.map((c) => c.symbol);
+  const { rows: cryptoRows } = await pool.query<{ symbol: string }>(
+    `SELECT DISTINCT symbol FROM tx_holdings WHERE symbol = ANY($1) AND sector = 'Crypto'`,
+    [symbols],
+  );
+  const cryptoSet = new Set(cryptoRows.map((r) => r.symbol));
+  const excludedAsCrypto = candidates.filter((c) => cryptoSet.has(c.symbol)).map((c) => c.symbol);
+  const needsFmpCheck = candidates.filter((c) => !cryptoSet.has(c.symbol));
+
+  if (needsFmpCheck.length === 0) return { ...EMPTY_SYNC_RESULT, excludedAsCrypto };
+
+  // UniverseEntry's tier/source are never read inside refreshTickerDataBatch (it only does
+  // stocks.map(s => s.symbol)) - stubbing them is harmless, no new overload needed.
+  const stubs: UniverseEntry[] = needsFmpCheck.map((c) => ({ symbol: c.symbol, tier: 0, source: 'USER_HELD' }));
+
+  // mode 'all', NOT 'missing': getHeldSymbolSyncCandidates() above already did its own
+  // ('Unknown'-aware) target selection. Calling 'missing' mode here would re-run its weaker,
+  // IS-NULL-only filter and let a stale 'Unknown' row slip through unenriched a second time.
+  await refreshTickerDataBatch(stubs, apiKey, 'all');
+
+  const checkSymbols = needsFmpCheck.map((c) => c.symbol);
+  const { rows: enrichedRows } = await pool.query<{ symbol: string; is_etf: boolean }>(
+    `SELECT symbol, is_etf FROM m_tickers
+     WHERE symbol = ANY($1) AND sector IS DISTINCT FROM 'Unknown'
+       AND (name IS NOT NULL OR sector IS NOT NULL OR market_cap IS NOT NULL)`,
+    [checkSymbols],
+  );
+  const enrichedMap = new Map(enrichedRows.map((r) => [r.symbol, r.is_etf]));
+
+  const validationFailed = needsFmpCheck.filter((c) => !enrichedMap.has(c.symbol)).map((c) => c.symbol);
+  const enriched = needsFmpCheck.filter((c) => enrichedMap.has(c.symbol));
+  const excludedAsEtf = enriched.filter((c) => enrichedMap.get(c.symbol) === true).map((c) => c.symbol);
+  const stockCandidates = enriched.filter((c) => enrichedMap.get(c.symbol) !== true);
+  const alreadyInUniverse = stockCandidates.filter((c) => c.alreadyInUniverse).map((c) => c.symbol);
+  const eligibleForAdd = stockCandidates.filter((c) => !c.alreadyInUniverse).map((c) => c.symbol);
+
+  // DISTINCT, not a bare count(*) - CF_MAX caps assembleUniverse()'s own DEDUPED symbol count
+  // (add()'s `universe.length >= CF_MAX` check), but m_index_constituent itself is a join table
+  // with one row per (index_id, symbol) pair - the same stock held under DJ30+SP500+XLK is 3
+  // raw rows but 1 real universe slot. Confirmed live 2026-11-06: 738 raw rows vs. 458 distinct
+  // symbols - a bare count(*) would have reported zero headroom (738 > 600) even though ~142
+  // real slots remained, misclassifying every eligible candidate as capExceeded.
+  const { rows: countRows } = await pool.query<{ count: string }>('SELECT count(DISTINCT symbol) FROM m_index_constituent');
+  const headroom = Math.max(0, CF_MAX - Number(countRows[0].count));
+  const toAdd = eligibleForAdd.slice(0, headroom);
+  const capExceeded = eligibleForAdd.slice(headroom);
+
+  let added: string[] = [];
+  if (toAdd.length > 0) {
+    const values = toAdd.map((_, i) => `('USER_HELD', $${i + 1})`).join(', ');
+    await pool.query(
+      `INSERT INTO m_index_constituent (index_id, symbol) VALUES ${values} ON CONFLICT (index_id, symbol) DO NOTHING`,
+      toAdd,
+    );
+    added = toAdd;
+  }
+
+  return { added, alreadyInUniverse, excludedAsEtf, excludedAsCrypto, validationFailed, capExceeded };
 }
 
 export interface ScanQuality {

@@ -184,11 +184,22 @@ export async function getPortfolio(userId: string, portfolioId: string): Promise
   );
   if (!portfolioRows[0]) return null;
 
+  // sector comes live from m_tickers when it has a real (non-'Unknown') value, falling back to
+  // the frozen import-time snapshot on tx_holdings otherwise - m_tickers is documented
+  // elsewhere in this file as "the single source of truth for ticker name/sector" (see
+  // importHoldings() below), but this read path never actually honored that until now.
+  // NULLIF(t.sector, 'Unknown') is required, not just COALESCE(t.sector, h.sector) - m_tickers
+  // can itself hold the literal placeholder 'Unknown' for a symbol nobody's ever enriched, and
+  // a plain COALESCE would wrongly prefer that placeholder over a holding's own real value.
   const { rows: holdingRows } = await pool.query<HoldingRow>(
-    `SELECT id, symbol, name, quantity, purchase_price, current_price, sector, purchase_date,
-            cost_basis, current_value, gain_loss, return_pct, allocation_pct, price_updated_at,
-            today_change_dollar, today_change_percent
-     FROM tx_holdings WHERE portfolio_id = $1 ORDER BY symbol`,
+    `SELECT h.id, h.symbol, h.name, h.quantity, h.purchase_price, h.current_price,
+            COALESCE(NULLIF(t.sector, 'Unknown'), h.sector) AS sector,
+            h.purchase_date, h.cost_basis, h.current_value, h.gain_loss, h.return_pct,
+            h.allocation_pct, h.price_updated_at, h.today_change_dollar, h.today_change_percent
+     FROM tx_holdings h
+     LEFT JOIN m_tickers t ON t.symbol = h.symbol
+     WHERE h.portfolio_id = $1
+     ORDER BY h.symbol`,
     [portfolioId],
   );
   const holdings = holdingRows.map(mapHoldingRow);
@@ -790,11 +801,19 @@ export async function refreshPrices(userId: string, portfolioId: string): Promis
   const { rows: ownerRows } = await pool.query('SELECT id FROM tx_portfolios WHERE id = $1 AND user_id = $2', [portfolioId, userId]);
   if (!ownerRows[0]) throw new PortfolioNotFoundError('Portfolio not found.');
 
+  // Same live-sector join as getPortfolio() above - isPerfSkipped()/toFmpQuoteSymbol() below
+  // read sector to decide crypto handling, so a holding whose frozen sector never correctly
+  // resolved to 'Crypto' now benefits from m_tickers too. sector isn't part of this function's
+  // own response shape (RefreshedHolding has no sector field), so this only affects internal
+  // logic here, never the HTTP response.
   const { rows: holdingRows } = await pool.query<HoldingRow>(
-    `SELECT id, symbol, name, quantity, purchase_price, current_price, sector, purchase_date,
-            cost_basis, current_value, gain_loss, return_pct, allocation_pct, price_updated_at,
-            today_change_dollar, today_change_percent
-     FROM tx_holdings WHERE portfolio_id = $1`,
+    `SELECT h.id, h.symbol, h.name, h.quantity, h.purchase_price, h.current_price,
+            COALESCE(NULLIF(t.sector, 'Unknown'), h.sector) AS sector,
+            h.purchase_date, h.cost_basis, h.current_value, h.gain_loss, h.return_pct,
+            h.allocation_pct, h.price_updated_at, h.today_change_dollar, h.today_change_percent
+     FROM tx_holdings h
+     LEFT JOIN m_tickers t ON t.symbol = h.symbol
+     WHERE h.portfolio_id = $1`,
     [portfolioId],
   );
   if (holdingRows.length === 0) return { holdings: [], performanceHistory: {}, fmpQuoteCallCount: 0, fmpHistoricalCallCount: 0 };

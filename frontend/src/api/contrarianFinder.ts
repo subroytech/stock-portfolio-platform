@@ -536,3 +536,68 @@ export function useTickerDataDeltaUpdate() {
 
   return { run, isPending, isError, error, result, progress };
 }
+
+// --- Held-Symbol Universe Sync (2026-11-06) ---
+// Admin Console "Master Data" - pulls tx_holdings symbols the scan universe doesn't know about
+// yet into m_index_constituent under USER_HELD, after a live FMP validation per symbol (ETFs/
+// crypto excluded from the universe, enriched into m_tickers either way). Single-shot
+// GET-preview + POST-confirm, not the multi-batch client-pacing pattern above — CF_BATCH (125)
+// is already proven single-request capacity, and today's gap is an order of magnitude smaller.
+
+export interface HeldSymbolSyncCandidate {
+  symbol: string;
+  alreadyInUniverse: boolean;
+}
+
+interface HeldSymbolSyncPreviewResponse {
+  candidates: HeldSymbolSyncCandidate[];
+}
+
+// enabled: only fetched once "Check for Gaps" has actually been clicked - no need to run this
+// on every Master Data page load.
+export function useHeldSymbolSyncPreview(enabled: boolean) {
+  return useQuery<HeldSymbolSyncPreviewResponse>({
+    queryKey: ['contrarianFinder', 'heldSymbolSyncPreview'],
+    queryFn: () => apiFetch<HeldSymbolSyncPreviewResponse>('/contrarian-finder/held-symbol-sync-preview'),
+    enabled,
+  });
+}
+
+export interface SyncHeldSymbolsResult {
+  added: string[];
+  alreadyInUniverse: string[];
+  excludedAsEtf: string[];
+  excludedAsCrypto: string[];
+  validationFailed: string[];
+  capExceeded: string[];
+}
+
+export function useHeldSymbolSync() {
+  const queryClient = useQueryClient();
+  const [isPending, setIsPending] = useState(false);
+  const [isError, setIsError] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [result, setResult] = useState<SyncHeldSymbolsResult | null>(null);
+
+  const run = useCallback(async () => {
+    setIsPending(true);
+    setIsError(false);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await apiFetch<SyncHeldSymbolsResult>('/contrarian-finder/held-symbol-sync', { method: 'POST' });
+      setResult(res);
+      // The preview list (and the Stock Universe reference table, which now shows a USER_HELD
+      // column) are both stale the instant a sync actually adds/enriches anything.
+      queryClient.invalidateQueries({ queryKey: ['contrarianFinder', 'heldSymbolSyncPreview'] });
+      queryClient.invalidateQueries({ queryKey: ['contrarianFinder', 'universe'] });
+    } catch (err) {
+      setIsError(true);
+      setError(err);
+    } finally {
+      setIsPending(false);
+    }
+  }, [queryClient]);
+
+  return { run, isPending, isError, error, result };
+}

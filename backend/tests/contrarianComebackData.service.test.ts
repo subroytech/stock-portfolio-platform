@@ -193,7 +193,7 @@ describe('fetchContrarianComebackData', () => {
     await fetchContrarianComebackData('AAPL', 'fake-fmp-key', undefined);
 
     const quoteCall = mockGetOrFetch.mock.calls.find((c) => c[0] === 'AAPL' && c[1] === 'quote');
-    expect(quoteCall?.[4]).toEqual({ forceFresh: true });
+    expect(quoteCall?.[4]).toEqual({ forceFresh: true, requireFreshAfterOpen: true });
     const profileCall = mockGetOrFetch.mock.calls.find((c) => c[1] === 'profile');
     expect(profileCall?.[4]).toBeUndefined();
     const incomeCall = mockGetOrFetch.mock.calls.find((c) => c[1] === 'income-statement');

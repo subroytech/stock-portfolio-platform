@@ -20,6 +20,13 @@ router.post('/scan-batch', requirePermission('contrarian_finder:scan'), contrari
 // reachability, since only Admin/Admin-Master pass its own access check too).
 router.post('/ticker-data-refresh-batch', requirePermission('contrarian_finder:scan'), contrarianFinderController.tickerDataRefreshBatch);
 
+// Admin Console "Master Data" — Sync Portfolio-Held Tickers (2026-11-06). Same permission as
+// everything else under Master Data. Unlike /universe above, this IS gated: the preview reads
+// every user's held symbols (not scoped to the caller), a different category of cross-user
+// visibility than /universe's own global-but-already-public reference data.
+router.get('/held-symbol-sync-preview', requirePermission('contrarian_finder:scan'), contrarianFinderController.getHeldSymbolSyncPreview);
+router.post('/held-symbol-sync', requirePermission('contrarian_finder:scan'), contrarianFinderController.syncHeldSymbols);
+
 // Persists the last completed scan so every user shares one result, not just
 // whichever browser ran it (2026-08-04) - only someone who could run a scan
 // should be able to claim to have completed one.
