@@ -50,7 +50,7 @@ is **not** kept in sync with this one.
 
 ---
 
-# Current Build State (as of 11-04)
+# Current Build State (as of 11-07)
 
 ## Phase 0 — Foundations ✅ Done
 - `backend/` + `frontend/` split in place
@@ -2739,6 +2739,115 @@ the way: `getByText(regex)` stopped matching once the caption's text was split a
 `<strong>`/`<span>` elements for the bold/underline styling — fixed by querying a new
 `data-testid="last-scan-caption"` + `toHaveTextContent` instead, which (unlike `getByText`)
 correctly looks at the full element regardless of internal markup. `tsc`/lint clean both sides.
+
+## Held-Symbol Universe Sync + Live Portfolio Sector Join ✅ Done
+
+Built 2026-11-06, `/plan`-approved. Closed two related gaps found while answering a question
+about where Portfolio's and Contrarian Finder's "sector" values each come from — a question
+that surfaced the user's own stated assumption ("Contrarian Finder is also based on a Stock
+List, that must be the same `m_tickers` table") was **false**: 47 of the 85 distinct symbols
+held across real portfolios weren't in the Contrarian Finder scan universe at all (IBIT, SPCX,
+SOUN, BTC/ETH, several niche ETFs, etc.), and a holding's displayed sector was a frozen
+import-time snapshot, never updated even as `m_tickers` (fed by FMP) got better data later.
+
+**Admin Console "Master Data" — new "Sync Portfolio-Held Tickers" action**: finds `tx_holdings`
+symbols missing from the scan universe or still unenriched in `m_tickers`
+(`getHeldSymbolSyncCandidates()`, `contrarianFinder.service.ts` — treats the literal `'Unknown'`
+sentinel as equivalent to `NULL`, since a plain `IS NULL` check would never re-attempt a symbol
+like IBIT that already has a stale `'Unknown'` row), then validates each one live via FMP
+(`syncHeldSymbolsToUniverse()`) — **no symbol is ever hardcoded as excluded/included**; a live
+check is the sole gatekeeper, so a symbol a past build once correctly excluded (SPCX, when it
+was still SpaceX's private stock) resolves correctly on its own once reality changes (now
+listed). Classifies into 6 buckets: `added` (genuine new stocks, subject to `CF_MAX` headroom),
+`alreadyInUniverse`, `excludedAsEtf`/`excludedAsCrypto` (per the user's explicit scoping
+requirement — ETFs/crypto are excluded from the *scan universe* specifically, but still get
+`m_tickers` enriched either way, since Portfolio's own sector display benefits regardless),
+`validationFailed` (FMP returned nothing usable — the live gate), `capExceeded`. Crypto is
+pre-filtered cheaply via `tx_holdings.sector = 'Crypto'` before spending any FMP call; FMP's
+`isEtf` profile field is captured for the first time (`marketData.service.ts`'s `getProfiles()`),
+finally giving `m_tickers.is_etf` (declared since early on, never populated) a real writer. New
+migration `071` adds a `USER_HELD` row to `m_index_master` — a 5th and final scan tier in
+`assembleUniverse()`, after DJ30/NDX100/SP500/the 11 SPDR ETFs — and the only row in that table
+ever written by the running app rather than the one-time seed. Two new routes
+(`GET .../held-symbol-sync-preview`, `POST .../held-symbol-sync`), same `contrarian_finder:scan`
+permission as every other Master Data action. Frontend: preview-then-confirm UX ("Check for
+Gaps" → candidate list → "Sync Now" → 6 expandable result buckets), matching Flex's own
+"Inspect Data before committing" precedent rather than Run-Scan's "just run it" — deliberate,
+since this is new code spending real FMP quota and writing to `m_index_constituent` for the
+first time outside the one-time seed.
+
+**Portfolio sector now live from `m_tickers`**: `portfolio.service.ts`'s `getPortfolio()`/
+`refreshPrices()` holdings queries both gained `LEFT JOIN m_tickers t ON t.symbol = h.symbol`
+with `COALESCE(NULLIF(t.sector, 'Unknown'), h.sector) AS sector` — the `NULLIF` is required, not
+a plain `COALESCE`, so an unenriched `m_tickers` row (still holding the literal `'Unknown'`
+placeholder) never wins over a real value already sitting in `tx_holdings.sector`. A holding's
+displayed sector now improves automatically as `m_tickers` gets enriched (by this feature, by
+Delta Update, by a future import), with no re-import needed. The two gaps are complementary:
+IBIT (held, not in the universe) had `m_tickers.sector = 'Unknown'` too — a pure read-time join
+alone does nothing for a symbol like that; only enriching `m_tickers` first (the sync action)
+makes the join's fix actually show something useful.
+
+**A real bug caught during live verification, not by unit tests**: the sync's `CF_MAX` headroom
+check used `count(*)` on `m_index_constituent`, which counts one row per `(index, symbol)` pair
+— a symbol held under DJ30+SP500+XLK is 3 raw rows but 1 real universe slot. Live data showed
+738 raw rows vs. 458 actual distinct symbols; a bare `count(*)` would have reported zero
+headroom (738 > `CF_MAX` 600) and misclassified every eligible candidate as `capExceeded`, even
+though ~142 real slots remained. Fixed to `count(DISTINCT symbol)`.
+
+53 new backend tests, 8 new frontend tests, `tsc`/lint clean both sides. **Live-verified
+end-to-end against the real dev DB and running server, with a real FMP key**: 47 held-not-in-
+universe symbols found; sync correctly added 23 genuine stocks (including SPCX, confirmed via
+live FMP data to now be listed) and excluded 22 ETFs + 2 crypto (BTC/ETH, zero FMP cost for the
+crypto pair) from the universe while still enriching their `m_tickers` rows; universe count went
+458→481 (well under 600); IBIT's `m_tickers` row went from `null`/`'Unknown'` to fully
+populated; COST's portfolio-displayed sector now correctly shows "Consumer Defensive" (from
+`m_tickers`) instead of the frozen "Consumer Staples"; the Stock Universe reference table shows
+the new `USER_HELD` column automatically (`UNIVERSE_INDEX_ORDER` already drove it, zero frontend
+change needed); re-running both preview and sync confirmed idempotent behavior (47→24 remaining,
+all legitimately-excluded ETF/crypto entries that can never be "resolved" into the universe by
+design, just re-enriched each time at zero extra cost).
+
+## Refresh Prices — Stale Pre-Market Quote Cache Fix ✅ Done
+
+Built 2026-11-07, closing a real bug the user found live: refreshing "Fidelity-Subroy" showed
+NVDA/BUG (and most of the portfolio) down 5-14% on the day — numbers the user knew didn't match
+the real market. Investigated end-to-end before touching any code: confirmed the DB/API response
+was internally consistent (fresh `price_updated_at`, correct camelCase shape, zero nulls) and
+Holdings Table displayed the same data correctly even after a full browser reload — ruling out
+every caching/invalidation layer and pointing at the underlying FMP quote data itself.
+
+**Root cause, confirmed by decoding the raw cached payload**: NVDA's cached `'quote'` row was
+tagged `cache_date = Friday` but its own embedded FMP timestamp decoded to **Thursday 4:00pm
+ET** — a full calendar day stale. The row was written at **1:44am Friday** (`fmpDailyCache
+.service.ts`'s shared day-cache, built for Long-Term Analysis/Contrarian Comeback, 2026-09-07),
+before Friday's market had even opened — at that moment FMP correctly returns "the latest
+available quote" (still Thursday's close, nothing newer exists pre-market), but the cache
+tagged it with *today's* Eastern date regardless. Since nobody happened to click Refresh Prices
+during Friday's actual 9:30am-4:00pm window, that stale pre-open snapshot silently blocked every
+later fetch for the rest of the day — even at 10pm Friday, well after Friday's real close had
+already happened and genuinely fresh data was available.
+
+**Fix**: `fmpDailyCache.service.ts`'s `getOrFetch()` gains a `requireFreshAfterOpen` option — a
+same-day-tagged cache row is only trusted if it was *also* written at/after that day's 9:30am ET
+open (via new `isAtOrAfterTodaysOpen()`), once the current time has itself passed that same
+threshold; before today's open, any cached row is accepted as-is, since nothing fresher could
+exist yet anyway. Scoped to `'quote'` lookups only (every other cached `api_name` — `profile`,
+`historical-price-eod`, `grades`, etc. — is fine with "whatever was true earlier today" and
+doesn't have this pre-market-snapshot problem), wired into all three call sites sharing the
+`'quote'` cache key: `marketData.service.ts`'s `getQuotes()` (Refresh Prices/Momentum/Stock
+Preview/`GET /quotes`), `longTermAnalysisData.service.ts`, `contrarianComebackData.service.ts`.
+
+4 new backend tests (fake-timer-driven: a pre-open row is stale once today's open has passed; a
+post-open row is still a genuine hit; a pre-open row is accepted as-is *before* today's open
+arrives; the check is skipped entirely when the option isn't set), 4 existing exact-args
+assertions updated across `marketData`/`longTermAnalysisData`/`contrarianComebackData` test
+files, `tsc`/lint clean. **Live-verified against the real dev DB and running server**: re-ran
+Refresh Prices on Fidelity-Subroy post-fix — NVDA's cached quote now carries a genuine Friday
+4:00pm ET timestamp (confirmed by decoding the fresh payload), change flipped from the stale
+-9.26% to the real +2.78%; the portfolio-wide split went from a suspicious near-uniform
+~9-14% "crash" across almost everything to a realistic mixed day (22 gainers/14 losers, ranging
+~0.2%-18%); a second refresh immediately after correctly reused the now-genuinely-fresh cache
+with zero wasted FMP calls.
 
 ## Next Up
 

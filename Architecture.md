@@ -78,7 +78,7 @@ Key shifts from today:
 
 ---
 
-## Section 1 — Accomplished Till 11-04
+## Section 1 — Accomplished Till 11-07
 
 ### Phase 0 — Foundations ✅ Done
 - `backend/`/`frontend/` split; `frontend/index.html` is still a placeholder.
@@ -2514,6 +2514,51 @@ just the two new entry points.
 stopped matching once the caption's text was split across new `<strong>`/`<span>` elements for
 the bold/underline styling — fixed by querying a new `data-testid` + `toHaveTextContent` instead.
 `tsc`/lint clean.
+
+## Held-Symbol Universe Sync + Live Portfolio Sector Join ✅ Done
+
+Built 2026-11-06, `/plan`-approved. New Admin Console "Sync Portfolio-Held Tickers" action
+(`contrarianFinder.service.ts`'s `syncHeldSymbolsToUniverse()`) finds `tx_holdings` symbols
+missing from the Contrarian Finder scan universe or still unenriched in `m_tickers`, validates
+each one live via FMP — never a hardcoded exclusion list — and adds genuine stocks under a new
+`USER_HELD` index (migration `071`, a 5th/final scan tier). ETFs/crypto are excluded from the
+scan universe specifically but still get `m_tickers` enriched either way. `portfolio.service.ts`'s
+holdings queries now also `LEFT JOIN m_tickers` for a live sector (`NULLIF`-guarded against the
+`'Unknown'` sentinel), so a holding's displayed sector improves automatically as `m_tickers`
+gets enriched, with no re-import needed — closing a real gap where a frozen import-time snapshot
+never benefited from later FMP-sourced data.
+
+**Real bug caught during live verification**: the sync's `CF_MAX` headroom check used `count(*)`
+on `m_index_constituent`, which counts one row per `(index, symbol)` pair (a symbol in 3 indices
+= 3 rows, not 1 universe slot) — would have reported zero headroom and misclassified every
+eligible candidate as capacity-exceeded. Fixed to `count(DISTINCT symbol)`.
+
+53 new backend tests, 8 new frontend tests, `tsc`/lint clean. **Live-verified end-to-end with a
+real FMP key**: 47 held-but-missing symbols found; sync added 23 genuine stocks (including
+SPCX, confirmed via live FMP data to now be listed, resolving a past build's correct-at-the-time
+exclusion with no hardcoding either way) and correctly excluded 22 ETFs + 2 crypto; universe
+count 458→481; COST's portfolio sector now correctly reflects `m_tickers` ("Consumer Defensive"
+vs. the frozen "Consumer Staples"); re-running confirmed idempotent behavior.
+
+## Refresh Prices — Stale Pre-Market Quote Cache Fix ✅ Done
+
+Built 2026-11-07, closing a real user-reported bug: refreshing a portfolio showed most holdings
+down 5-14% on the day, numbers that didn't match the real market. Root cause, confirmed by
+decoding the raw cached FMP payload: a `'quote'` row fetched at 1:44am (before market open)
+still correctly reflected the *prior* day's close at that moment, but got tagged with *today's*
+cache date regardless — since nobody refreshed during that day's actual market-open window, the
+stale pre-open snapshot silently blocked every later fetch for the rest of the day, even well
+after the real close had already happened.
+
+Fixed in `fmpDailyCache.service.ts`'s `getOrFetch()` with a new `requireFreshAfterOpen` option:
+a same-day cache row is only trusted if it was also written at/after that day's 9:30am ET open,
+once the current time has itself passed that threshold. Scoped to `'quote'` lookups only, wired
+into all three call sites sharing that cache key (`marketData.service.ts`'s `getQuotes()`,
+`longTermAnalysisData.service.ts`, `contrarianComebackData.service.ts`).
+
+4 new backend tests, 4 existing assertions updated, `tsc`/lint clean. **Live-verified**: NVDA's
+change flipped from a stale -9.26% to a genuine +2.78% after a re-refresh; the portfolio's split
+went from a suspicious uniform ~9-14% "crash" to a realistic mixed day (22 gainers/14 losers).
 
 ---
 

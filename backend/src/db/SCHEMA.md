@@ -356,7 +356,7 @@ one portfolio name per user, e.g. can't have two "Fidelity" portfolios for the s
 | `quantity` | `DECIMAL(18,6)` | `NOT NULL` |
 | `purchase_price` | `DECIMAL(18,4)` | `NOT NULL` |
 | `current_price` | `DECIMAL(18,4)` | `NOT NULL` |
-| `sector` | `VARCHAR(50)` | nullable |
+| `sector` | `VARCHAR(50)` | nullable — a frozen, import-time snapshot only. `getPortfolio()`/`refreshPrices()` (`portfolio.service.ts`) read sector live via `LEFT JOIN m_tickers`, falling back to this column only when `m_tickers.sector` is still `NULL`/`'Unknown'` — see `m_tickers`' own section below (2026-11-06) |
 | `purchase_date` | `DATE` | nullable |
 | `cost_basis` | `DECIMAL(18,4)` | `NOT NULL` |
 | `current_value` | `DECIMAL(18,4)` | `NOT NULL` |
@@ -480,8 +480,12 @@ returns, keyed by `id` instead of "most recent"). Both are tier-agnostic, same "
 
 ### `m_tickers`
 Stock/ETF metadata reference table — **the single source of truth for ticker
-name/sector** (confirmed 2026-08-02), fed continuously from two independent paths, not just
-the one-time seed:
+name/sector** (confirmed 2026-08-02), fed continuously from three independent paths, not just
+the one-time seed. As of 2026-11-06, `portfolio.service.ts`'s `getPortfolio()`/`refreshPrices()`
+also *read* this table live (`LEFT JOIN`, `NULLIF(t.sector, 'Unknown')` guarding against the
+literal `'Unknown'` placeholder string so it never wins over a real `tx_holdings.sector` value)
+— a holding's displayed sector improves automatically as this table gets enriched, with no
+re-import needed:
 1. **`portfolio.service.ts`'s `importHoldings()`** — every real CSV/TXT import inserts a bare
    `(symbol, sector)` row (sector from whatever `parser.service.ts` already resolved) for any
    symbol `m_tickers` doesn't know yet, `ON CONFLICT (symbol) DO NOTHING` — never overwrites a
@@ -490,7 +494,15 @@ the one-time seed:
    re-runnable, fetches name+sector from FMP's `/profile` endpoint
    (`marketData.service.ts`'s `getProfiles()`) for every symbol currently in
    `m_index_constituent` (the Contrarian Finder scan universe) and upserts both fields,
-   `COALESCE`d so a `null` FMP response never blanks out an already-good value.
+   `COALESCE`d so a `null` FMP response never blanks out an already-good value. Same mechanism
+   backs the Admin Console's "Run Scan (+ Mkt Cap)"/"Delta Update"/"Sync Portfolio-Held Tickers"
+   actions, all via the shared `refreshTickerDataBatch()` (`contrarianFinder.service.ts`).
+3. **`syncHeldSymbolsToUniverse()`** (`contrarianFinder.service.ts`, 2026-11-06) — the Admin
+   Console "Sync Portfolio-Held Tickers" action: finds `tx_holdings` symbols missing from the
+   scan universe or still unenriched here, validates each one live via FMP (no hardcoded
+   exclusion list), and enriches this table for every validated symbol regardless of whether it
+   turns out to be a stock, ETF, or crypto — only the *scan universe* (`m_index_constituent`
+   below) excludes ETFs/crypto, this table doesn't.
 
 Originally seeded 2026-07-10 from `backend/src/db/seed/ticker_sectors.js` (218 rows, still
 read directly by `parser.service.js` for CSV-import sector fallback — a separate, unrelated
@@ -505,12 +517,16 @@ going forward, rather than a one-time fix.
 | `symbol` | `VARCHAR(15)` | PK |
 | `name` | `VARCHAR(200)` | nullable — see the two population paths above |
 | `sector` | `VARCHAR(50)` | nullable — see the two population paths above |
-| `is_etf` | `BOOLEAN` | default `false`, currently unpopulated (no rows flagged `true` yet) |
+| `is_etf` | `BOOLEAN` | default `false` — populated from FMP's `/profile` `isEtf` field by `refreshTickerDataBatch()`/`syncHeldSymbolsToUniverse()` (2026-11-06); always written fresh (not `COALESCE`-guarded like name/sector/market_cap) since FMP always returns a definite value whenever it returns a profile at all |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | default `now()` |
 
 ### `m_index_master`
 One row per tracked index/sector ETF. Seeded 2026-07-10 (14 rows: `DJ30`, `NDX100`,
-`SP500`, and the 11 SPDR sector ETFs `XLK`...`XLRE`) via the same seed script.
+`SP500`, and the 11 SPDR sector ETFs `XLK`...`XLRE`) via the same seed script. **One deliberate
+exception, added by migration `071` (2026-11-06)**: a 15th row, `USER_HELD` — not a real market
+index/ETF ticker, but a synthetic bucket holding `tx_holdings` symbols that aren't in any of the
+14 curated sources (see `m_index_constituent` below). This is the only row in this table ever
+written by the running app itself rather than the one-time seed script.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -518,12 +534,19 @@ One row per tracked index/sector ETF. Seeded 2026-07-10 (14 rows: `DJ30`, `NDX10
 | `index_description` | `VARCHAR(200)` | `NOT NULL` — e.g. "Dow Jones Industrial Average" |
 
 ### `m_index_constituent`
-Index/ETF membership, one row per `(index, symbol)` pair. Seeded 2026-07-10 from
+Index/ETF membership, one row per `(index, symbol)` pair — **a symbol held under multiple
+indices (e.g. AAPL in DJ30 + SP500 + XLK) gets multiple rows**, so `count(*)` on this table is
+NOT the scan universe's deduped symbol count; use `count(DISTINCT symbol)` (`assembleUniverse()`'s
+own `CF_MAX` cap is on the deduped count — a 2026-11-06 bug found live mixed these two up, see
+`contrarianFinder.service.ts`'s `syncHeldSymbolsToUniverse()`). Seeded 2026-07-10 from
 `backend/src/db/seed/cf_static_universe.js`'s `CF_STATIC` object (538 unique rows) via the
 same seed script. **Live source of truth for `contrarianFinder.service.js`'s
 `assembleUniverse()`** as of 2026-07-10 — the service queries this table directly instead
 of importing `cf_static_universe.js` (that JS file is now only read by the one-time seed
-script, not by the live request path).
+script, not by the live request path). **Also grown live, not just seeded, as of 2026-11-06**:
+`syncHeldSymbolsToUniverse()` inserts new rows under the `USER_HELD` index (see
+`m_index_master` above) for genuine stocks found held in a user's portfolio — the only writer
+to this table outside the one-time seed script.
 
 | Column | Type | Notes |
 |---|---|---|
