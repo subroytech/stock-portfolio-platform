@@ -60,18 +60,15 @@ export default function DashboardPage({ readOnly = false, portfolioFilter }: Das
   return (
     <>
       <main className="flex flex-col gap-6 p-4 sm:p-6">
-        <PortfolioSelector selectedId={selectedId} onSelect={setSelectedId} filter={portfolioFilter} />
-
-        {!selectedId && (
-          <p className="text-sm text-text-secondary">Select or create a portfolio to get started.</p>
-        )}
-
-        {selectedId && isLoading && <p className="text-sm text-text-secondary">Loading portfolio…</p>}
-
-        {selectedId && portfolio && (
-          <>
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-card bg-bg-card p-4 shadow-card">
-              {readOnly ? <span /> : <UploadImportDialog portfolioId={selectedId} hasExistingHoldings={portfolio.holdings.length > 0} />}
+        {/* Choose File / Refresh Prices sit to the right of the portfolio selector on the same
+            row (not their own full-width card below it) - deliberately compact, per explicit
+            direction, since that card was taking up too much vertical space on its own. A
+            bottom border gives this control row a clear boundary against the KPI section below. */}
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
+          <PortfolioSelector selectedId={selectedId} onSelect={setSelectedId} filter={portfolioFilter} />
+          {selectedId && portfolio && (
+            <div className="flex flex-wrap items-center gap-3">
+              {readOnly ? null : <UploadImportDialog portfolioId={selectedId} hasExistingHoldings={portfolio.holdings.length > 0} />}
               <div className="flex flex-col items-end gap-1">
                 <button
                   type="button"
@@ -91,7 +88,17 @@ export default function DashboardPage({ readOnly = false, portfolioFilter }: Das
                 )}
               </div>
             </div>
+          )}
+        </div>
 
+        {!selectedId && (
+          <p className="text-sm text-text-secondary">Select or create a portfolio to get started.</p>
+        )}
+
+        {selectedId && isLoading && <p className="text-sm text-text-secondary">Loading portfolio…</p>}
+
+        {selectedId && portfolio && (
+          <>
             <KpiCards portfolio={portfolio} />
 
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -122,7 +129,7 @@ export default function DashboardPage({ readOnly = false, portfolioFilter }: Das
 
             <div>
               <h2 className="mb-3 text-sm font-semibold text-text-primary">Holdings</h2>
-              <HoldingsTable holdings={portfolio.holdings} onSymbolClick={setPreviewSymbol} />
+              <HoldingsTable holdings={portfolio.holdings} portfolioId={selectedId} onSymbolClick={setPreviewSymbol} />
             </div>
           </>
         )}

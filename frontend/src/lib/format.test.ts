@@ -1,5 +1,14 @@
 import { describe, expect, test, vi } from 'vitest';
-import { formatElapsedSince } from './format';
+import { formatElapsedSince, formatDateOnly } from './format';
+
+describe('formatDateOnly', () => {
+  // Midday UTC - same calendar day in every real-world timezone this runs under, unlike an
+  // early-morning-UTC timestamp (which rolls back a day in US timezones - the exact class of
+  // bug this test would otherwise mask).
+  test('formats as a medium date with no time of day', () => {
+    expect(formatDateOnly('2026-07-14T16:00:24.651Z')).toBe('Jul 14, 2026');
+  });
+});
 
 describe('formatElapsedSince', () => {
   const NOW = new Date('2026-10-29T20:45:00.000Z').getTime();

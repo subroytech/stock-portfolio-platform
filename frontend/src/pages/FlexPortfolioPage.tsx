@@ -157,32 +157,92 @@ export default function FlexPortfolioPage() {
   return (
     <>
       <main className="flex flex-col gap-6 p-4 sm:p-6">
-        <div className="flex flex-wrap items-center gap-2">
-          {portfoliosLoading && <p className="text-sm text-text-secondary">Loading portfolios…</p>}
-          {flexPortfolios.map((p) => (
+        {/* Choose File / Change Template / Refresh Prices sit to the right of the portfolio
+            pills on the same row (not their own full-width card below it) - deliberately
+            compact, per explicit direction, since that card was taking up too much vertical
+            space on its own. */}
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
+          <div className="flex flex-wrap items-center gap-2">
+            {portfoliosLoading && <p className="text-sm text-text-secondary">Loading portfolios…</p>}
+            {flexPortfolios.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setSelectedId(p.id)}
+                data-testid={`flex-portfolio-pill-${p.id}`}
+                className={`flex items-center gap-1 rounded-btn px-3 py-1.5 text-sm transition-colors ${
+                  p.id === selectedId ? 'bg-accent text-white' : 'border border-border text-text-secondary hover:bg-bg-primary'
+                }`}
+              >
+                {p.name}
+                {p.flexTemplateStatus === 'Flex-Err' && <span title="Needs attention" className="text-warning">⚠</span>}
+              </button>
+            ))}
             <button
-              key={p.id}
               type="button"
-              onClick={() => setSelectedId(p.id)}
-              data-testid={`flex-portfolio-pill-${p.id}`}
-              className={`flex items-center gap-1 rounded-btn px-3 py-1.5 text-sm transition-colors ${
-                p.id === selectedId ? 'bg-accent text-white' : 'border border-border text-text-secondary hover:bg-bg-primary'
-              }`}
+              onClick={() => { setSelectedId(null); setCreateStep('picker'); }}
+              data-testid="flex-new-portfolio-button"
+              className="rounded-btn border border-dashed border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-primary"
             >
-              {p.name}
-              {p.flexTemplateStatus === 'Flex-Err' && <span title="Needs attention" className="text-warning">⚠</span>}
+              + New Flex Portfolio
             </button>
-          ))}
-          <button
-            type="button"
-            onClick={() => { setSelectedId(null); setCreateStep('picker'); }}
-            data-testid="flex-new-portfolio-button"
-            className="rounded-btn border border-dashed border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-primary"
-          >
-            + New Flex Portfolio
-          </button>
-          {quotaStatus?.flexPortfolios && (
-            <QuotaIndicator label="Flex portfolios" metric={quotaStatus.flexPortfolios} testId="flex-quota-portfolios" />
+            {quotaStatus?.flexPortfolios && (
+              <QuotaIndicator label="Flex portfolios" metric={quotaStatus.flexPortfolios} testId="flex-quota-portfolios" />
+            )}
+          </div>
+
+          {selectedId && portfolio && (
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={reuploadInputRef}
+                  type="file"
+                  accept=".csv,.txt,.xls,.xlsx,.xlsm"
+                  onChange={handleReuploadFileChange}
+                  data-testid="flex-reupload-file-input"
+                  className="block text-sm text-text-secondary file:mr-3 file:rounded-btn file:border-0 file:bg-accent file:px-3 file:py-1.5 file:text-white file:hover:bg-accent-hover"
+                />
+                {reuploadFile && portfolio.uploadTemplateId && (
+                  <button
+                    type="button"
+                    onClick={handleReupload}
+                    disabled={changeTemplate.isPending}
+                    data-testid="flex-reupload-submit"
+                    className="rounded-btn bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent-hover disabled:opacity-60"
+                  >
+                    {changeTemplate.isPending ? 'Uploading…' : `Upload "${reuploadFile.filename}" (current template)`}
+                  </button>
+                )}
+                {portfolio.flexTemplateStatus === 'Flex' && !changingTemplate && (
+                  <button
+                    type="button"
+                    onClick={() => setChangingTemplate(true)}
+                    data-testid="flex-change-template-button"
+                    className="rounded-btn border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-primary"
+                  >
+                    Change Template
+                  </button>
+                )}
+                {changeTemplate.isError && (
+                  <p className="text-sm text-danger">
+                    {changeTemplate.error instanceof ApiError ? changeTemplate.error.message : 'Upload failed.'}
+                  </p>
+                )}
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                <button
+                  type="button"
+                  onClick={handleRefresh}
+                  disabled={refreshPrices.isPending}
+                  className="rounded-btn bg-accent px-3 py-1.5 text-sm text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
+                >
+                  {refreshPrices.isPending ? 'Refreshing…' : 'Refresh Prices'}
+                </button>
+                {oldestPriceUpdate && (
+                  <p className="text-xs text-text-muted">Prices as of {formatAsOf(oldestPriceUpdate)}</p>
+                )}
+              </div>
+            </div>
           )}
         </div>
 
@@ -290,58 +350,6 @@ export default function FlexPortfolioPage() {
               />
             )}
 
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-card bg-bg-card p-4 shadow-card">
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  ref={reuploadInputRef}
-                  type="file"
-                  accept=".csv,.txt,.xls,.xlsx,.xlsm"
-                  onChange={handleReuploadFileChange}
-                  data-testid="flex-reupload-file-input"
-                  className="block text-sm text-text-secondary file:mr-3 file:rounded-btn file:border-0 file:bg-accent file:px-3 file:py-1.5 file:text-white file:hover:bg-accent-hover"
-                />
-                {reuploadFile && portfolio.uploadTemplateId && (
-                  <button
-                    type="button"
-                    onClick={handleReupload}
-                    disabled={changeTemplate.isPending}
-                    data-testid="flex-reupload-submit"
-                    className="rounded-btn bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent-hover disabled:opacity-60"
-                  >
-                    {changeTemplate.isPending ? 'Uploading…' : `Upload "${reuploadFile.filename}" (current template)`}
-                  </button>
-                )}
-                {portfolio.flexTemplateStatus === 'Flex' && !changingTemplate && (
-                  <button
-                    type="button"
-                    onClick={() => setChangingTemplate(true)}
-                    data-testid="flex-change-template-button"
-                    className="rounded-btn border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-primary"
-                  >
-                    Change Template
-                  </button>
-                )}
-                {changeTemplate.isError && (
-                  <p className="text-sm text-danger">
-                    {changeTemplate.error instanceof ApiError ? changeTemplate.error.message : 'Upload failed.'}
-                  </p>
-                )}
-              </div>
-              <div className="flex flex-col items-end gap-1">
-                <button
-                  type="button"
-                  onClick={handleRefresh}
-                  disabled={refreshPrices.isPending}
-                  className="rounded-btn bg-accent px-3 py-1.5 text-sm text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
-                >
-                  {refreshPrices.isPending ? 'Refreshing…' : 'Refresh Prices'}
-                </button>
-                {oldestPriceUpdate && (
-                  <p className="text-xs text-text-muted">Prices as of {formatAsOf(oldestPriceUpdate)}</p>
-                )}
-              </div>
-            </div>
-
             {changingTemplate && (
               <div className="rounded-card bg-bg-card p-4 shadow-card">
                 <div className="mb-3 flex items-center justify-between">
@@ -384,7 +392,7 @@ export default function FlexPortfolioPage() {
 
             <div>
               <h2 className="mb-3 text-sm font-semibold text-text-primary">Holdings</h2>
-              <HoldingsTable holdings={portfolio.holdings} onSymbolClick={setPreviewSymbol} />
+              <HoldingsTable holdings={portfolio.holdings} portfolioId={selectedId} onSymbolClick={setPreviewSymbol} />
             </div>
           </>
         )}

@@ -120,6 +120,26 @@ export function usePortfolio(id: string | null) {
   });
 }
 
+export interface TransactionHistoryEntry {
+  id: string;
+  symbol: string;
+  name: string | null;
+  actionType: 'BUY' | 'SELL';
+  quantityDelta: number;
+  price: number;
+  actionDateTime: string;
+}
+
+// Backs the Holdings table's "Transaction History" tab - lazy (enabled only once that tab is
+// actually clicked), same "no need to fetch until needed" precedent as useStockUniverse.
+export function usePortfolioTransactions(id: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ['portfolios', id, 'transactions'],
+    queryFn: () => apiFetch<{ transactions: TransactionHistoryEntry[] }>(`/portfolios/${id}/transactions`).then((r) => r.transactions),
+    enabled: id !== null && enabled,
+  });
+}
+
 export function useCreatePortfolio() {
   const queryClient = useQueryClient();
   return useMutation({

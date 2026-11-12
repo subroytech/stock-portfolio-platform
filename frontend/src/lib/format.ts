@@ -30,6 +30,13 @@ export function formatAsOf(isoTimestamp: string): string {
   return new Date(isoTimestamp).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+// Date only, no time of day - the Transaction History table's own Date column only needs the
+// day an import happened, and dropping the time (vs. formatAsOf above) is what actually lets
+// that column fit inside the table's narrower width.
+export function formatDateOnly(isoTimestamp: string): string {
+  return new Date(isoTimestamp).toLocaleDateString('en-US', { dateStyle: 'medium' });
+}
+
 // "3 days and 7 hours ago" - a plain elapsed-time readout computed once at render time (no
 // live-ticking interval), same precedent as formatAsOf above never re-rendering on its own.
 export function formatElapsedSince(isoTimestamp: string): string {

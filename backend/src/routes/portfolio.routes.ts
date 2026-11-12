@@ -12,6 +12,9 @@ router.post('/', portfolioController.create);
 router.post('/flex', requirePermission('portfolio_upload:flex'), portfolioController.createFlex);
 
 router.get('/:id', portfolioController.getOne);
+// Transaction History tab (Holdings table, next to Major/Minor) - no extra permission, same
+// ownership-only gate as every other /:id route here.
+router.get('/:id/transactions', portfolioController.getTransactionHistory);
 router.put('/:id', portfolioController.update);
 router.delete('/:id', portfolioController.remove);
 // Portfolio Upload - Legacy - was ungated until this permission existed (migration 024);

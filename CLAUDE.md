@@ -2849,6 +2849,40 @@ Refresh Prices on Fidelity-Subroy post-fix — NVDA's cached quote now carries a
 ~0.2%-18%); a second refresh immediately after correctly reused the now-genuinely-fresh cache
 with zero wasted FMP calls.
 
+## Portfolio Page Round + Candlestick Freshness + ETF Sector Fix ⏳ Uncommitted (working tree, 2026-11-09–11)
+
+Not yet committed on `analysis-service/scaffolding` as of 11-11. Verified 2026-11-11: backend
+Jest 1128/1128, frontend Vitest 882/882, `tsc -b --noEmit` clean.
+
+**Portfolio page (Dashboard + Flex):**
+- Choose File / Change Template / Refresh Prices moved out of their own full-width card into a
+  compact row beside the portfolio selector/pills (Dashboard and Flex both).
+- KPI strip expanded from 4 tiles to 8 in one row: added Today's $, Today's %, Top Gainer, Top
+  Loser, derived from each holding's `todayChangeDollar`. "—"/"None" until the first refresh.
+- New **Transaction History** tab in the Holdings table (`TransactionHistoryTable.tsx`, lazy
+  via `usePortfolioTransactions`) — buy/sell rows from `tx_portfolio_action_hist`, two-level
+  user-controlled sort (default Ticker asc, then Date desc), mobile cards + desktop table capped
+  at `max-w-3xl`.
+- New `GET /portfolios/:id/transactions` (ownership-gated only, no extra permission); names
+  come from `m_tickers` so a fully sold position keeps its name.
+- Empty-holdings message moved inside the tab switcher so History stays reachable with no
+  holdings. `ImportPreviewPage` passes `portfolioId` into the table too.
+
+**Candlestick freshness (`fmpIntradayCache.service.ts`, fixed 2026-11-09):** `deriveIsFresh()`
+returned `true` unconditionally whenever the market was closed, so a 4-day-stale INTC `4hour`
+row showed "Fresh" and hid the Refresh button. Now closed-market freshness requires the row to
+have been fetched earlier *today* (Eastern date).
+
+**ETF sector (`contrarianFinder.service.ts`/`marketData.service.ts`, fixed 2026-11-11):** FMP's
+`sector` on an ETF is the issuer's SEC classification ("Financial Services" for every ARK/iShares/
+Fidelity ETF). For ETFs, `m_tickers.sector` now stores FMP's `industry` field instead (e.g.
+"Asset Management - Cryptocurrency" for IBIT). Stocks are unchanged. `TickerProfile` gained an
+`industry` field. Existing ETF rows will only pick this up on their next refresh.
+
+**Not yet reviewed in this entry:** `frontend/src/components/KpiCards.test.tsx` and
+`TransactionHistoryTable.test.tsx` are new untracked test files; the portfolio backend test files
+and `HoldingsTable.test.tsx` also carry uncommitted changes.
+
 ## Next Up
 
 - **E2E suite's signup step was out of date with the real Self-Registration form — identified

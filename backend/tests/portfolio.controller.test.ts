@@ -110,6 +110,33 @@ describe('GET /portfolios/:id', () => {
   });
 });
 
+describe('GET /portfolios/:id/transactions', () => {
+  test('404 for a portfolio that does not exist or is not owned', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).get('/portfolios/999/transactions').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+  });
+
+  test('200 with every row for an owned portfolio, mapped to camelCase, including the ticker name', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] }) // ownership check
+      .mockResolvedValueOnce({
+        rows: [{
+          id: '10', symbol: 'AAPL', ticker_name: 'Apple Inc.', action_type: 'BUY', quantity_delta: '5.5', price: '150.25',
+          action_date_time: '2026-07-14T01:00:24.651Z',
+        }],
+      });
+    const res = await request(app).get('/portfolios/1/transactions').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      transactions: [{
+        id: '10', symbol: 'AAPL', name: 'Apple Inc.', actionType: 'BUY', quantityDelta: 5.5, price: 150.25,
+        actionDateTime: '2026-07-14T01:00:24.651Z',
+      }],
+    });
+  });
+});
+
 describe('PUT /portfolios/:id', () => {
   test('404 for a portfolio that does not exist or is not owned', async () => {
     mockQuery.mockResolvedValue({ rows: [] });

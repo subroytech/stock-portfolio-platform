@@ -224,6 +224,62 @@ export async function getPortfolio(userId: string, portfolioId: string): Promise
   };
 }
 
+export interface TransactionHistoryEntry {
+  id: string;
+  symbol: string;
+  name: string | null;
+  actionType: 'BUY' | 'SELL';
+  quantityDelta: number;
+  price: number;
+  actionDateTime: string;
+}
+
+interface TransactionHistoryRow {
+  id: string;
+  symbol: string;
+  ticker_name: string | null;
+  action_type: 'BUY' | 'SELL';
+  quantity_delta: string;
+  price: string;
+  action_date_time: string;
+}
+
+// Backs the Holdings table's "Transaction History" tab - every tx_portfolio_action_hist row for
+// this portfolio, populated by importHoldings()'s buy/sell diffing on each import (Legacy or
+// Flex - both funnel through the same importHoldings() write path). Sorting happens client-side
+// (same precedent as the Holdings table's own single-column sort), so this returns rows in a
+// stable, deterministic order (newest action first) rather than one tied to any particular UI
+// sort - small per-portfolio row counts (low hundreds at most) make client-side sort/re-sort
+// cheap and instant, with no need to round-trip to the server on every sort change.
+//
+// name comes from m_tickers, not tx_holdings - a symbol fully sold off (down to zero quantity)
+// is gone from tx_holdings entirely by the time of a later import, so joining against the
+// portfolio's own current holdings would lose the name for exactly that row; m_tickers is this
+// app's own standing "single source of truth for ticker name/sector" regardless of whether the
+// symbol is still held.
+export async function listTransactionHistory(userId: string, portfolioId: string): Promise<TransactionHistoryEntry[] | null> {
+  const { rows: ownerRows } = await pool.query('SELECT id FROM tx_portfolios WHERE id = $1 AND user_id = $2', [portfolioId, userId]);
+  if (!ownerRows[0]) return null;
+
+  const { rows } = await pool.query<TransactionHistoryRow>(
+    `SELECT h.id, h.symbol, t.name AS ticker_name, h.action_type, h.quantity_delta, h.price, h.action_date_time
+     FROM tx_portfolio_action_hist h
+     LEFT JOIN m_tickers t ON t.symbol = h.symbol
+     WHERE h.portfolio_id = $1
+     ORDER BY h.action_date_time DESC`,
+    [portfolioId],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    symbol: r.symbol,
+    name: r.ticker_name,
+    actionType: r.action_type,
+    quantityDelta: parseFloat(r.quantity_delta),
+    price: parseFloat(r.price),
+    actionDateTime: r.action_date_time,
+  }));
+}
+
 export async function updatePortfolio(
   userId: string,
   portfolioId: string,

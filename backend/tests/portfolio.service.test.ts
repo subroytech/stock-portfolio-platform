@@ -30,6 +30,7 @@ import {
   listPortfolios, createPortfolio, getPortfolio, updatePortfolio, deletePortfolio,
   listBoundPortfolios, deleteBoundPortfolio, listUnattachedFlexPortfolios, deleteUnattachedFlexPortfolio,
   importHoldings, refreshPrices, createPortfolioFlex, saveFlexTemplate, changeFlexTemplate, countFlexPortfolios,
+  listTransactionHistory,
   PortfolioNotFoundError, PortfolioNameConflictError, FlexTemplateStateError, PortfolioQuotaExceededError,
 } from '../src/services/portfolio.service';
 import { ParseResult, HoldingEntry } from '../src/services/parser.service';
@@ -157,6 +158,55 @@ describe('getPortfolio', () => {
     const [holdingsSql] = mockQuery.mock.calls[1];
     expect(holdingsSql).toMatch(/LEFT JOIN m_tickers/);
     expect(holdingsSql).toMatch(/NULLIF\(t\.sector, 'Unknown'\)/);
+  });
+});
+
+describe('listTransactionHistory', () => {
+  test('returns null when not found or not owned', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    expect(await listTransactionHistory('user-1', 'nope')).toBeNull();
+  });
+
+  test('maps rows to camelCase, parsing decimal strings to numbers, and includes the ticker name from m_tickers', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] }) // ownership check
+      .mockResolvedValueOnce({
+        rows: [{
+          id: '10', symbol: 'AAPL', ticker_name: 'Apple Inc.', action_type: 'BUY', quantity_delta: '5.5', price: '150.25',
+          action_date_time: '2026-07-14T01:00:24.651Z',
+        }],
+      });
+    const result = await listTransactionHistory('user-1', '1');
+    expect(result).toEqual([{
+      id: '10', symbol: 'AAPL', name: 'Apple Inc.', actionType: 'BUY', quantityDelta: 5.5, price: 150.25,
+      actionDateTime: '2026-07-14T01:00:24.651Z',
+    }]);
+  });
+
+  // A symbol fully sold off is gone from tx_holdings by a later import, but its m_tickers row
+  // (if one was ever enriched) still has a real name - m_tickers.name itself can also be null
+  // for a symbol nobody's ever enriched, which this covers too (LEFT JOIN, not INNER).
+  test('name is null when m_tickers has no row (or no name) for the symbol', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: '10', symbol: 'ZZZ', ticker_name: null, action_type: 'SELL', quantity_delta: '2', price: '10',
+          action_date_time: '2026-07-14T01:00:24.651Z',
+        }],
+      });
+    const result = await listTransactionHistory('user-1', '1');
+    expect(result?.[0].name).toBeNull();
+  });
+
+  test('scopes the query by portfolio_id, ordered newest-first, joined against m_tickers', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: '1' }] }).mockResolvedValueOnce({ rows: [] });
+    await listTransactionHistory('user-1', '1');
+    const [sql, params] = mockQuery.mock.calls[1];
+    expect(sql).toContain('WHERE h.portfolio_id = $1');
+    expect(sql).toContain('ORDER BY h.action_date_time DESC');
+    expect(sql).toContain('LEFT JOIN m_tickers');
+    expect(params).toEqual(['1']);
   });
 });
 

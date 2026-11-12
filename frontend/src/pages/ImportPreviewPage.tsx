@@ -121,7 +121,7 @@ export default function ImportPreviewPage() {
           </div>
         )}
 
-        <HoldingsTable holdings={holdings} />
+        <HoldingsTable holdings={holdings} portfolioId={portfolioId} />
       </main>
     </div>
   );

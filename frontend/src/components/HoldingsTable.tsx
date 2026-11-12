@@ -1,15 +1,17 @@
 import { useMemo, useState } from 'react';
 import type { PortfolioHolding } from '../api/portfolios';
 import { formatCurrency, formatNumber, formatPercent, gainLossColorClass } from '../lib/format';
+import TransactionHistoryTable from './TransactionHistoryTable';
 
 interface HoldingsTableProps {
   holdings: PortfolioHolding[];
+  portfolioId: string;
   onSymbolClick?: (symbol: string) => void;
 }
 
 type SortKey = 'symbol' | 'name' | 'sector' | 'quantity' | 'purchasePrice' | 'currentPrice' | 'currentValue' | 'gainLoss' | 'returnPct' | 'allocationPct';
 type SortDirection = 'asc' | 'desc';
-type SizeTab = 'major' | 'minor';
+type SizeTab = 'major' | 'minor' | 'history';
 
 // Splits the holdings list by allocation weight so the user can focus on the
 // set that actually moves the portfolio, instead of scrolling past a long
@@ -44,7 +46,7 @@ const COLUMNS: { key: SortKey; label: string; align?: 'right' }[] = [
 // markups exist in the DOM simultaneously — Tailwind's `md:hidden` /
 // `hidden md:table` just toggle which one is visible, no JS viewport
 // detection needed.
-export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTableProps) {
+export default function HoldingsTable({ holdings, portfolioId, onSymbolClick }: HoldingsTableProps) {
   // Defaults to Value, descending, in both tabs - the largest positions (by $, not just
   // count) are what the Major/Minor split is meant to surface first.
   const [sortKey, setSortKey] = useState<SortKey | null>('currentValue');
@@ -59,7 +61,7 @@ export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTable
     () => holdings.filter((h) => h.allocationPct != null && h.allocationPct <= MAJOR_THRESHOLD_PCT),
     [holdings],
   );
-  const visibleHoldings = sizeTab === 'major' ? majorHoldings : minorHoldings;
+  const visibleHoldings = sizeTab === 'minor' ? minorHoldings : majorHoldings;
   const majorValue = useMemo(() => majorHoldings.reduce((sum, h) => sum + h.currentValue, 0), [majorHoldings]);
   const minorValue = useMemo(() => minorHoldings.reduce((sum, h) => sum + h.currentValue, 0), [minorHoldings]);
 
@@ -80,10 +82,6 @@ export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTable
     });
     return withOriginalIndex.map((e) => e.h);
   }, [visibleHoldings, sortKey, sortDirection]);
-
-  if (holdings.length === 0) {
-    return <p className="text-sm text-text-secondary">No holdings yet — import a CSV to get started.</p>;
-  }
 
   function handleSort(key: SortKey) {
     if (sortKey === key) {
@@ -120,8 +118,22 @@ export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTable
         >
           MINOR ({formatCurrency(minorValue)}) in #{minorHoldings.length} Stocks
         </button>
+        <button
+          type="button"
+          onClick={() => setSizeTab('history')}
+          data-testid="holdings-tab-history"
+          className={`border-b-2 px-1 pb-2 text-sm font-medium ${sizeTab === 'history' ? 'border-accent text-text-primary' : 'border-transparent text-text-secondary'}`}
+        >
+          TRANSACTION HISTORY
+        </button>
       </div>
 
+      {sizeTab === 'history' ? (
+        <TransactionHistoryTable portfolioId={portfolioId} />
+      ) : holdings.length === 0 ? (
+        <p className="text-sm text-text-secondary">No holdings yet — import a CSV to get started.</p>
+      ) : (
+      <>
       {visibleHoldings.length === 0 && (
         <p className="text-sm text-text-secondary">
           {sizeTab === 'major' ? 'No holdings above the 2.5% allocation threshold.' : 'No holdings at or below the 2.5% allocation threshold.'}
@@ -194,6 +206,8 @@ export default function HoldingsTable({ holdings, onSymbolClick }: HoldingsTable
           </tbody>
         </table>
       </div>
+      )}
+      </>
       )}
     </div>
   );

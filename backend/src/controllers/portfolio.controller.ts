@@ -62,6 +62,19 @@ export async function getOne(req: Request, res: Response, next: NextFunction): P
   }
 }
 
+export async function getTransactionHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const transactions = await portfolioService.listTransactionHistory(getUserId(req), getIdParam(req));
+    if (!transactions) {
+      res.status(404).json({ error: 'Portfolio not found.' });
+      return;
+    }
+    res.json({ transactions });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function update(req: Request, res: Response, next: NextFunction): Promise<void> {
   const { name, broker } = req.body || {};
   if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
