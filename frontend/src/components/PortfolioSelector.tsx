@@ -1,14 +1,22 @@
 import { useState, type FormEvent } from 'react';
-import { useCreatePortfolio, usePortfolios, useUpdatePortfolio } from '../api/portfolios';
+import { useCreatePortfolio, usePortfolios, useUpdatePortfolio, type PortfolioSummary } from '../api/portfolios';
 import { ApiError } from '../api/client';
 
 interface PortfolioSelectorProps {
   selectedId: string | null;
   onSelect: (id: string) => void;
+  // Portfolio Upload - Flex (CLAUDE.md's "Portfolio Upload - Flex" section) - TabShell's
+  // Legacy sub-tab passes `p => p.flexTemplateStatus === null` so a Flex-created portfolio
+  // (bound to a template) never shows up here, where UploadImportDialog's header-alias
+  // guessing would silently overwrite it with data that no longer matches its bound mapping.
+  // Omitted (default: show everything) everywhere else - unchanged from before this filter
+  // existed.
+  filter?: (p: PortfolioSummary) => boolean;
 }
 
-export default function PortfolioSelector({ selectedId, onSelect }: PortfolioSelectorProps) {
-  const { data: portfolios, isLoading } = usePortfolios();
+export default function PortfolioSelector({ selectedId, onSelect, filter }: PortfolioSelectorProps) {
+  const { data: allPortfolios, isLoading } = usePortfolios();
+  const portfolios = filter ? allPortfolios?.filter(filter) : allPortfolios;
   const createPortfolio = useCreatePortfolio();
   const updatePortfolio = useUpdatePortfolio();
   const [newName, setNewName] = useState('');

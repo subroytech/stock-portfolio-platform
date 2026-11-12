@@ -61,7 +61,7 @@ jobs:
         run: pipx install poetry
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14'
           cache: 'poetry'
           cache-dependency-path: analysis-service/poetry.lock
       - run: poetry install
@@ -70,8 +70,6 @@ jobs:
   e2e:
     needs: backend
     runs-on: ubuntu-latest
-    # Non-blocking until proven stable across several CI runs - remove once green.
-    continue-on-error: true
     defaults:
       run:
         working-directory: e2e
