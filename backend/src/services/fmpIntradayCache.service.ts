@@ -14,7 +14,7 @@
 // mechanics; fetching real data and computing indicators is candlestick.service.ts's job.
 
 import { pool } from '../db/pool';
-import { isMarketOpenNow } from './fmpDailyCache.service';
+import { isMarketOpenNow, getEasternDateString } from './fmpDailyCache.service';
 
 // Priority backlog item (not built this phase): row deletion/retention here needs a nuanced,
 // interval-aware policy to manage DB size - see migration 044's own header comment.
@@ -28,17 +28,32 @@ export interface CandlestickPayload {
 
 export interface CachedCandlestickSnapshot extends CandlestickPayload {
   updatedAt: string;
-  // While the market's open: fresh only if updated within the last 10 minutes. Once it's closed,
-  // whatever's cached is treated as still valid/frozen until the next session's first fetch -
-  // same freeze-after-close precedent fmpDailyCache.service.ts already established for `quote`.
+  // While the market's open: fresh only if updated within the last 10 minutes. Once it's
+  // closed, today's own data is treated as valid/frozen until the next session - same
+  // freeze-after-close precedent fmpDailyCache.service.ts established for `quote` - but ONLY
+  // if it was actually fetched earlier TODAY (Eastern calendar day), not any prior day.
   isFresh: boolean;
 }
 
 // Exported for candlestick.service.ts's listCachedSymbols(), which needs the same freshness rule
 // applied to rows from a different table (m_fmp_daily_cache, for the '1day' interval).
+//
+// Real bug fixed 2026-11-09: this used to return `true` unconditionally whenever the market was
+// closed, with no check at all on which day the row actually came from - confirmed live, INTC's
+// '4hour' row sat 4 real calendar days stale (last pulled Nov 4, checked Nov 8) and still read
+// `isFresh: true` purely because the market happened to be closed at check time. That silently
+// hid the Refresh button too (CandlestickPopup.tsx only renders it when `!isFresh`), leaving no
+// way to force an update. Now: "closed" means fresh only if the row was itself updated earlier
+// TODAY - a row from any prior day (including last Friday, checked over a weekend) is treated
+// as stale. That one weekend case trades a harmless extra Refresh click/FMP call (nothing new
+// actually exists until Monday anyway) for never again silently hiding days of missed sessions
+// behind a false "Fresh" badge - the same simple-over-cautious tradeoff this codebase already
+// accepts elsewhere (e.g. isMarketOpenNow's own "no holiday calendar" choice).
 export function deriveIsFresh(updatedAt: string): boolean {
-  if (!isMarketOpenNow()) return true;
-  return Date.now() - new Date(updatedAt).getTime() < FRESHNESS_WINDOW_MS;
+  if (isMarketOpenNow()) {
+    return Date.now() - new Date(updatedAt).getTime() < FRESHNESS_WINDOW_MS;
+  }
+  return getEasternDateString(new Date(updatedAt)) === getEasternDateString();
 }
 
 // Read-only - never calls FMP. Returns null if this (symbol, interval) has never been cached.

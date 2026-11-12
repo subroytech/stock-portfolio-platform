@@ -67,19 +67,25 @@ describe('getProfiles', () => {
   // unlike /quote (used for backfillTickerData.ts/refreshTickerDataBatch() -
   // see marketData.service.ts's comment on why /profile was chosen over
   // /quote for this).
-  test('maps companyName/sector/marketCap/isEtf from each symbol\'s /profile response', async () => {
+  test('maps companyName/sector/industry/marketCap/isEtf from each symbol\'s /profile response', async () => {
     global.fetch = jest.fn((url: string) => {
       const symbol = new URL(url).searchParams.get('symbol');
       const body = symbol === 'AAPL'
         ? [{ companyName: 'Apple Inc.', sector: 'Technology', marketCap: 3000000000000 }]
-        : [{ companyName: 'iShares Fund', sector: 'Technology', marketCap: 2500000000000, isEtf: true }];
+        : [{
+          companyName: 'iShares Bitcoin Trust ETF', sector: 'Financial Services',
+          industry: 'Asset Management - Cryptocurrency', marketCap: 2500000000000, isEtf: true,
+        }];
       return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(body) });
     }) as unknown as typeof fetch;
 
     const result = await getProfiles(['AAPL', 'MSFT'], 'fake-key');
     expect(result).toEqual({
-      AAPL: { name: 'Apple Inc.', sector: 'Technology', marketCap: 3000000000000, isEtf: false },
-      MSFT: { name: 'iShares Fund', sector: 'Technology', marketCap: 2500000000000, isEtf: true },
+      AAPL: { name: 'Apple Inc.', sector: 'Technology', industry: null, marketCap: 3000000000000, isEtf: false },
+      MSFT: {
+        name: 'iShares Bitcoin Trust ETF', sector: 'Financial Services',
+        industry: 'Asset Management - Cryptocurrency', marketCap: 2500000000000, isEtf: true,
+      },
     });
   });
 
@@ -89,7 +95,7 @@ describe('getProfiles', () => {
     }) as unknown as typeof fetch;
 
     const result = await getProfiles(['AAPL'], 'fake-key');
-    expect(result.AAPL).toEqual({ name: 'Apple Inc.', sector: 'Technology', marketCap: null, isEtf: false });
+    expect(result.AAPL).toEqual({ name: 'Apple Inc.', sector: 'Technology', industry: null, marketCap: null, isEtf: false });
   });
 
   test('a symbol with no profile data (null/empty response) is simply absent from the result map', async () => {
@@ -100,7 +106,7 @@ describe('getProfiles', () => {
     }) as unknown as typeof fetch;
 
     const result = await getProfiles(['AAPL', 'ZZZ'], 'fake-key');
-    expect(result).toEqual({ AAPL: { name: 'Apple Inc.', sector: 'Technology', marketCap: 3000000000000, isEtf: false } });
+    expect(result).toEqual({ AAPL: { name: 'Apple Inc.', sector: 'Technology', industry: null, marketCap: 3000000000000, isEtf: false } });
     expect(result.ZZZ).toBeUndefined();
   });
 

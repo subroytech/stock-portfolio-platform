@@ -227,7 +227,7 @@ describe('refreshTickerDataBatch', () => {
   const originalFetch = global.fetch;
   afterEach(() => { global.fetch = originalFetch; });
 
-  function mockProfiles(bySymbol: Record<string, { companyName?: string; sector?: string; marketCap?: number }>) {
+  function mockProfiles(bySymbol: Record<string, { companyName?: string; sector?: string; industry?: string; marketCap?: number; isEtf?: boolean }>) {
     global.fetch = jest.fn((url: string) => {
       const symbol = new URL(url).searchParams.get('symbol') ?? '';
       const p = bySymbol[symbol];
@@ -288,6 +288,41 @@ describe('refreshTickerDataBatch', () => {
     mockProfiles({ AAPL: { companyName: 'Apple Inc.', sector: 'Technology', marketCap: 3e12 } }); // ZZZ absent
     const result = await refreshTickerDataBatch(stocks, 'fake-key', 'all');
     expect(result).toEqual({ updated: 1, skipped: 1 });
+  });
+
+  // Real bug fixed 2026-11-11: an ETF's own FMP `sector` is the ISSUER's SEC classification
+  // (e.g. every ARK/iShares ETF came back "Financial Services" regardless of what the fund
+  // tracks) - `industry` is FMP's own more specific field and is what should actually get
+  // stored as the ETF's "sector". Stocks are untouched.
+  test('an ETF with a real industry value stores industry (not the generic sector) as its sector', async () => {
+    mockQuery.mockReset();
+    mockProfiles({
+      AAPL: { companyName: 'Apple Inc.', sector: 'Technology', marketCap: 3e12 }, // stock - untouched
+      ZZZ: {
+        companyName: 'iShares Bitcoin Trust ETF', sector: 'Financial Services',
+        industry: 'Asset Management - Cryptocurrency', marketCap: 5e10, isEtf: true,
+      },
+    });
+
+    await refreshTickerDataBatch(stocks, 'fake-key', 'all');
+
+    const [, params] = mockQuery.mock.calls[0];
+    expect(params).toEqual([
+      'AAPL', 'Apple Inc.', 'Technology', 3e12, false,
+      'ZZZ', 'iShares Bitcoin Trust ETF', 'Asset Management - Cryptocurrency', 5e10, true,
+    ]);
+  });
+
+  test('an ETF with no industry value falls back to its own generic sector rather than storing null', async () => {
+    mockQuery.mockReset();
+    mockProfiles({
+      ZZZ: { companyName: 'Some ETF', sector: 'Financial Services', marketCap: 1e9, isEtf: true }, // no industry field
+    });
+
+    await refreshTickerDataBatch([stocks[1]], 'fake-key', 'all');
+
+    const [, params] = mockQuery.mock.calls[0];
+    expect(params).toEqual(['ZZZ', 'Some ETF', 'Financial Services', 1e9, true]);
   });
 });
 

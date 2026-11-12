@@ -46,12 +46,32 @@ describe('getCached', () => {
     expect(result?.isFresh).toBe(false);
   });
 
-  test('market closed - always treated as fresh (frozen) regardless of age', async () => {
+  // Both day-boundary tests below pin "now" to 3pm ET (well clear of midnight) - using a bare
+  // real-time offset here would make them flaky depending on what wall-clock time the suite
+  // actually runs at (e.g. "5 hours ago" rolls back to the PRIOR Eastern calendar day if the
+  // real run happens to start before 5am ET), exactly the day-boundary bug class this file's
+  // own production code is guarding against.
+  test('market closed + updated earlier today - still treated as fresh (frozen for the rest of today)', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-11T20:00:00Z')); // 3pm ET
     mockIsMarketOpenNow.mockReturnValue(false);
-    const updatedAt = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(); // 5 hours old
+    const updatedAt = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(); // 10am ET, same day
     mockQuery.mockResolvedValueOnce({ rows: [{ bars: [], indicators: {}, updated_at: updatedAt }] });
     const result = await getCached('AAPL', '5min');
     expect(result?.isFresh).toBe(true);
+    jest.useRealTimers();
+  });
+
+  // Real bug fixed 2026-11-09: this row, from any PRIOR calendar day, used to also come back
+  // isFresh: true (market-closed branch returned true unconditionally) - confirmed live with
+  // INTC's '4hour' cache sitting 4 real days stale while still reading as "Fresh".
+  test('market closed + updated on a PRIOR day - treated as stale, not frozen-forever', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-11T20:00:00Z')); // 3pm ET
+    mockIsMarketOpenNow.mockReturnValue(false);
+    const updatedAt = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000).toISOString(); // 4 days old
+    mockQuery.mockResolvedValueOnce({ rows: [{ bars: [], indicators: {}, updated_at: updatedAt }] });
+    const result = await getCached('AAPL', '5min');
+    expect(result?.isFresh).toBe(false);
+    jest.useRealTimers();
   });
 });
 
@@ -60,6 +80,14 @@ describe('deriveIsFresh', () => {
     mockIsMarketOpenNow.mockReturnValue(true);
     expect(deriveIsFresh(new Date(Date.now() - 1000).toISOString())).toBe(true);
     expect(deriveIsFresh(new Date(Date.now() - 11 * 60 * 1000).toISOString())).toBe(false);
+  });
+
+  test('market closed - fresh only if updated earlier TODAY, stale for any prior day', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-11T20:00:00Z')); // 3pm ET - pinned, see note above
+    mockIsMarketOpenNow.mockReturnValue(false);
+    expect(deriveIsFresh(new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())).toBe(true); // 1pm ET, today
+    expect(deriveIsFresh(new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString())).toBe(false); // 3 days ago
+    jest.useRealTimers();
   });
 });
 

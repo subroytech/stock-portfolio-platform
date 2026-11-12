@@ -121,6 +121,13 @@ export async function getQuotes(symbols: string[], apiKey: string): Promise<Quot
 export interface TickerProfile {
   name: string;
   sector: string;
+  // FMP's own, more specific field (e.g. "Asset Management - Cryptocurrency" for IBIT) -
+  // `sector` on an ETF is the ISSUER's own SEC classification (ARK/iShares/Fidelity/etc. are
+  // themselves registered "Financial Services" companies), not what the fund tracks - confirmed
+  // live 2026-11-11, all 22 ETFs synced via syncHeldSymbolsToUniverse() shared that one exact
+  // sector value regardless of what they actually invest in. Only meaningful for ETFs;
+  // contrarianFinder.service.ts's refreshTickerDataBatch() is what actually uses this.
+  industry: string | null;
   marketCap: number | null;
   isEtf: boolean;
 }
@@ -142,7 +149,10 @@ export async function getProfiles(symbols: string[], apiKey: string): Promise<Re
         if (!data) return null;
         const p = Array.isArray(data) ? data[0] : data;
         if (!p) return null;
-        return { sym, name: p.companyName || '', sector: p.sector || '', marketCap: p.marketCap ?? null, isEtf: p.isEtf === true };
+        return {
+          sym, name: p.companyName || '', sector: p.sector || '', industry: p.industry || null,
+          marketCap: p.marketCap ?? null, isEtf: p.isEtf === true,
+        };
       })
     )
   );
@@ -150,8 +160,8 @@ export async function getProfiles(symbols: string[], apiKey: string): Promise<Re
   const map: Record<string, TickerProfile> = {};
   for (const r of results) {
     if (r.status === 'fulfilled' && r.value && (r.value.name || r.value.sector || r.value.marketCap != null)) {
-      const { sym, name, sector, marketCap, isEtf } = r.value;
-      map[sym] = { name, sector, marketCap, isEtf };
+      const { sym, name, sector, industry, marketCap, isEtf } = r.value;
+      map[sym] = { name, sector, industry, marketCap, isEtf };
     }
   }
 

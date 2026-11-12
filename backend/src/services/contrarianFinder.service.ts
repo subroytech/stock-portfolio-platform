@@ -197,8 +197,17 @@ export async function refreshTickerDataBatch(
     // is_etf always gets the fresh value, not COALESCE-guarded like the other three columns -
     // FMP always returns a definite true/false whenever it returns a profile at all, so
     // there's never a "missing field, keep the old value" case to protect against here.
+    //
+    // For an ETF, FMP's own `sector` is the ISSUER's SEC classification (every ARK/iShares/
+    // Fidelity/etc. ETF comes back "Financial Services" regardless of what the fund actually
+    // tracks - confirmed live 2026-11-11, all 22 ETFs synced so far shared that one exact
+    // value) - `industry` (e.g. "Asset Management - Cryptocurrency" for IBIT) is FMP's own
+    // more specific field and is what's actually meaningful to store as this ETF's "sector".
+    // Stocks are untouched - they keep writing their real sector field exactly as before.
     const values = entries.map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`).join(', ');
-    const params = entries.flatMap(([symbol, p]) => [symbol, p.name || null, p.sector || null, p.marketCap, p.isEtf]);
+    const params = entries.flatMap(([symbol, p]) => [
+      symbol, p.name || null, (p.isEtf && p.industry) ? p.industry : (p.sector || null), p.marketCap, p.isEtf,
+    ]);
     await pool.query(
       `INSERT INTO m_tickers (symbol, name, sector, market_cap, is_etf) VALUES ${values}
        ON CONFLICT (symbol) DO UPDATE SET
