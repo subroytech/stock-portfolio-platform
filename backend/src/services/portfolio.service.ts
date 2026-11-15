@@ -43,6 +43,16 @@ function toFmpQuoteSymbol(symbol: string, sector: string | null): string {
 
 export class PortfolioNotFoundError extends Error {}
 export class PortfolioNameConflictError extends Error {}
+// Admin Manage Portfolio: restore/permanent-delete only apply to a portfolio in the right state
+// (restore needs 'Soft-Delete'; permanent delete needs 'Soft-Delete').
+export class PortfolioStatusError extends Error {}
+
+// Lifecycle status (migration 072). Only 'Active' is ever visible to the owner. 'In-Active' is
+// reserved for future use and nothing sets it yet. 'Soft-Delete' is set by the owner's Delete action.
+export type PortfolioStatus = 'Active' | 'In-Active' | 'Soft-Delete';
+// Every user-facing read or write of a portfolio goes through this predicate, so a non-Active
+// portfolio is invisible and unchangeable by its owner.
+const ACTIVE_ONLY = "status = 'Active'";
 // Portfolio Upload - Flex: saveFlexTemplate()/changeFlexTemplate() refuse to run against a
 // portfolio that isn't a Flex portfolio currently in the 'Flex-Err' (needs-attention) state -
 // e.g. calling Save Template twice, or on a Classic/already-resolved portfolio.
@@ -62,6 +72,7 @@ export interface PortfolioSummary {
   updatedAt: string;
   uploadTemplateId: string | null;
   flexTemplateStatus: 'Flex' | 'Flex-Err' | null;
+  status: PortfolioStatus;
 }
 
 export interface PortfolioDetailHolding {
@@ -86,6 +97,13 @@ export interface PortfolioDetailHolding {
   todayChangePercent: number | null;
 }
 
+// One day of trailing price history, as returned from the shared daily cache. Only the fields the
+// Performance views read - keeps the payload small across ~85 symbols.
+export interface CachedPriceBar {
+  date: string;
+  close: number;
+}
+
 export interface PortfolioDetail extends PortfolioSummary {
   cashAmount: number;
   holdings: PortfolioDetailHolding[];
@@ -93,9 +111,45 @@ export interface PortfolioDetail extends PortfolioSummary {
   totalCostBasis: number;
   totalGainLoss: number;
   totalPortfolioValue: number;
+  // Per-symbol trailing history from the shared daily cache (newest first), so the Performance
+  // views have data on page load. Reads only - a fresh FMP pull still happens only when the user
+  // clicks Refresh Prices, which returns its own, newer performanceHistory.
+  performanceHistory: Record<string, CachedPriceBar[]>;
 }
 
-const PORTFOLIO_COLUMNS = 'id, name, broker, created_at, updated_at, upload_template_id, flex_template_status';
+// Same 130-bar window refreshPrices() asks for, so both sources feed the same charts.
+const CACHED_HISTORY_BARS = 130;
+
+// Reads the trailing history refreshPrices() already left in the shared daily cache (m_fmp_daily_cache),
+// for the Performance views' initial load. Never calls FMP. A symbol with no cache row is simply
+// omitted, and crypto is excluded the same way refreshPrices() excludes it.
+async function loadCachedPerformanceHistory(
+  holdings: { symbol: string; sector: string | null }[],
+): Promise<Record<string, CachedPriceBar[]>> {
+  const symbols = [...new Set(holdings.filter((h) => !isPerfSkipped(h.symbol, h.sector)).map((h) => h.symbol))];
+  if (symbols.length === 0) return {};
+
+  const { rows } = await pool.query<{ symbol: string; api_result: unknown }>(
+    `SELECT symbol, api_result FROM m_fmp_daily_cache
+     WHERE api_name = 'historical-price-eod' AND symbol = ANY($1::text[])`,
+    [symbols],
+  );
+
+  const result: Record<string, CachedPriceBar[]> = {};
+  for (const row of rows) {
+    // Same unwrapping as marketData.getHistorical(): a bare array, or an object with .historical.
+    const raw = row.api_result as { historical?: unknown[] } | unknown[] | null;
+    const bars = (Array.isArray(raw) ? raw : (raw?.historical ?? [])) as { date?: unknown; close?: unknown }[];
+    const trimmed: CachedPriceBar[] = bars
+      .slice(0, CACHED_HISTORY_BARS)
+      .filter((b) => b && typeof b.date === 'string' && b.close != null)
+      .map((b) => ({ date: b.date as string, close: Number(b.close) }));
+    if (trimmed.length > 0) result[row.symbol] = trimmed;
+  }
+  return result;
+}
+
+const PORTFOLIO_COLUMNS = 'id, name, broker, created_at, updated_at, upload_template_id, flex_template_status, status';
 
 interface PortfolioRow {
   id: string;
@@ -105,18 +159,19 @@ interface PortfolioRow {
   updated_at: string;
   upload_template_id: string | null;
   flex_template_status: 'Flex' | 'Flex-Err' | null;
+  status: PortfolioStatus;
 }
 
 function mapPortfolioRow(r: PortfolioRow): PortfolioSummary {
   return {
     id: r.id, name: r.name, broker: r.broker, createdAt: r.created_at, updatedAt: r.updated_at,
-    uploadTemplateId: r.upload_template_id, flexTemplateStatus: r.flex_template_status,
+    uploadTemplateId: r.upload_template_id, flexTemplateStatus: r.flex_template_status, status: r.status,
   };
 }
 
 export async function listPortfolios(userId: string): Promise<PortfolioSummary[]> {
   const { rows } = await pool.query<PortfolioRow>(
-    `SELECT ${PORTFOLIO_COLUMNS} FROM tx_portfolios WHERE user_id = $1 ORDER BY created_at`,
+    `SELECT ${PORTFOLIO_COLUMNS} FROM tx_portfolios WHERE user_id = $1 AND ${ACTIVE_ONLY} ORDER BY created_at`,
     [userId],
   );
   return rows.map(mapPortfolioRow);
@@ -179,7 +234,7 @@ function mapHoldingRow(r: HoldingRow): PortfolioDetailHolding {
 
 export async function getPortfolio(userId: string, portfolioId: string): Promise<PortfolioDetail | null> {
   const { rows: portfolioRows } = await pool.query<PortfolioRow>(
-    `SELECT ${PORTFOLIO_COLUMNS} FROM tx_portfolios WHERE id = $1 AND user_id = $2`,
+    `SELECT ${PORTFOLIO_COLUMNS} FROM tx_portfolios WHERE id = $1 AND user_id = $2 AND ${ACTIVE_ONLY}`,
     [portfolioId, userId],
   );
   if (!portfolioRows[0]) return null;
@@ -212,6 +267,7 @@ export async function getPortfolio(userId: string, portfolioId: string): Promise
 
   const totalHoldingsValue = holdings.reduce((s, h) => s + h.currentValue, 0);
   const totalCostBasis = holdings.reduce((s, h) => s + h.costBasis, 0);
+  const performanceHistory = await loadCachedPerformanceHistory(holdingRows);
 
   return {
     ...mapPortfolioRow(portfolioRows[0]),
@@ -221,6 +277,7 @@ export async function getPortfolio(userId: string, portfolioId: string): Promise
     totalCostBasis,
     totalGainLoss: totalHoldingsValue - totalCostBasis,
     totalPortfolioValue: totalHoldingsValue + cashAmount,
+    performanceHistory,
   };
 }
 
@@ -258,7 +315,7 @@ interface TransactionHistoryRow {
 // app's own standing "single source of truth for ticker name/sector" regardless of whether the
 // symbol is still held.
 export async function listTransactionHistory(userId: string, portfolioId: string): Promise<TransactionHistoryEntry[] | null> {
-  const { rows: ownerRows } = await pool.query('SELECT id FROM tx_portfolios WHERE id = $1 AND user_id = $2', [portfolioId, userId]);
+  const { rows: ownerRows } = await pool.query(`SELECT id FROM tx_portfolios WHERE id = $1 AND user_id = $2 AND ${ACTIVE_ONLY}`, [portfolioId, userId]);
   if (!ownerRows[0]) return null;
 
   const { rows } = await pool.query<TransactionHistoryRow>(
@@ -305,7 +362,7 @@ export async function updatePortfolio(
 
   try {
     const { rows } = await pool.query<PortfolioRow>(
-      `UPDATE tx_portfolios SET ${setClauses.join(', ')} WHERE id = $${idParam} AND user_id = $${userIdParam}
+      `UPDATE tx_portfolios SET ${setClauses.join(', ')} WHERE id = $${idParam} AND user_id = $${userIdParam} AND ${ACTIVE_ONLY}
        RETURNING ${PORTFOLIO_COLUMNS}`,
       params,
     );
@@ -318,10 +375,141 @@ export async function updatePortfolio(
   }
 }
 
+// Hard delete, deliberately narrowed (2026-11-14): only ever removes a Flex creation that was never
+// resolved (flex_template_status = 'Flex-Err') - the lifecycle abort the Flex resolution banner
+// offers. A user can never hard-delete a resolved portfolio; that goes through softDeletePortfolio().
 export async function deletePortfolio(userId: string, portfolioId: string): Promise<boolean> {
   const { rows } = await pool.query(
-    'DELETE FROM tx_portfolios WHERE id = $1 AND user_id = $2 RETURNING id',
+    `DELETE FROM tx_portfolios WHERE id = $1 AND user_id = $2 AND flex_template_status = 'Flex-Err' AND ${ACTIVE_ONLY} RETURNING id`,
     [portfolioId, userId],
+  );
+  return rows.length > 0;
+}
+
+// The owner's Delete action: hides the portfolio from their Portfolio tab (status -> 'Soft-Delete').
+// Nothing is removed. Only an admin can restore it, from Admin - Portfolio Admin - Manage Portfolio.
+export async function softDeletePortfolio(userId: string, portfolioId: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    `UPDATE tx_portfolios SET status = 'Soft-Delete', updated_at = now()
+     WHERE id = $1 AND user_id = $2 AND ${ACTIVE_ONLY} RETURNING id`,
+    [portfolioId, userId],
+  );
+  return rows.length > 0;
+}
+
+// --- Admin: Portfolio Admin - Manage Portfolio (portfolio_admin:manage) ---
+
+export type PortfolioType = 'Legacy' | 'Flex';
+
+export interface ManagedPortfolio {
+  id: string;
+  name: string;
+  ownerUserId: string;
+  ownerEmail: string;
+  portfolioType: PortfolioType;
+  // The Flex template this portfolio is bound to (its name). null for Legacy portfolios, and for a
+  // Flex portfolio whose template was never saved (Flex-Err) - nothing is bound yet.
+  templateName: string | null;
+  status: PortfolioStatus;
+  createdAt: string;
+}
+
+export interface ManagedPortfolioFilters {
+  userId?: string;
+  portfolioType?: PortfolioType;
+  status?: PortfolioStatus;
+}
+
+// Every portfolio across every status - the only place a non-Active portfolio is visible. Single-
+// select filters, all optional. Default sort: user email, then type (Legacy before Flex), then
+// status, then portfolio name, all ascending.
+export async function listManagedPortfolios(filters: ManagedPortfolioFilters): Promise<ManagedPortfolio[]> {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (filters.userId) {
+    params.push(filters.userId);
+    where.push(`p.user_id = $${params.length}`);
+  }
+  if (filters.portfolioType === 'Legacy') where.push('p.flex_template_status IS NULL');
+  if (filters.portfolioType === 'Flex') where.push('p.flex_template_status IS NOT NULL');
+  if (filters.status) {
+    params.push(filters.status);
+    where.push(`p.status = $${params.length}`);
+  }
+  const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+
+  const { rows } = await pool.query<{
+    id: string; name: string; user_id: string; owner_email: string;
+    flex_template_status: string | null; status: PortfolioStatus; created_at: string; template_name: string | null;
+  }>(
+    `SELECT p.id, p.name, p.user_id, u.email AS owner_email, p.flex_template_status, p.status, p.created_at,
+            t.template_name
+     FROM tx_portfolios p
+     JOIN users u ON u.id = p.user_id
+     LEFT JOIN m_portfolio_template_mapping_master t ON t.id = p.upload_template_id
+     ${whereSql}
+     ORDER BY u.email,
+              CASE WHEN p.flex_template_status IS NULL THEN 0 ELSE 1 END,
+              p.status,
+              p.name`,
+    params,
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    ownerUserId: r.user_id,
+    ownerEmail: r.owner_email,
+    portfolioType: r.flex_template_status == null ? 'Legacy' : 'Flex',
+    templateName: r.template_name,
+    status: r.status,
+    createdAt: r.created_at,
+  }));
+}
+
+// Restore: only a 'Soft-Delete' portfolio can be restored, and it returns to 'Active'. If the owner
+// has since created another active portfolio with the same name, the restore is refused rather than
+// breaking the per-user name rule (migration 073).
+export async function restorePortfolio(portfolioId: string): Promise<PortfolioSummary | null> {
+  const { rows: current } = await pool.query<{ status: PortfolioStatus; name: string }>(
+    'SELECT status, name FROM tx_portfolios WHERE id = $1',
+    [portfolioId],
+  );
+  if (!current[0]) return null;
+  if (current[0].status !== 'Soft-Delete') {
+    throw new PortfolioStatusError('Only a Soft-Delete portfolio can be restored.');
+  }
+  try {
+    const { rows } = await pool.query<PortfolioRow>(
+      `UPDATE tx_portfolios SET status = 'Active', updated_at = now()
+       WHERE id = $1 AND status = 'Soft-Delete' RETURNING ${PORTFOLIO_COLUMNS}`,
+      [portfolioId],
+    );
+    return rows[0] ? mapPortfolioRow(rows[0]) : null;
+  } catch (err) {
+    if ((err as { code?: string })?.code === UNIQUE_VIOLATION) {
+      throw new PortfolioNameConflictError(
+        `Can't restore: this user already has an active portfolio named "${current[0].name}".`,
+      );
+    }
+    throw err;
+  }
+}
+
+// Permanent delete - the irreversible step behind the Manage Portfolio DELETE icon. Only a
+// 'Soft-Delete' portfolio can be removed this way. Child rows (holdings, cash, uploads, action
+// history) go with it via the existing ON DELETE CASCADE foreign keys.
+export async function permanentlyDeleteSoftDeletedPortfolio(portfolioId: string): Promise<boolean> {
+  const { rows: current } = await pool.query<{ status: PortfolioStatus }>(
+    'SELECT status FROM tx_portfolios WHERE id = $1',
+    [portfolioId],
+  );
+  if (!current[0]) return false;
+  if (current[0].status !== 'Soft-Delete') {
+    throw new PortfolioStatusError('Only a Soft-Delete portfolio can be permanently deleted.');
+  }
+  const { rows } = await pool.query(
+    `DELETE FROM tx_portfolios WHERE id = $1 AND status = 'Soft-Delete' RETURNING id`,
+    [portfolioId],
   );
   return rows.length > 0;
 }
@@ -331,6 +519,7 @@ export interface BoundPortfolio {
   name: string;
   ownerEmail: string;
   createdAt: string;
+  status: PortfolioStatus;
 }
 
 // Admin Console's Portfolio Templates screen only - what's shown in the "bound portfolios"
@@ -339,14 +528,16 @@ export interface BoundPortfolio {
 // since that file is already imported BY this one (createPortfolioFlex/saveFlexTemplate) - the
 // reverse import would be circular.
 export async function listBoundPortfolios(templateId: string): Promise<BoundPortfolio[]> {
-  const { rows } = await pool.query<{ id: string; name: string; owner_email: string; created_at: string }>(
-    `SELECT p.id, p.name, u.email AS owner_email, p.created_at
+  const { rows } = await pool.query<{ id: string; name: string; owner_email: string; created_at: string; status: PortfolioStatus }>(
+    `SELECT p.id, p.name, u.email AS owner_email, p.created_at, p.status
      FROM tx_portfolios p JOIN users u ON u.id = p.user_id
      WHERE p.upload_template_id = $1
      ORDER BY p.created_at`,
     [templateId],
   );
-  return rows.map((r) => ({ id: r.id, name: r.name, ownerEmail: r.owner_email, createdAt: r.created_at }));
+  return rows.map((r) => ({
+    id: r.id, name: r.name, ownerEmail: r.owner_email, createdAt: r.created_at, status: r.status,
+  }));
 }
 
 // Deliberately requires BOTH ids to match (not a bare delete-by-portfolio-id) - this is the
@@ -355,9 +546,31 @@ export async function listBoundPortfolios(templateId: string): Promise<BoundPort
 // bound to the specific template being cleaned up. Same single-statement shape as
 // deletePortfolio() above - already relies on the same child-table cascade FKs that function
 // has always trusted.
+// Permanent delete from the bound-portfolios pop-up. Only a Soft-Delete portfolio can be removed this
+// way (2026-11-14): an Active one must first be soft-deleted with softDeleteBoundPortfolio, so the
+// lifecycle is never skipped. Returns false when nothing is bound to this template under that id.
 export async function deleteBoundPortfolio(templateId: string, portfolioId: string): Promise<boolean> {
+  const { rows: current } = await pool.query<{ status: PortfolioStatus }>(
+    'SELECT status FROM tx_portfolios WHERE id = $1 AND upload_template_id = $2',
+    [portfolioId, templateId],
+  );
+  if (!current[0]) return false;
+  if (current[0].status !== 'Soft-Delete') {
+    throw new PortfolioStatusError('Soft-delete this portfolio first, then permanently delete it.');
+  }
   const { rows } = await pool.query(
-    'DELETE FROM tx_portfolios WHERE id = $1 AND upload_template_id = $2 RETURNING id',
+    `DELETE FROM tx_portfolios WHERE id = $1 AND upload_template_id = $2 AND status = 'Soft-Delete' RETURNING id`,
+    [portfolioId, templateId],
+  );
+  return rows.length > 0;
+}
+
+// Soft-delete an Active portfolio that is still bound to this template - the admin-side route to
+// unblock a template without skipping the lifecycle. Returns false when no Active portfolio matches.
+export async function softDeleteBoundPortfolio(templateId: string, portfolioId: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    `UPDATE tx_portfolios SET status = 'Soft-Delete', updated_at = now()
+     WHERE id = $1 AND upload_template_id = $2 AND status = 'Active' RETURNING id`,
     [portfolioId, templateId],
   );
   return rows.length > 0;
@@ -387,7 +600,7 @@ export async function listUnattachedFlexPortfolios(): Promise<UnattachedFlexPort
     JOIN users u ON u.id = p.user_id
     LEFT JOIN tx_holdings h ON h.portfolio_id = p.id
     LEFT JOIN tx_cash_positions c ON c.portfolio_id = p.id
-    WHERE p.flex_template_status = 'Flex-Err'
+    WHERE p.flex_template_status = 'Flex-Err' AND p.status = 'Active'
     GROUP BY p.id, u.email, p.created_at, c.amount
     ORDER BY p.created_at
   `);
@@ -438,7 +651,7 @@ export async function importHoldings(
   try {
     await client.query('BEGIN');
 
-    const { rows: ownerRows } = await client.query('SELECT id FROM tx_portfolios WHERE id = $1 AND user_id = $2', [portfolioId, userId]);
+    const { rows: ownerRows } = await client.query(`SELECT id FROM tx_portfolios WHERE id = $1 AND user_id = $2 AND ${ACTIVE_ONLY}`, [portfolioId, userId]);
     if (!ownerRows[0]) throw new PortfolioNotFoundError('Portfolio not found.');
 
     const { rows: existingRows } = await client.query<{ symbol: string; quantity: string; current_price: string }>(
@@ -564,7 +777,7 @@ export interface CreatePortfolioFlexInput {
 // new read-only GET /flex-quota/status endpoint, so both always agree on the same count.
 export async function countFlexPortfolios(userId: string): Promise<number> {
   const { rows } = await pool.query<{ count: number }>(
-    `SELECT count(*)::int AS count FROM tx_portfolios WHERE user_id = $1 AND flex_template_status IN ('Flex', 'Flex-Err')`,
+    `SELECT count(*)::int AS count FROM tx_portfolios WHERE user_id = $1 AND ${ACTIVE_ONLY} AND flex_template_status IN ('Flex', 'Flex-Err')`,
     [userId],
   );
   return rows[0].count;
@@ -678,7 +891,7 @@ export async function saveFlexTemplate(
     await client.query('BEGIN');
 
     const { rows } = await client.query<{ id: string; flex_template_status: string | null }>(
-      'SELECT id, flex_template_status FROM tx_portfolios WHERE id = $1 AND user_id = $2',
+      `SELECT id, flex_template_status FROM tx_portfolios WHERE id = $1 AND user_id = $2 AND ${ACTIVE_ONLY}`,
       [portfolioId, userId],
     );
     if (!rows[0]) throw new PortfolioNotFoundError('Portfolio not found.');
@@ -737,7 +950,7 @@ export async function changeFlexTemplate(
   input: ChangeFlexTemplateInput,
 ): Promise<{ portfolio: PortfolioSummary; importResult: ImportResult }> {
   const { rows } = await pool.query<{ id: string; flex_template_status: string | null }>(
-    'SELECT id, flex_template_status FROM tx_portfolios WHERE id = $1 AND user_id = $2',
+    `SELECT id, flex_template_status FROM tx_portfolios WHERE id = $1 AND user_id = $2 AND ${ACTIVE_ONLY}`,
     [portfolioId, userId],
   );
   if (!rows[0]) throw new PortfolioNotFoundError('Portfolio not found.');
@@ -854,7 +1067,7 @@ function toHoldingLike(r: HoldingRow): HoldingLike {
 // widgets' period-return/Today's-$ modes, rather than a second independent
 // refresh action like the source app has.
 export async function refreshPrices(userId: string, portfolioId: string): Promise<RefreshPricesResult> {
-  const { rows: ownerRows } = await pool.query('SELECT id FROM tx_portfolios WHERE id = $1 AND user_id = $2', [portfolioId, userId]);
+  const { rows: ownerRows } = await pool.query(`SELECT id FROM tx_portfolios WHERE id = $1 AND user_id = $2 AND ${ACTIVE_ONLY}`, [portfolioId, userId]);
   if (!ownerRows[0]) throw new PortfolioNotFoundError('Portfolio not found.');
 
   // Same live-sector join as getPortfolio() above - isPerfSkipped()/toFmpQuoteSymbol() below

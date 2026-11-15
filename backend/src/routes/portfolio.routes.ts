@@ -17,6 +17,8 @@ router.get('/:id', portfolioController.getOne);
 router.get('/:id/transactions', portfolioController.getTransactionHistory);
 router.put('/:id', portfolioController.update);
 router.delete('/:id', portfolioController.remove);
+// The owner's Delete action (Lifecycle status: Active -> Soft-Delete). Hides the portfolio; nothing is removed.
+router.post('/:id/soft-delete', portfolioController.softDelete);
 // Portfolio Upload - Legacy - was ungated until this permission existed (migration 024);
 // granted to 'user' by default so nobody loses today's working import on rollout.
 router.post('/:id/import', requirePermission('portfolio_upload:legacy'), portfolioController.importHoldings);

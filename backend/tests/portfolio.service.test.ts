@@ -28,10 +28,10 @@ import * as portfolioTemplateService from '../src/services/portfolioTemplate.ser
 import * as flexQuota from '../src/services/flexQuota.service';
 import {
   listPortfolios, createPortfolio, getPortfolio, updatePortfolio, deletePortfolio,
-  listBoundPortfolios, deleteBoundPortfolio, listUnattachedFlexPortfolios, deleteUnattachedFlexPortfolio,
+  listBoundPortfolios, deleteBoundPortfolio, softDeleteBoundPortfolio, listUnattachedFlexPortfolios, deleteUnattachedFlexPortfolio,
   importHoldings, refreshPrices, createPortfolioFlex, saveFlexTemplate, changeFlexTemplate, countFlexPortfolios,
   listTransactionHistory,
-  PortfolioNotFoundError, PortfolioNameConflictError, FlexTemplateStateError, PortfolioQuotaExceededError,
+  PortfolioNotFoundError, PortfolioNameConflictError, PortfolioStatusError, FlexTemplateStateError, PortfolioQuotaExceededError,
 } from '../src/services/portfolio.service';
 import { ParseResult, HoldingEntry } from '../src/services/parser.service';
 import { TemplateSampleTooLargeError, MAX_TEMPLATE_SAMPLE_LINES } from '../src/services/flexParser.service';
@@ -95,7 +95,8 @@ describe('getPortfolio', () => {
           return_pct: '20', allocation_pct: null, price_updated_at: null,
         }],
       })
-      .mockResolvedValueOnce({ rows: [{ amount: '500' }] });
+      .mockResolvedValueOnce({ rows: [{ amount: '500' }] })
+      .mockResolvedValueOnce({ rows: [] });
 
     const result = await getPortfolio('user-1', '1');
     expect(result?.totalHoldingsValue).toBe(1200);
@@ -124,6 +125,7 @@ describe('getPortfolio', () => {
           },
         ],
       })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
 
     const result = await getPortfolio('user-1', '1');
@@ -142,6 +144,58 @@ describe('getPortfolio', () => {
       .mockResolvedValueOnce({ rows: [] });
     const result = await getPortfolio('user-1', '1');
     expect(result?.cashAmount).toBe(0);
+  });
+
+  // Cached trailing history for the Performance views' initial load: read-only from the shared
+  // daily cache, trimmed to 130 bars with date+close only, crypto excluded like refreshPrices().
+  test('performanceHistory comes from the shared daily cache (read-only), trimmed to 130 bars, skipping crypto', async () => {
+    const bars = Array.from({ length: 200 }, (_, i) => ({ date: `2026-01-${String(i + 1).padStart(3, '0')}`, close: 100 + i, volume: 999 }));
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1', name: 'Fidelity', broker: null, created_at: 't1', updated_at: 't1' }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'h1', symbol: 'AAPL', name: 'Apple', quantity: '10', purchase_price: '100', current_price: '120',
+            sector: 'Tech', purchase_date: null, cost_basis: '1000', current_value: '1200', gain_loss: '200',
+            return_pct: '20', allocation_pct: null, price_updated_at: null,
+          },
+          {
+            id: 'h2', symbol: 'BTC', name: 'Bitcoin', quantity: '1', purchase_price: '50', current_price: '60',
+            sector: 'Crypto', purchase_date: null, cost_basis: '50', current_value: '60', gain_loss: '10',
+            return_pct: '20', allocation_pct: null, price_updated_at: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ symbol: 'AAPL', api_result: bars }] });
+
+    const result = await getPortfolio('user-1', '1');
+
+    expect(result?.performanceHistory.AAPL).toHaveLength(130);
+    expect(result?.performanceHistory.AAPL[0]).toEqual({ date: bars[0].date, close: bars[0].close });
+    expect(result?.performanceHistory.BTC).toBeUndefined();
+
+    const [cacheSql, cacheParams] = mockQuery.mock.calls[3];
+    expect(cacheSql).toMatch(/m_fmp_daily_cache/);
+    expect(cacheSql).toMatch(/api_name = 'historical-price-eod'/);
+    expect(cacheParams).toEqual([['AAPL']]); // crypto never queried
+  });
+
+  test('performanceHistory also accepts the wrapped { historical: [...] } cache shape', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: '1', name: 'Fidelity', broker: null, created_at: 't1', updated_at: 't1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'h1', symbol: 'MSFT', name: 'Microsoft', quantity: '5', purchase_price: '200', current_price: '200',
+          sector: 'Tech', purchase_date: null, cost_basis: '1000', current_value: '1000', gain_loss: '0',
+          return_pct: '0', allocation_pct: null, price_updated_at: null,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ symbol: 'MSFT', api_result: { historical: [{ date: '2026-11-13', close: '410.5' }] } }] });
+
+    const result = await getPortfolio('user-1', '1');
+    expect(result?.performanceHistory.MSFT).toEqual([{ date: '2026-11-13', close: 410.5 }]);
   });
 
   // 2026-11-06: holdings' sector is now a live LEFT JOIN against m_tickers (the documented
@@ -250,9 +304,25 @@ describe('listBoundPortfolios', () => {
 });
 
 describe('deleteBoundPortfolio', () => {
-  test('returns true when the portfolio is genuinely bound to that template', async () => {
-    mockQuery.mockResolvedValue({ rows: [{ id: 'p1' }] });
+  test('permanently deletes a Soft-Delete portfolio bound to that template', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ status: 'Soft-Delete' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'p1' }] });
     expect(await deleteBoundPortfolio('template-1', 'p1')).toBe(true);
+    expect(mockQuery.mock.calls[1][0]).toMatch(/AND status = 'Soft-Delete'/);
+  });
+
+  test('refuses to permanently delete an Active bound portfolio, without issuing a DELETE', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'Active' }] });
+    await expect(deleteBoundPortfolio('template-1', 'p1')).rejects.toBeInstanceOf(PortfolioStatusError);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  test('soft-deletes only an Active portfolio bound to that template', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'p1' }] });
+    expect(await softDeleteBoundPortfolio('template-1', 'p1')).toBe(true);
+    expect(mockQuery.mock.calls[0][0]).toMatch(/SET status = 'Soft-Delete'/);
+    expect(mockQuery.mock.calls[0][0]).toMatch(/AND status = 'Active'/);
   });
 
   // Proves the scoping guard: a portfolio bound to a DIFFERENT template (or not found at all)

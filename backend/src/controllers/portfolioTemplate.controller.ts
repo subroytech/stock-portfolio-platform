@@ -146,8 +146,14 @@ export async function remove(req: Request, res: Response, next: NextFunction): P
       res.status(404).json({ error: err.message });
       return;
     }
-    if (err instanceof portfolioTemplateService.TemplateStatusError || err instanceof portfolioTemplateService.TemplateInUseError) {
-      res.status(409).json({ error: err.message });
+    // A machine-readable code tells the admin screen why the delete was refused, so it only opens the
+    // bound-portfolios pop-up for TEMPLATE_IN_USE (2026-11-14) instead of for every 409.
+    if (err instanceof portfolioTemplateService.TemplateInUseError) {
+      res.status(409).json({ error: err.message, code: 'TEMPLATE_IN_USE' });
+      return;
+    }
+    if (err instanceof portfolioTemplateService.TemplateStatusError) {
+      res.status(409).json({ error: err.message, code: 'TEMPLATE_APPROVED' });
       return;
     }
     next(err);
@@ -174,6 +180,25 @@ export async function removeBound(req: Request, res: Response, next: NextFunctio
     const deleted = await portfolioService.deleteBoundPortfolio(getIdParam(req), getPortfolioIdParam(req));
     if (!deleted) {
       res.status(404).json({ error: 'Portfolio not found, or not bound to this template.' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err) {
+    if (err instanceof portfolioService.PortfolioStatusError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    next(err);
+  }
+}
+
+// POST /portfolio-templates/:id/bound-portfolios/:portfolioId/soft-delete - the bound-portfolios pop-up's
+// action for an Active portfolio: soft-delete it first. Its permanent delete then becomes available.
+export async function softDeleteBound(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const deleted = await portfolioService.softDeleteBoundPortfolio(getIdParam(req), getPortfolioIdParam(req));
+    if (!deleted) {
+      res.status(404).json({ error: 'No active portfolio bound to this template matches that id.' });
       return;
     }
     res.json({ success: true });

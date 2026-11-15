@@ -31,5 +31,8 @@ router.delete('/:id', requirePermission('portfolio_template:manage_status'), por
 // admin action as deleting the template itself, not a separate capability.
 router.get('/:id/bound-portfolios', requirePermission('portfolio_template:manage_status'), portfolioTemplateController.listBound);
 router.delete('/:id/bound-portfolios/:portfolioId', requirePermission('portfolio_template:manage_status'), portfolioTemplateController.removeBound);
+// Soft-delete an Active bound portfolio from the pop-up (2026-11-14) - the only way to unblock a template
+// without skipping the lifecycle. Its permanent delete is then the DELETE route above.
+router.post('/:id/bound-portfolios/:portfolioId/soft-delete', requirePermission('portfolio_template:manage_status'), portfolioTemplateController.softDeleteBound);
 
 export default router;

@@ -101,9 +101,24 @@ export async function update(req: Request, res: Response, next: NextFunction): P
   }
 }
 
+// Hard delete - only an unresolved Flex creation (see portfolio.service.ts's deletePortfolio).
 export async function remove(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const deleted = await portfolioService.deletePortfolio(getUserId(req), getIdParam(req));
+    if (!deleted) {
+      res.status(404).json({ error: 'Portfolio not found.' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// The owner's Delete action (Soft-Delete): hides the portfolio from their list. Restore is admin-only.
+export async function softDelete(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const deleted = await portfolioService.softDeletePortfolio(getUserId(req), getIdParam(req));
     if (!deleted) {
       res.status(404).json({ error: 'Portfolio not found.' });
       return;

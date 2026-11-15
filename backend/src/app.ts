@@ -7,6 +7,7 @@ import quotesRoutes from './routes/quotes.routes';
 import contrarianFinderRoutes from './routes/contrarianFinder.routes';
 import authRoutes from './routes/auth.routes';
 import portfolioRoutes from './routes/portfolio.routes';
+import portfolioAdminRoutes from './routes/portfolioAdmin.routes';
 import userSubscriptionRoutes from './routes/userSubscription.routes';
 import momentumRoutes from './routes/momentum.routes';
 import stockPreviewRoutes from './routes/stockPreview.routes';
@@ -55,6 +56,8 @@ app.use('/quotes', requireAuth, rateLimiters, quotesRoutes);
 app.use('/contrarian-finder', requireAuth, rateLimiters, contrarianFinderRoutes);
 app.use('/auth', rateLimiters, authRoutes);
 app.use('/portfolios', requireAuth, rateLimiters, portfolioRoutes);
+// Admin - Portfolio Admin - Manage Portfolio. Each route is gated by requirePermission('portfolio_admin:manage').
+app.use('/portfolio-admin', requireAuth, rateLimiters, portfolioAdminRoutes);
 app.use('/subscriptions', requireAuth, rateLimiters, userSubscriptionRoutes);
 app.use('/momentum', requireAuth, rateLimiters, momentumRoutes);
 app.use('/stock-preview', requireAuth, rateLimiters, stockPreviewRoutes);
