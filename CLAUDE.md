@@ -2883,6 +2883,45 @@ Fidelity ETF). For ETFs, `m_tickers.sector` now stores FMP's `industry` field in
 `TransactionHistoryTable.test.tsx` are new untracked test files; the portfolio backend test files
 and `HoldingsTable.test.tsx` also carry uncommitted changes.
 
+## Portfolio Lifecycle Status + Admin Manage Portfolio ⏳ Uncommitted (2026-11-14)
+
+Migrations `072` (`tx_portfolios.status`, default `'Active'`), `073` (name uniqueness moved to a partial
+index over Active portfolios only), `074` (`portfolio_admin:manage`, granted to `admin`).
+
+- **Statuses:** `Active`, `In-Active` (reserved, no setter yet), `Soft-Delete`.
+- **Owner Delete:** the pencil/rename form on the Legacy Dashboard shows a trash icon next to Save and
+  Cancel. It opens a warning and a confirm step, then `POST /portfolios/:id/soft-delete`. The Flex page
+  the Flex page pills have the same pencil and trash icons (2026-11-15).
+- **Every owner-facing read or write** filters `status = 'Active'` (`ACTIVE_ONLY` in `portfolio.service.ts`).
+  Quota counts and the admin unattached-Flex list also count only Active portfolios.
+- **Hard delete narrowed:** `DELETE /portfolios/:id` now removes only an unresolved Flex creation
+  (`flex_template_status = 'Flex-Err'`), the Flex resolution banner's lifecycle abort.
+- **Template-binding checks include Soft-Delete portfolios on purpose.** A bound portfolio removed from
+  the template would lose its `upload_template_id`, and restoring it would leave it Active with no
+  template. This deviates from "admin lists ignore soft-deleted".
+- **Admin - Portfolio Admin:** renamed from "Portfolio Templates", with sub-tabs "Portfolio Template"
+  (unchanged) and "Manage Portfolio". Manage Portfolio lists every portfolio, filterable by User, Type
+  (Legacy/Flex), and Status (single-select). Default sort is User, Type, Status, Name. Restore is shown
+  for Soft-Delete rows only. Permanent delete is also Soft-Delete only, with the warning
+  "All records pertaining to this portfolio will be permanently deleted and can't be recovered."
+- **Restore** is refused (409) if the owner has since created an Active portfolio with the same name.
+- **Verified:** backend 1144/1144, frontend 910/910, both typechecks clean. Live: a throwaway portfolio
+  was created, soft-deleted, restored from Manage Portfolio, and permanently deleted via the API. Permanent
+  delete of an Active portfolio returned 409. The owner-side trash icon was covered by unit tests only.
+
+## Round 2026-11-15 — Performance Header, Top-6 Default, Cached-History Ticker, Pop-up Rules ⏳ Uncommitted
+
+Builds on the two uncommitted sections above. Verified 2026-11-15: backend Jest 1146/1146, frontend Vitest 914/914 (before the final styling tweak), both typechecks clean.
+
+- **Performance card line 1:** "Performance" title, period buttons (or 1D/5D/10D/15D/30D/60D/90D/120D window buttons in Top-6 view), the Value ($) / Percent (%) toggle in Top-6 view, and the view dropdown (Top-6 Sectors / Outlier / All) on the right. The chart owns its own heading now; the Dashboard and Flex pages no longer render one.
+- **Top-6 Sectors is the default** view, with 1D selected.
+- **Cached-history ticker:** the "Cached history through [date] close. Click Refresh Prices…" note scrolls across line 1 as a TV-style ticker (dark teal text on the page background, reduced-motion respected). It shows only while cached history is in use, not after a Refresh Prices click.
+- **Transaction History** defaults to Date descending, then Value descending.
+- **Manage Portfolio** gains a **Portfolio Template** column (template name for Flex portfolios, "—" otherwise) and a matching single-select filter.
+- **Bound-portfolios pop-up:** an Active linked portfolio shows **Soft-Delete** first; only a Soft-Delete one gets a permanent **Delete**. The pop-up opens only for the `TEMPLATE_IN_USE` refusal code. Approved templates have no Delete button in the UI.
+- **Flex pills** now have the pencil (rename) and trash (soft delete) icons, through a shared `SoftDeleteConfirm` component also used by the Legacy selector.
+- **Docs updated:** `User Manual.md` (new "Portfolio Page — Allocation, Performance, and Lifecycle" section), `User Technical Doc/04-REST-API-Reference.md` (section 3a and the bound-portfolio changes), `Architecture.md` (new round summary), `backend/src/db/SCHEMA.md` (`status` column and partial index).
+
 ## Next Up
 
 - **E2E suite's signup step was out of date with the real Self-Registration form — identified

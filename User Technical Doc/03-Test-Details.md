@@ -128,7 +128,14 @@ and neither substitutes for the other.
 
 ---
 
-## 3.6 Current state (as of 2026-11-04)
+## 3.6 Current state (as of 2026-11-15)
+
+- **Backend (Jest):** 57 suites, 1146 tests, all passing. New since 11-04: `portfolioStatus.service.test.ts` (lifecycle status, soft delete, restore, permanent delete, admin filters), plus bound-portfolio, transaction and cached-history tests in `portfolio.service.test.ts`.
+- **Frontend (Vitest):** 79 files, 914 tests, all passing. New since 11-04: `lib/sectorBars.test.ts` (Top-6 maths, market hours, axis and header formatters), `pages/ManagePortfolioPage.test.tsx` (filters, template column, restore, permanent delete), Flex pill rename and soft-delete tests, bound-portfolio pop-up tests, and Performance view-dropdown tests.
+- **Typecheck:** `tsc -b --noEmit` (frontend) and `tsc --noEmit` (backend) both clean.
+- **Not covered by automated tests:** the scrolling ticker's appearance and the Top-6 layout on phone widths. These were checked by eye in the browser only.
+
+## Previous state (as of 2026-11-04)
 
 - **1095 backend / 852 frontend tests passing** (up from 1095/845 as of 2026-10-12) — backend
   untouched this round, all 7 new tests are frontend-only, from three small Contrarian Finder/

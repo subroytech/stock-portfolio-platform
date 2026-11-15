@@ -343,8 +343,12 @@ Indexes: `user_evt_impersonation_log_pkey` (PK).
 | `upload_template_id` | `INT8` | nullable; added by migration `023`, Portfolio Upload — Flex. FK → `m_portfolio_template_mapping_master(id)`, `ON DELETE SET NULL`. `NULL` for every Classic/Legacy portfolio; set once a Flex portfolio's mapping is either an already-Approved template or its own new mapping has been saved via Save Template |
 | `flex_template_status` | `VARCHAR(20)` | nullable; added by migration `023` — `'Flex'` \| `'Flex-Err'` \| `NULL`, app-enforced, no DB check constraint. `'Flex-Err'` is the "needs attention" state (portfolio created, mapping not yet proven/saved); `'Flex'` means resolved. App-enforced invariant (not DB-enforced): `flex_template_status = 'Flex'` iff `upload_template_id IS NOT NULL` |
 
-Indexes: `portfolios_pkey` (PK), `portfolios_user_id_name_key` (unique on `user_id, name` —
-one portfolio name per user, e.g. can't have two "Fidelity" portfolios for the same user).
+| `status` | `VARCHAR(20)` | `NOT NULL`, default `'Active'` (migration `072`, 2026-11-14). `'Active'` \| `'In-Active'` \| `'Soft-Delete'`, app-enforced. Only `'Active'` is visible to the owner. `'Soft-Delete'` is set by the owner's Delete action (`POST /portfolios/:id/soft-delete`) and reversed only by an admin (`POST /portfolio-admin/portfolios/:id/restore`). `'In-Active'` is reserved; nothing sets it yet |
+
+Indexes: `portfolios_pkey` (PK), `portfolios_user_id_name_active_key` (unique partial index on
+`user_id, name` `WHERE status = 'Active'`, migration `073` — replaced the old inline
+`UNIQUE (user_id, name)`). One active portfolio name per user; a soft-deleted portfolio releases its
+name, and restoring it is refused if the name has been taken since.
 
 ### `tx_holdings`
 | Column | Type | Notes |

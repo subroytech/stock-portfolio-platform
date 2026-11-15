@@ -2703,3 +2703,21 @@ per-chart period/month controls). What's left, in rough priority order:
 10. **Phase 6 — Migration & cutover tool.** One-time "import my existing portfolio" tool reading today's `localStorage['pf-data']`/`['pf-cash']` shape and POSTing it into the new account. Run both versions in parallel briefly, verify parity, then decommission the static-only deployment.
 
 **How to apply:** before starting any item above, open with `/plan` mode to walk through that item's decisions with the user first.
+
+## Portfolio Page Round, Lifecycle Status, Top-6 Sectors, and Admin Manage Portfolio ✅ Done (2026-11-09 → 2026-11-15, uncommitted at time of writing)
+
+**Candlestick freshness + ETF sector (2026-11-09 / 11-11).** `deriveIsFresh()` no longer treats any closed-market candlestick row as fresh; it must have been fetched earlier the same Eastern day. ETF rows in `m_tickers` store FMP's `industry` instead of the issuer-level `sector`.
+
+**Transaction History (2026-11-12 / 11-14).** New `GET /portfolios/:id/transactions` backs a lazily-loaded Transaction History tab on the Holdings table. Default sort is Date descending, then Value descending.
+
+**Portfolio page controls and KPI strip (2026-11-11).** Choose File, Change Template, and Refresh Prices sit in a compact row beside the portfolio selector. The KPI strip shows eight tiles, including Today's $, Today's %, Top Gainer, and Top Loser.
+
+**Top-6 Sectors, Allocation and Performance (2026-11-12 → 11-15).** Allocation has a "Top-6 Sectors" mode with one horizontal bar chart per sector. Performance has a view dropdown (Top-6 Sectors by default, Outlier, All). Top-6 shows per-stock gain or loss for 1D, 5D, 10D, 15D, 30D, 60D, 90D, or 120D (trading days), in dollars or percent. Sector headings show the sector total and are coloured by sign. Performance history now loads with the portfolio from the shared daily cache, with no FMP calls, so the charts work without a Refresh Prices click; a refresh still replaces it with fresh prices. The chart owns its own "Performance" heading, and a scrolling note on the first line shows the cache date.
+
+**Portfolio lifecycle status (2026-11-14, migrations 072–074).** `tx_portfolios.status` takes `Active`, `In-Active` (reserved), or `Soft-Delete`. Portfolio names are unique per user among Active portfolios only, enforced by a partial unique index. Every owner-facing read and write filters on `status = 'Active'`. The owner's Delete action soft-deletes, from the rename form on the Legacy Dashboard and from the Flex pills. Hard delete is now limited to an unresolved Flex creation (`Flex-Err`).
+
+**Admin → Portfolio Admin (2026-11-14).** "Portfolio Templates" is renamed "Portfolio Admin", with sub-tabs "Portfolio Template" (unchanged) and "Manage Portfolio". Manage Portfolio lists every portfolio, with single-select filters for User, Type, Portfolio Template, and Status, and a default sort of user, type, status, then name. It has a Portfolio Template column. Restore and permanent-delete icons appear only on Soft-Delete rows. It is gated by the new `portfolio_admin:manage` permission (migration 074), granted to `admin`.
+
+**Template deletion and the bound-portfolios pop-up (2026-11-14).** A refused template delete returns 409 with a `code`. The pop-up opens only for `TEMPLATE_IN_USE`. The pop-up's own actions follow the lifecycle: an Active linked portfolio is soft-deleted first, and only a Soft-Delete one can be permanently deleted. A soft-deleted linked portfolio still blocks template deletion, because the link would otherwise be cleared and a restored portfolio would be left without its template.
+
+**Known gaps.** The Flex-Err resolution banner's Delete stays a permanent delete for abandoned creations, while the new trash icon on the Flex pills soft-deletes. The owner's trash icon was verified by unit tests only, not in the browser. Approved templates have no Delete button in the UI.

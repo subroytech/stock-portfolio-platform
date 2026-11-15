@@ -244,6 +244,25 @@ The only route file with any public (non-`requireAuth`) routes.
 
 ---
 
+### 3a. Portfolio lifecycle and Portfolio Admin (2026-11-14, migrations 072–074)
+
+Every portfolio has a `status`: `Active`, `In-Active` (reserved; nothing sets it yet), or `Soft-Delete`. Only `Active` portfolios appear in the owner's own routes above.
+
+| Method | Path | Gate | Purpose / notes |
+|---|---|---|---|
+| GET | `/portfolios/:id/transactions` | `requireAuth` (owner only) | Buy/sell history for the Transaction History tab, from `tx_portfolio_action_hist`, newest first. Names come from `m_tickers`. 404 if the portfolio isn't the caller's own Active portfolio. |
+| POST | `/portfolios/:id/soft-delete` | `requireAuth` (owner only) | Owner's Delete action. Sets `status = 'Soft-Delete'`. 404 if the portfolio isn't the caller's own Active portfolio. |
+| DELETE | `/portfolios/:id` | `requireAuth` | **Narrowed:** hard-deletes only an unresolved Flex creation (`flex_template_status = 'Flex-Err'`). Any other portfolio returns 404. |
+| GET | `/portfolios/:id` | `requireAuth` | Now also returns `performanceHistory` (up to 130 days per symbol, read from the shared daily cache, no FMP calls). Each portfolio also carries `status`. |
+
+**`/portfolio-admin`** — mounted in `app.ts` behind `requireAuth` + rate limiting; every route is gated by `portfolio_admin:manage` (granted to `admin` by migration 074).
+
+| Method | Path | Purpose / notes |
+|---|---|---|
+| GET | `/portfolio-admin/portfolios` | Every portfolio across all users and statuses. Optional single-select query filters: `userId`, `portfolioType` (`Legacy`\|`Flex`), `status`. Default order: owner email, type (Legacy first), status, name. Each row includes `templateName` (null for Legacy and for Flex-Err portfolios). 400 on an invalid filter value. |
+| POST | `/portfolio-admin/portfolios/:id/restore` | Only a `Soft-Delete` portfolio can be restored; it returns to `Active`. 409 if it isn't Soft-Delete, or if the owner has since created an Active portfolio with the same name. |
+| DELETE | `/portfolio-admin/portfolios/:id` | Permanent delete. Only a `Soft-Delete` portfolio is accepted (409 otherwise, and no row is touched). Child rows (holdings, cash, uploads, action history) are removed by the existing cascades. |
+
 ## 4. Portfolio Templates — `portfolioTemplate.routes.ts`, mounted at `/portfolio-templates`
 
 **`GET /portfolio-templates/`** — Gate: requireAuth + `requirePermission('portfolio_upload:flex')`
@@ -305,6 +324,15 @@ The only route file with any public (non-`requireAuth`) routes.
 - Notes: `404` if the portfolio isn't found or isn't actually bound to this specific template.
 
 ---
+
+### Bound-portfolio changes (2026-11-14)
+
+| Method | Path | Gate | Purpose / notes |
+|---|---|---|---|
+| DELETE | `/portfolio-templates/:id` | `portfolio_template:manage_status` | A refused delete now returns 409 with a `code`: `TEMPLATE_IN_USE` (any portfolio, including soft-deleted, is still bound) or `TEMPLATE_APPROVED` (Approved templates can't be deleted). The admin screen opens the bound-portfolios pop-up only for `TEMPLATE_IN_USE`. |
+| GET | `/portfolio-templates/:id/bound-portfolios` | `portfolio_template:manage_status` | Each entry now includes `status`. |
+| DELETE | `/portfolio-templates/:id/bound-portfolios/:portfolioId` | `portfolio_template:manage_status` | Permanent delete. Only a `Soft-Delete` bound portfolio is accepted (409 for an Active one). |
+| POST | `/portfolio-templates/:id/bound-portfolios/:portfolioId/soft-delete` | `portfolio_template:manage_status` | New. Soft-deletes an Active portfolio bound to this template, so its permanent delete becomes available. 404 if no Active bound portfolio matches. |
 
 ## 5. Flex Quota — `flexQuota.routes.ts`, mounted at `/flex-quota`
 

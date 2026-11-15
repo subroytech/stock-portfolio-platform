@@ -652,6 +652,50 @@ curated write-up and diagram in the first place. The same admin page also has a 
 Templates** section — create/activate/deactivate the regex-based templates the second cascade
 layer above uses, each with a required example phrasing shown to end users via the "(i)" popover.
 
+## Portfolio Page — Allocation, Performance, and Lifecycle (2026-11)
+
+### Allocation card — "Top-6 Sectors"
+- Choose **Top-6 Sectors** next to "By Sector". It shows one horizontal bar chart per sector, for your six largest sectors by current value.
+- Each bar is one stock's current market value. Sector totals appear in the chart heading, for example "Technology ($42.7K)".
+
+### Performance card — one line of controls
+- The first line holds the title "Performance", the period buttons, the view dropdown on the right, and a scrolling note on the left when prices are cached.
+- **View dropdown:** Top-6 Sectors (the default), Outlier, or All.
+- **Top-6 Sectors** shows six charts, one per sector, for the window you pick: **1D, 5D, 10D, 15D, 30D, 60D, 90D, or 120D** (trading days). 1D is selected by default.
+  - Each bar is a stock's gain or loss for that window. Green is a gain, red is a loss.
+  - The **Value ($) / Percent (%)** buttons switch the bars between dollars and percent. The sector heading shows the sector's total change, signed and coloured.
+  - 1D uses today's live price against yesterday's close, but only while the market is open.
+- **Outlier / All** show the period tabs (1D to 120D, Custom, Today ($)) as before.
+- **Scrolling note:** when the history comes from the last saved refresh instead of a fresh click, the first line shows "Cached history through [date] close. Click Refresh Prices for the latest prices." Clicking Refresh Prices replaces it with fresh prices.
+
+### Transaction History tab
+- Opens sorted by **Date, newest first**, then **Value, largest first** within the same date. You can change either sort level from the drop-down menus.
+
+### Deleting your own portfolio (Soft-Delete)
+- On the Legacy Dashboard, click the pencil next to a portfolio name. The rename form shows **Save**, **Cancel**, and a **trash icon**.
+- The Flex page's portfolio buttons have the same pencil and trash icons.
+- Clicking the trash icon shows a warning: "This will remove the portfolio… To get it restored you will have to raise a support ticket, and restoration may not be guaranteed." Confirm to continue.
+- The portfolio is hidden from your Portfolio tab. Nothing is deleted. Only an administrator can restore it, from Admin → Portfolio Admin → Manage Portfolio.
+- Your Flex portfolio limit doesn't count a portfolio you've soft-deleted.
+- A Flex portfolio still waiting for its template to be saved (Flex-Err) can also be soft-deleted this way. The resolution banner's own Delete is still a permanent delete for those.
+
+### Admin → Portfolio Admin
+- This tab used to be called "Portfolio Templates". It now has two sub-tabs:
+  - **Portfolio Template:** the existing template approval screen, unchanged.
+  - **Manage Portfolio:** every portfolio across all users and all statuses (Active, In-Active, Soft-Delete).
+- **Filters** (single-select): User, Portfolio Type (Legacy or Flex), Portfolio Template, and Status.
+- **Default sort:** user, then type, then status, then name.
+- **Portfolio Template column:** shows the template name for each Flex portfolio. Legacy portfolios show "—".
+- **Restore** (circular-arrow icon) appears only on Soft-Delete rows. It returns the portfolio to Active. If the owner has since created an active portfolio with the same name, the restore is refused with a message.
+- **Permanent delete** (trash icon) also appears only on Soft-Delete rows. It shows the warning "All records pertaining to this portfolio will be permanently deleted and can't be recovered." Confirming removes the portfolio and all its holdings, uploads, and history. This can't be undone.
+
+### Deleting a template that still has portfolios attached
+- A template can't be deleted while any portfolio is still bound to it, including a soft-deleted one.
+- When you try, the **Bound Portfolios** pop-up opens and lists the linked portfolios:
+  - An **Active** portfolio shows a **Soft-Delete** button. Confirming hides it from its owner.
+  - A **Soft-Delete** portfolio shows a permanent **Delete** button, with the same warning as Manage Portfolio.
+- Approved templates can't be deleted at all. Reject them first.
+
 ## Known leftover, not cleaned up yet
 
 `m_function_master` also has an orphaned `apiKeys:bringMyOwn` entry (and a matching
