@@ -3,11 +3,25 @@ import { useState } from 'react';
 import { Bar } from 'react-chartjs-2';
 import type { PortfolioHolding, RefreshPricesResult } from '../api/portfolios';
 import { applyOutlierFilter, calcCustomReturn, calcTabReturn, fmtMmDd, PERIOD_TABS } from '../lib/performanceMath';
+import type { PerformanceBar } from '../lib/performanceMath';
 import { formatAsOf } from '../lib/format';
+import { calcTrailingChange, fmtSignedDollarK, fmtSignedPercent, getTopSectors, isMarketOpenEastern, TRAILING_WINDOWS } from '../lib/sectorBars';
+import type { TrailingChange } from '../lib/sectorBars';
+import TopSectorBars from './TopSectorBars';
+import type { SectorBarChart } from './TopSectorBars';
 
 interface PerformanceChartProps {
   holdings: PortfolioHolding[];
+  // Explicit Refresh Prices result for this session - overrides cachedHistory once present.
   refreshResult?: RefreshPricesResult;
+  // Trailing history loaded with the portfolio from the shared daily cache (no FMP calls).
+  cachedHistory?: Record<string, PerformanceBar[]>;
+}
+
+// Latest bar date across all symbols' history, for the "history through" caption.
+function latestBarDate(history: Record<string, PerformanceBar[]>): string | null {
+  const dates = Object.values(history).map((h) => h[0]?.date).filter((d): d is string => !!d).sort();
+  return dates[dates.length - 1] ?? null;
 }
 
 // Bright floral tones (matching AllocationChart's palette) - vivid leaf
@@ -24,6 +38,47 @@ function oldestAsOf(holdings: { priceUpdatedAt: string | null }[]): string | nul
   return holdings.map((h) => h.priceUpdatedAt).filter((t): t is string => t != null).sort()[0] ?? null;
 }
 
+// One bar chart per top sector for the selected trailing window (1D/5D/10D/15D/30D): each
+// stock gets a single bar, green for a gain and red for a loss, matching the other bar views.
+function buildTop6Charts(
+  holdings: PortfolioHolding[],
+  history: RefreshPricesResult['performanceHistory'],
+  format: 'dollar' | 'percent',
+  days: number,
+): SectorBarChart[] {
+  const marketOpen = isMarketOpenEastern();
+  return getTopSectors(holdings).map((g) => {
+    const changes = g.holdings.map((h) => calcTrailingChange(h, history[h.symbol], days, marketOpen));
+    const data = changes.map((c) => (c ? (format === 'dollar' ? c.dollar : c.percent) : null));
+
+    // Sector header: total $ change for the window, or the sector's aggregate % (total $ change
+    // over total starting value). Green when up, red when down.
+    const found = changes.filter((c): c is TrailingChange => c != null);
+    let headerValue: SectorBarChart['headerValue'];
+    if (found.length > 0) {
+      const dollarSum = found.reduce((s, c) => s + c.dollar, 0);
+      if (format === 'dollar') {
+        headerValue = { text: fmtSignedDollarK(dollarSum), tone: dollarSum >= 0 ? 'gain' : 'loss' };
+      } else {
+        const startSum = found.reduce((s, c) => s + c.startValue, 0);
+        const pct = startSum > 0 ? (dollarSum / startSum) * 100 : 0;
+        headerValue = { text: fmtSignedPercent(pct), tone: pct >= 0 ? 'gain' : 'loss' };
+      }
+    }
+
+    return {
+      sector: g.sector,
+      headerValue,
+      labels: g.holdings.map((h) => h.symbol),
+      series: [{
+        label: `${days}D`,
+        color: data.map((v) => ((v ?? 0) >= 0 ? GAIN_COLOR : LOSS_COLOR)),
+        data,
+      }],
+    };
+  });
+}
+
 // Per-holding gain/loss bar chart. Before ANY data exists (never refreshed,
 // ever), falls back to the only thing derivable without it (total $ gain/
 // loss since purchase) - once either todayChangeDollar (DB-persisted,
@@ -33,20 +88,34 @@ function oldestAsOf(holdings: { priceUpdatedAt: string | null }[]): string | nul
 // switch, independent of refreshResult - the 1D-120D/Custom tabs still need
 // refreshResult.performanceHistory (not DB-persisted; session-only) and show
 // a "click Refresh Prices" prompt in their place when it's absent.
-export default function PerformanceChart({ holdings, refreshResult }: PerformanceChartProps) {
+// The Top-6 Sectors view (a separate toggle next to Outlier/All) also needs
+// refreshResult for its trailing-window history.
+export default function PerformanceChart({ holdings, refreshResult, cachedHistory }: PerformanceChartProps) {
+  // Refresh Prices' own history wins once the user has clicked it; until then, the cached history
+  // loaded with the portfolio is used, so the period and Top-6 views have data straight away.
+  // An empty object counts as "no history" - a portfolio with nothing cached yet must still prompt.
+  const nonEmpty = (h?: Record<string, PerformanceBar[]>) => (h && Object.keys(h).length > 0 ? h : undefined);
+  const history = nonEmpty(refreshResult?.performanceHistory) ?? nonEmpty(cachedHistory);
   const hasTodayData = holdings.some((h) => h.todayChangeDollar != null);
-  const [activeTab, setActiveTab] = useState<string>(refreshResult || !hasTodayData ? '1D' : 'TodayDollar');
+  const [activeTab, setActiveTab] = useState<string>(history || !hasTodayData ? '1D' : 'TodayDollar');
   const [barMode, setBarMode] = useState<'outlier' | 'all'>('outlier');
+  // Top-6 Sectors is the default view (2026-11-15); Outlier / All are reached via the view dropdown.
+  const [view, setView] = useState<'bars' | 'top6'>('top6');
+  const [valueFormat, setValueFormat] = useState<'dollar' | 'percent'>('dollar');
+  const [windowDays, setWindowDays] = useState<number>(1);
   const [customDays, setCustomDays] = useState(30);
 
   if (holdings.length === 0) {
     return <p className="text-sm text-text-secondary">No holdings to chart yet.</p>;
   }
 
-  if (!refreshResult && !hasTodayData) {
+  // Fallback only before ANY history exists AND before the first Refresh Prices click - once the user
+  // has refreshed, an empty result should read as "no data", not drop back to the pre-refresh chart.
+  if (!history && !refreshResult && !hasTodayData) {
     const sorted = [...holdings].sort((a, b) => b.gainLoss - a.gainLoss);
     return (
       <div className="flex h-full flex-col gap-2">
+        <h2 className="shrink-0 text-sm font-semibold text-text-primary">Performance</h2>
         <div className="min-h-0 flex-1">
           <Bar
             data={{
@@ -68,6 +137,7 @@ export default function PerformanceChart({ holdings, refreshResult }: Performanc
   }
 
   const isDollar = activeTab === 'TodayDollar';
+  const inBars = view === 'bars';
   let values: { symbol: string; value: number | null }[];
   let title: string;
   let dateRange: { start: string; end: string } | null = null;
@@ -76,18 +146,18 @@ export default function PerformanceChart({ holdings, refreshResult }: Performanc
   if (activeTab === 'TodayDollar') {
     title = "Today's $ Gain/Loss";
     values = holdings.map((h) => ({ symbol: h.symbol, value: h.todayChangeDollar }));
-  } else if (!refreshResult) {
-    needsHistory = true;
+  } else if (!history) {
+    needsHistory = !refreshResult;
     title = '';
     values = [];
   } else if (activeTab === 'Custom') {
-    const { returnMap, startDate, endDate } = calcCustomReturn(refreshResult.performanceHistory, customDays);
+    const { returnMap, startDate, endDate } = calcCustomReturn(history, customDays);
     title = `Performance — Last ${customDays} ${customDays > 10 ? 'calendar' : 'trading'} day${customDays === 1 ? '' : 's'}`;
     if (startDate && endDate) dateRange = { start: startDate, end: endDate };
     values = holdings.map((h) => ({ symbol: h.symbol, value: returnMap.get(h.symbol) ?? null }));
   } else {
     const tab = PERIOD_TABS.find((t) => t.id === activeTab) ?? PERIOD_TABS[0];
-    const { returnMap, startDate, endDate } = calcTabReturn(refreshResult.performanceHistory, tab.days, tab.useCalendar);
+    const { returnMap, startDate, endDate } = calcTabReturn(history, tab.days, tab.useCalendar);
     title = `Performance — Last ${tab.days} ${tab.useCalendar ? 'calendar' : 'trading'} day${tab.days === 1 ? '' : 's'}`;
     if (startDate && endDate) dateRange = { start: startDate, end: endDate };
     values = holdings.map((h) => ({ symbol: h.symbol, value: returnMap.get(h.symbol) ?? null }));
@@ -99,38 +169,82 @@ export default function PerformanceChart({ holdings, refreshResult }: Performanc
   const tabButtonClass = (id: string) => `rounded-btn px-2 py-1 text-xs font-medium transition-colors ${
     activeTab === id ? 'bg-accent text-white' : 'bg-bg-primary text-text-secondary hover:bg-border'
   }`;
+  const viewButtonClass = (active: boolean) => `rounded-btn px-2 py-1 text-xs font-medium ${
+    active ? 'bg-accent text-white' : 'bg-bg-primary text-text-secondary hover:bg-border'
+  }`;
 
   return (
     <div className="flex h-full flex-col gap-2">
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap gap-1">
-          {PERIOD_TABS.map((tab) => (
-            <button key={tab.id} type="button" onClick={() => setActiveTab(tab.id)} className={tabButtonClass(tab.id)}>
-              {tab.label}
+      {/* One line (2026-11-15): the title, the period/window buttons, the Value/Percent toggle, and the view dropdown. */}
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <h2 className="mr-1 text-sm font-semibold text-text-primary">Performance</h2>
+        {/* TV-style scrolling ticker for the cached-history note (only while showing cached, not refreshed, data). */}
+        {!refreshResult && history && latestBarDate(history) && (
+          <div className="min-w-0 flex-1 overflow-hidden" data-testid="performance-cached-history-note">
+            <style>{`
+              @keyframes performance-ticker { from { transform: translateX(100%); } to { transform: translateX(-100%); } }
+              .performance-ticker { animation: performance-ticker 18s linear infinite; }
+              @media (prefers-reduced-motion: reduce) { .performance-ticker { animation: none; transform: none; } }
+            `}</style>
+            <div className="performance-ticker inline-block whitespace-nowrap text-xs font-semibold text-[#0f766e]">
+              Cached history through {fmtMmDd(latestBarDate(history) as string)} close. Click Refresh Prices for the latest prices.
+            </div>
+          </div>
+        )}
+        {inBars ? (
+          <div className="flex flex-wrap gap-1">
+            {PERIOD_TABS.map((tab) => (
+              <button key={tab.id} type="button" onClick={() => setActiveTab(tab.id)} className={tabButtonClass(tab.id)}>
+                {tab.label}
+              </button>
+            ))}
+            <button type="button" onClick={() => setActiveTab('Custom')} className={tabButtonClass('Custom')}>Custom</button>
+            <button type="button" onClick={() => setActiveTab('TodayDollar')} className={tabButtonClass('TodayDollar')}>Today ($)</button>
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {TRAILING_WINDOWS.map((days) => (
+              <button
+                key={days}
+                type="button"
+                onClick={() => setWindowDays(days)}
+                aria-pressed={windowDays === days}
+                data-testid={`performance-window-${days}d`}
+                className={viewButtonClass(windowDays === days)}
+              >
+                {days}D
+              </button>
+            ))}
+          </div>
+        )}
+        {!inBars && (
+          <div className="flex flex-wrap gap-1">
+            <button type="button" onClick={() => setValueFormat('dollar')} className={viewButtonClass(valueFormat === 'dollar')}>
+              Value ($)
             </button>
-          ))}
-          <button type="button" onClick={() => setActiveTab('Custom')} className={tabButtonClass('Custom')}>Custom</button>
-          <button type="button" onClick={() => setActiveTab('TodayDollar')} className={tabButtonClass('TodayDollar')}>Today ($)</button>
-        </div>
-        <div className="flex gap-1">
-          <button
-            type="button"
-            onClick={() => setBarMode('outlier')}
-            className={`rounded-btn px-2 py-1 text-xs font-medium ${barMode === 'outlier' ? 'bg-accent text-white' : 'bg-bg-primary text-text-secondary hover:bg-border'}`}
-          >
-            Outlier
-          </button>
-          <button
-            type="button"
-            onClick={() => setBarMode('all')}
-            className={`rounded-btn px-2 py-1 text-xs font-medium ${barMode === 'all' ? 'bg-accent text-white' : 'bg-bg-primary text-text-secondary hover:bg-border'}`}
-          >
-            All
-          </button>
-        </div>
+            <button type="button" onClick={() => setValueFormat('percent')} className={viewButtonClass(valueFormat === 'percent')}>
+              Percent (%)
+            </button>
+          </div>
+        )}
+        <select
+          value={inBars ? barMode : 'top6'}
+          onChange={(e) => {
+            const choice = e.target.value;
+            if (choice === 'top6') setView('top6');
+            else { setView('bars'); setBarMode(choice as 'outlier' | 'all'); }
+          }}
+          aria-label="Performance view"
+          data-testid="performance-view-select"
+          className="ml-auto rounded-btn border border-border bg-bg-primary px-2 py-1 text-xs text-text-primary"
+        >
+          <option value="top6">Top-6 Sectors</option>
+          <option value="outlier">Outlier</option>
+          <option value="all">All</option>
+        </select>
       </div>
 
-      {activeTab === 'Custom' && (
+      {inBars && activeTab === 'Custom' && (
         <label className="flex shrink-0 items-center gap-2 text-xs text-text-secondary">
           Days
           <input
@@ -145,16 +259,32 @@ export default function PerformanceChart({ holdings, refreshResult }: Performanc
         </label>
       )}
 
-      {dateRange && (
+      {inBars && dateRange && (
         <p className="shrink-0 text-xs text-text-muted">
           From <strong>{fmtMmDd(dateRange.start)}</strong> (close) to <strong>{fmtMmDd(dateRange.end)}</strong> (close)
         </p>
       )}
 
-      {todayAsOf && <p className="shrink-0 text-xs text-text-muted">As of {formatAsOf(todayAsOf)}</p>}
+      {inBars && todayAsOf && <p className="shrink-0 text-xs text-text-muted">As of {formatAsOf(todayAsOf)}</p>}
+
+      {/* The cached-history caption now lives on line 1 as a scrolling ticker (see the header above). */}
 
       <div className="min-h-0 flex-1">
-        {needsHistory ? (
+        {!inBars ? (
+          !history && !refreshResult ? (
+            <div className="flex h-full items-center justify-center">
+              <p className="text-sm text-text-secondary">
+                Click <strong>Refresh Prices</strong> above to load trailing-window history for these sectors.
+              </p>
+            </div>
+          ) : (
+            <TopSectorBars
+              key={`top6-${valueFormat}-${windowDays}`}
+              charts={buildTop6Charts(holdings, history ?? {}, valueFormat, windowDays)}
+              format={valueFormat}
+            />
+          )
+        ) : needsHistory ? (
           <div className="flex h-full items-center justify-center">
             <p className="text-sm text-text-secondary">
               Click <strong>Refresh Prices</strong> above to fetch period history for this tab.

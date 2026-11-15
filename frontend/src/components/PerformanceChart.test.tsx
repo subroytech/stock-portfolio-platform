@@ -38,6 +38,7 @@ describe('PerformanceChart', () => {
   test('Today ($) is reachable with persisted todayChangeDollar alone, with no refreshResult and no click needed this session', async () => {
     const holdings = [holding({ todayChangeDollar: 42, todayChangePercent: 3, priceUpdatedAt: '2026-07-15T10:00:00Z' })];
     render(<PerformanceChart holdings={holdings} />);
+    await userEvent.selectOptions(screen.getByTestId('performance-view-select'), 'outlier');
     // Defaults straight to the Today ($) tab since that's the only data available.
     expect(screen.getByRole('button', { name: 'Today ($)' })).toHaveClass('bg-accent');
     expect(screen.getByText(/As of/i)).toBeInTheDocument();
@@ -46,18 +47,20 @@ describe('PerformanceChart', () => {
   test('period tabs (1D-120D) show a "click Refresh Prices" prompt when only todayChangeDollar is available, not performanceHistory', async () => {
     const holdings = [holding({ todayChangeDollar: 42, todayChangePercent: 3 })];
     render(<PerformanceChart holdings={holdings} />);
+    await userEvent.selectOptions(screen.getByTestId('performance-view-select'), 'outlier');
     await userEvent.click(screen.getByRole('button', { name: '5D' }));
     expect(screen.getByText((_, el) => el?.tagName === 'P' && el.textContent === 'Click Refresh Prices above to fetch period history for this tab.')).toBeInTheDocument();
   });
 
-  test('once a refreshResult exists, the period-tab strip and Outlier/All toggle appear, defaulting to 1D + Outlier', () => {
+  test('once a refreshResult exists, choosing Outlier shows the period-tab strip, defaulting to 1D', async () => {
     const refreshResult: RefreshPricesResult = {
       holdings: [{ id: 'h1', symbol: 'AAPL', currentPrice: 150, currentValue: 1500, gainLoss: 500, returnPct: 50, allocationPct: 100, priceUpdatedAt: null, todayChangeDollar: 10, todayChangePercent: 1 }],
       performanceHistory: { AAPL: makeBars(30) },
     };
     render(<PerformanceChart holdings={[holding()]} refreshResult={refreshResult} />);
+    await userEvent.selectOptions(screen.getByTestId('performance-view-select'), 'outlier');
     expect(screen.getByRole('button', { name: '1D' })).toHaveClass('bg-accent');
-    expect(screen.getByRole('button', { name: 'Outlier' })).toHaveClass('bg-accent');
+    expect(screen.getByTestId('performance-view-select')).toHaveValue('outlier');
     expect(screen.getByText(/from.*\(close\) to.*\(close\)/i)).toBeInTheDocument();
   });
 
@@ -67,6 +70,7 @@ describe('PerformanceChart', () => {
       performanceHistory: { AAPL: makeBars(150) },
     };
     render(<PerformanceChart holdings={[holding()]} refreshResult={refreshResult} />);
+    await userEvent.selectOptions(screen.getByTestId('performance-view-select'), 'outlier');
     await userEvent.click(screen.getByRole('button', { name: 'Custom' }));
     expect(screen.getByLabelText(/days/i)).toBeInTheDocument();
   });
@@ -78,6 +82,7 @@ describe('PerformanceChart', () => {
       performanceHistory: { AAPL: makeBars(30) },
     };
     render(<PerformanceChart holdings={holdings} refreshResult={refreshResult} />);
+    await userEvent.selectOptions(screen.getByTestId('performance-view-select'), 'outlier');
     await userEvent.click(screen.getByRole('button', { name: 'Today ($)' }));
     expect(screen.getByRole('button', { name: 'Today ($)' })).toHaveClass('bg-accent');
   });
@@ -92,18 +97,17 @@ describe('PerformanceChart', () => {
     };
     const holdings = [holding({ symbol: 'AAPL' }), holding({ id: 'h2', symbol: 'BTC', sector: 'Crypto' })];
     render(<PerformanceChart holdings={holdings} refreshResult={refreshResult} />);
-    // No crash, and the 1D tab (default) renders using only AAPL's real history.
-    expect(screen.getByRole('button', { name: '1D' })).toHaveClass('bg-accent');
+    // No crash. The default Top-6 Sectors view has 1D selected, built only from AAPL's real history.
+    expect(screen.getByTestId('performance-window-1d')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  test('toggling to "All" is reflected in the toggle state', async () => {
+  test('choosing "All" in the view dropdown is reflected in its value', async () => {
     const refreshResult: RefreshPricesResult = {
       holdings: [{ id: 'h1', symbol: 'AAPL', currentPrice: 150, currentValue: 1500, gainLoss: 500, returnPct: 50, allocationPct: 100, priceUpdatedAt: null, todayChangeDollar: 10, todayChangePercent: 1 }],
       performanceHistory: { AAPL: makeBars(30) },
     };
     render(<PerformanceChart holdings={[holding()]} refreshResult={refreshResult} />);
-    await userEvent.click(screen.getByRole('button', { name: 'All' }));
-    expect(screen.getByRole('button', { name: 'All' })).toHaveClass('bg-accent');
-    expect(screen.getByRole('button', { name: 'Outlier' })).not.toHaveClass('bg-accent');
+    await userEvent.selectOptions(screen.getByTestId('performance-view-select'), 'all');
+    expect(screen.getByTestId('performance-view-select')).toHaveValue('all');
   });
 });

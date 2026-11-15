@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -35,13 +35,13 @@ function renderPage() {
 }
 
 function summary(overrides: Partial<PortfolioSummary> = {}): PortfolioSummary {
-  return { id: '1', name: 'Legacy One', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: null, flexTemplateStatus: null, ...overrides };
+  return { id: '1', name: 'Legacy One', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: null, flexTemplateStatus: null, status: 'Active', ...overrides };
 }
 
 function detail(overrides: Partial<PortfolioDetail> = {}): PortfolioDetail {
   return {
-    id: '1', name: 'Flex One', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: null, flexTemplateStatus: 'Flex-Err',
-    cashAmount: 0, totalHoldingsValue: 1500, totalCostBasis: 1500, totalGainLoss: 0, totalPortfolioValue: 1500,
+    id: '1', name: 'Flex One', broker: null, createdAt: 't1', updatedAt: 't1', uploadTemplateId: null, flexTemplateStatus: 'Flex-Err', status: 'Active',
+    cashAmount: 0, totalHoldingsValue: 1500, totalCostBasis: 1500, totalGainLoss: 0, totalPortfolioValue: 1500, performanceHistory: {},
     holdings: [{
       id: 'h1', symbol: 'AAPL', name: 'Apple Inc.', quantity: 10, purchasePrice: 150, currentPrice: 150,
       sector: 'Technology', purchaseDate: null, costBasis: 1500, currentValue: 1500, gainLoss: 0, returnPct: 0,
@@ -268,4 +268,56 @@ describe('FlexPortfolioPage', () => {
     // request is sent, not just after a 409 comes back.
     expect(screen.getByTestId('flex-create-portfolio-submit')).toBeDisabled();
   });
+  test('the pencil on a Flex pill renames the portfolio', async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/flex-quota/status') return Promise.resolve(DEFAULT_QUOTA_STATUS);
+      if (url === '/portfolios') {
+        return Promise.resolve({ portfolios: [summary({ id: '2', name: 'Flex Resolved', flexTemplateStatus: 'Flex', uploadTemplateId: 't1' })] });
+      }
+      return Promise.resolve({});
+    });
+    renderPage();
+    expect(await screen.findByTestId('flex-portfolio-pill-2')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Rename Flex Resolved' }));
+    const input = screen.getByDisplayValue('Flex Resolved');
+    await user.clear(input);
+    await user.type(input, 'Flex Renamed');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledWith('/portfolios/2', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({ name: 'Flex Renamed' }),
+    })));
+  });
+
+  test('the trash icon on a Flex pill shows the warning; confirming soft-deletes, Cancel sends nothing', async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/flex-quota/status') return Promise.resolve(DEFAULT_QUOTA_STATUS);
+      if (url === '/portfolios') {
+        return Promise.resolve({ portfolios: [summary({ id: '2', name: 'Flex Resolved', flexTemplateStatus: 'Flex', uploadTemplateId: 't1' })] });
+      }
+      if (url === '/portfolios/2/soft-delete') return Promise.resolve({ success: true });
+      return Promise.resolve({});
+    });
+    renderPage();
+    expect(await screen.findByTestId('flex-portfolio-pill-2')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Rename Flex Resolved' }));
+    await user.click(screen.getByTestId('delete-flex-portfolio-2'));
+    const warning = screen.getByTestId('delete-portfolio-warning');
+    expect(warning).toHaveTextContent('This will remove the portfolio Flex Resolved.');
+    expect(warning).toHaveTextContent('raise a support ticket');
+    expect(fetchSpy).not.toHaveBeenCalledWith('/portfolios/2/soft-delete', expect.anything());
+
+    await user.click(within(warning).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByTestId('delete-portfolio-warning')).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId('delete-flex-portfolio-2'));
+    await user.click(screen.getByTestId('delete-portfolio-confirm'));
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledWith('/portfolios/2/soft-delete', { method: 'POST' }));
+  });
 });
+

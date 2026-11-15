@@ -344,10 +344,10 @@ describe('PortfolioTemplateApprovalPage', () => {
         return Promise.resolve({ templates: [{ id: '1', templateName: 'Bound One', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
       }
       if (url === '/portfolio-templates/1' && options?.method === 'DELETE') {
-        return Promise.reject(new client.ApiError(409, 'Cannot delete a template that is still bound to an existing portfolio.', null));
+        return Promise.reject(new client.ApiError(409, 'Cannot delete a template that is still bound to an existing portfolio.', { code: 'TEMPLATE_IN_USE' }));
       }
       if (url === '/portfolio-templates/1/bound-portfolios') {
-        return Promise.resolve({ portfolios: [{ id: 'p1', name: 'Charles-Schwab', ownerEmail: 'owner@b.com', createdAt: 't1' }] });
+        return Promise.resolve({ portfolios: [{ id: 'p1', name: 'Charles-Schwab', ownerEmail: 'owner@b.com', createdAt: 't1', status: 'Active' }] });
       }
       return Promise.resolve({});
     });
@@ -362,7 +362,7 @@ describe('PortfolioTemplateApprovalPage', () => {
     expect(screen.queryByText('Cannot delete a template that is still bound to an existing portfolio.')).not.toBeInTheDocument();
   });
 
-  test('deleting the last bound portfolio reveals Delete Template, which then completes the delete', async () => {
+  test('permanently deleting the last (soft-deleted) bound portfolio reveals Delete Template, which then completes the delete', async () => {
     let portfolioDeleted = false;
     let templateDeleteAttempts = 0;
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
@@ -374,7 +374,7 @@ describe('PortfolioTemplateApprovalPage', () => {
         // First attempt (portfolio still bound) 409s and opens the pop-up; the second attempt
         // (from the pop-up's own "Delete Template" button, once the list is empty) succeeds.
         if (templateDeleteAttempts === 1) {
-          return Promise.reject(new client.ApiError(409, 'Cannot delete a template that is still bound to an existing portfolio.', null));
+          return Promise.reject(new client.ApiError(409, 'Cannot delete a template that is still bound to an existing portfolio.', { code: 'TEMPLATE_IN_USE' }));
         }
         return Promise.resolve({ success: true });
       }
@@ -383,7 +383,7 @@ describe('PortfolioTemplateApprovalPage', () => {
         return Promise.resolve({ success: true });
       }
       if (url === '/portfolio-templates/1/bound-portfolios') {
-        return Promise.resolve({ portfolios: portfolioDeleted ? [] : [{ id: 'p1', name: 'Charles-Schwab', ownerEmail: 'owner@b.com', createdAt: 't1' }] });
+        return Promise.resolve({ portfolios: portfolioDeleted ? [] : [{ id: 'p1', name: 'Charles-Schwab', ownerEmail: 'owner@b.com', createdAt: 't1', status: 'Soft-Delete' }] });
       }
       return Promise.resolve({});
     });
@@ -457,4 +457,33 @@ describe('PortfolioTemplateApprovalPage', () => {
       await waitFor(() => expect(screen.getByText('No unattached Flex portfolios.')).toBeInTheDocument());
     });
   });
+  test('an Active bound portfolio offers Soft-Delete first, and that posts the soft-delete endpoint', async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.spyOn(client, 'apiFetch').mockImplementation((url: string, options?: RequestInit) => {
+      if (url === '/portfolio-templates/admin/all') {
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Bound One', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
+      }
+      if (url === '/portfolio-templates/1' && options?.method === 'DELETE') {
+        return Promise.reject(new client.ApiError(409, 'Cannot delete a template that is still bound to an existing portfolio.', { code: 'TEMPLATE_IN_USE' }));
+      }
+      if (url === '/portfolio-templates/1/bound-portfolios') {
+        return Promise.resolve({ portfolios: [{ id: 'p1', name: 'Charles-Schwab', ownerEmail: 'owner@b.com', createdAt: 't1', status: 'Active' }] });
+      }
+      if (url === '/portfolio-templates/1/bound-portfolios/p1/soft-delete' && options?.method === 'POST') {
+        return Promise.resolve({ success: true });
+      }
+      return Promise.resolve({});
+    });
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    await user.click(await screen.findByTestId('template-delete-confirm-1'));
+    await screen.findByTestId('bound-portfolios-list');
+
+    expect(screen.queryByTestId('bound-portfolio-delete-p1')).not.toBeInTheDocument();
+    await user.click(screen.getByTestId('bound-portfolio-soft-delete-p1'));
+    await user.click(screen.getByTestId('bound-portfolio-soft-delete-confirm-p1'));
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledWith('/portfolio-templates/1/bound-portfolios/p1/soft-delete', { method: 'POST' }));
+  });
+
+
 });

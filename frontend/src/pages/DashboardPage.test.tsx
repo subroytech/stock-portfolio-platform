@@ -21,8 +21,8 @@ function renderPage() {
 function basePortfolio(overrides: Partial<PortfolioDetail> = {}): PortfolioDetail {
   return {
     id: '1', name: 'Fidelity', broker: null, createdAt: 't1', updatedAt: 't1',
-    uploadTemplateId: null, flexTemplateStatus: null,
-    cashAmount: 0, totalHoldingsValue: 1500, totalCostBasis: 1000, totalGainLoss: 500, totalPortfolioValue: 1500,
+    uploadTemplateId: null, flexTemplateStatus: null, status: 'Active',
+    cashAmount: 0, totalHoldingsValue: 1500, totalCostBasis: 1000, totalGainLoss: 500, totalPortfolioValue: 1500, performanceHistory: {},
     holdings: [
       {
         id: 'h1', symbol: 'AAPL', name: 'Apple Inc.', quantity: 10, purchasePrice: 100, currentPrice: 150,

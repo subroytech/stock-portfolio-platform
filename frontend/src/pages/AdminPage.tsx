@@ -8,6 +8,7 @@ import FunctionsPage from './FunctionsPage';
 import RolePermissionsPage from './RolePermissionsPage';
 import RolesPage from './RolesPage';
 import PortfolioTemplateApprovalPage from './PortfolioTemplateApprovalPage';
+import ManagePortfolioPage from './ManagePortfolioPage';
 import AdminCandlestickQuestionAnswerPage from './AdminCandlestickQuestionAnswerPage';
 import ConfigPropertiesPage from './ConfigPropertiesPage';
 import AdminSupportTicketsPage from './AdminSupportTicketsPage';
@@ -20,7 +21,7 @@ const TABS = [
   { id: 'apis', label: 'My API(s)' },
   { id: 'masterData', label: 'Master Data' },
   { id: 'userAttributes', label: 'Manage User Attribute' },
-  { id: 'portfolioTemplates', label: 'Portfolio Templates' },
+  { id: 'portfolioAdmin', label: 'Portfolio Admin' },
   { id: 'candlestickQuestionAnswer', label: 'Candlestick Pattern Q&A' },
   { id: 'configProperties', label: 'Config Properties' },
   { id: 'support', label: 'Support Tickets' },
@@ -43,6 +44,16 @@ const SUB_TABS = [
 
 type SubTabId = (typeof SUB_TABS)[number]['id'];
 
+// Portfolio Admin (2026-11-14): the existing Portfolio Template screen plus Manage Portfolio, shown as
+// sub-tabs - same sub-tab pattern as Manage User Attribute above. Each sub-tab is hidden on its own
+// permission (Template: portfolio_template:manage_status; Manage Portfolio: portfolio_admin:manage).
+const PORTFOLIO_ADMIN_SUB_TABS = [
+  { id: 'template', label: 'Portfolio Template' },
+  { id: 'managePortfolio', label: 'Manage Portfolio' },
+] as const;
+
+type PortfolioAdminSubTabId = (typeof PORTFOLIO_ADMIN_SUB_TABS)[number]['id'];
+
 // Dedicated full-screen Admin page (Admin Console Phase 7), replacing the "Admin ▾"
 // dropdown-of-modals from Phases 1-5. Not nested inside TabShell - its own header/tab bar,
 // reached via App.tsx's /admin route, "Back to Home" returns to TabShell's "/" tab.
@@ -64,6 +75,8 @@ export default function AdminPage() {
   // section) - hidden entirely (not disabled) for an admin session that hasn't been granted
   // this specific Function, same pattern as apis/masterData above.
   const canManagePortfolioTemplates = session?.permissions?.includes('portfolio_template:manage_status') ?? false;
+  // Portfolio Admin - Manage Portfolio (2026-11-14) - admin-grantable, see migration 074.
+  const canManagePortfolioAdmin = session?.permissions?.includes('portfolio_admin:manage') ?? false;
   // Candlestick Pattern Q&A (Phase 1) content management - hidden entirely (not disabled)
   // without the permission, same pattern as every other gated tab on this page.
   const canManageCandlestickQuestionAnswer = session?.permissions?.includes('candlestick_question_answer:manage_content') ?? false;
@@ -82,6 +95,7 @@ export default function AdminPage() {
   const canImpersonate = session?.permissions?.includes('users:impersonate') ?? false;
   const [activeTab, setActiveTab] = useState<TabId>('apis');
   const [activeSubTab, setActiveSubTab] = useState<SubTabId>('users');
+  const [activePortfolioAdminSubTab, setActivePortfolioAdminSubTab] = useState<PortfolioAdminSubTabId>('template');
   const [showLoginAs, setShowLoginAs] = useState(false);
 
   // Client-side convenience only - every proxied endpoint's own requirePermission is the
@@ -91,7 +105,7 @@ export default function AdminPage() {
   const visibleTabs = TABS.filter((tab) => {
     if (tab.id === 'apis') return canManageOwnKeys;
     if (tab.id === 'masterData') return canManageMasterData;
-    if (tab.id === 'portfolioTemplates') return canManagePortfolioTemplates;
+    if (tab.id === 'portfolioAdmin') return canManagePortfolioTemplates || canManagePortfolioAdmin;
     if (tab.id === 'candlestickQuestionAnswer') return canManageCandlestickQuestionAnswer;
     if (tab.id === 'configProperties') return canManageConfigProperties;
     if (tab.id === 'support') return canManageSupport;
@@ -152,6 +166,23 @@ export default function AdminPage() {
         </nav>
       )}
 
+      {activeTab === 'portfolioAdmin' && (
+        <nav className="flex flex-wrap items-center gap-1 border-b border-border bg-bg-secondary px-4 py-2 sm:px-6">
+          {PORTFOLIO_ADMIN_SUB_TABS.filter((s) => (s.id === 'template' ? canManagePortfolioTemplates : canManagePortfolioAdmin)).map((subTab) => (
+            <button
+              key={subTab.id}
+              type="button"
+              onClick={() => setActivePortfolioAdminSubTab(subTab.id)}
+              className={`rounded-btn px-3 py-1 text-sm font-medium transition-colors ${
+                activePortfolioAdminSubTab === subTab.id ? 'bg-accent text-white' : 'text-text-secondary hover:bg-bg-primary'
+              }`}
+            >
+              {subTab.label}
+            </button>
+          ))}
+        </nav>
+      )}
+
       {session && <ImpersonationBanner session={session} returnPath="/admin" />}
 
       {showLoginAs && (
@@ -165,7 +196,8 @@ export default function AdminPage() {
         {activeTab === 'userAttributes' && activeSubTab === 'functions' && <FunctionsPage />}
         {activeTab === 'userAttributes' && activeSubTab === 'permissions' && <RolePermissionsPage />}
         {activeTab === 'userAttributes' && activeSubTab === 'roles' && <RolesPage />}
-        {activeTab === 'portfolioTemplates' && canManagePortfolioTemplates && <PortfolioTemplateApprovalPage />}
+        {activeTab === 'portfolioAdmin' && activePortfolioAdminSubTab === 'template' && canManagePortfolioTemplates && <PortfolioTemplateApprovalPage />}
+        {activeTab === 'portfolioAdmin' && activePortfolioAdminSubTab === 'managePortfolio' && canManagePortfolioAdmin && <ManagePortfolioPage />}
         {activeTab === 'candlestickQuestionAnswer' && canManageCandlestickQuestionAnswer && <AdminCandlestickQuestionAnswerPage />}
         {activeTab === 'configProperties' && canManageConfigProperties && <ConfigPropertiesPage />}
         {activeTab === 'support' && canManageSupport && <AdminSupportTicketsPage />}

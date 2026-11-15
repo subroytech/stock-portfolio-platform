@@ -44,8 +44,8 @@ function compareValues(a: string | number, b: string | number, direction: SortDi
 }
 
 // 2-level sort, user-controlled (not tied to column-header clicks, unlike the Holdings table's
-// own single-level sort) - defaults to Ticker asc, then Date desc within each ticker, per
-// explicit direction. Row counts here are small (low hundreds at most, one row per buy/sell
+// own single-level sort) - defaults to Date desc, then Value desc (see the useState defaults
+// in TransactionHistoryTable below), per explicit direction. Row counts here are small (low hundreds at most, one row per buy/sell
 // diffed on import), so re-sorting the full list on every control change is cheap.
 function sortTransactions(
   transactions: TransactionHistoryEntry[],
@@ -98,9 +98,10 @@ function DirectionToggle({ direction, onToggle, testId }: { direction: SortDirec
 // while this tab is actually mounted).
 export default function TransactionHistoryTable({ portfolioId }: TransactionHistoryTableProps) {
   const { data: transactions, isLoading, isError } = usePortfolioTransactions(portfolioId, true);
-  const [primaryField, setPrimaryField] = useState<SortField>('symbol');
-  const [primaryDirection, setPrimaryDirection] = useState<SortDirection>('asc');
-  const [secondaryField, setSecondaryField] = useState<SortField>('actionDateTime');
+  // Default: newest first, then largest value first within the same date.
+  const [primaryField, setPrimaryField] = useState<SortField>('actionDateTime');
+  const [primaryDirection, setPrimaryDirection] = useState<SortDirection>('desc');
+  const [secondaryField, setSecondaryField] = useState<SortField>('value');
   const [secondaryDirection, setSecondaryDirection] = useState<SortDirection>('desc');
 
   const sorted = useMemo(

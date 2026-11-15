@@ -114,11 +114,11 @@ describe('TransactionHistoryTable', () => {
     await screen.findByTestId('transaction-row-1');
 
     await userEvent.selectOptions(screen.getByTestId('transaction-sort-primary-field'), 'price');
-    // Ascending by price: MSFT@200(id1)? no - price values are 200, 100, 120 -> ascending: 100(id2), 120(id3), 200(id1)
+    // Primary direction stays at its default (desc): prices 200(id1), 120(id3), 100(id2).
     await waitFor(() => {
       const rows = screen.getAllByTestId(/^transaction-row-/);
       expect(rows.map((r) => r.getAttribute('data-testid'))).toEqual([
-        'transaction-row-2', 'transaction-row-3', 'transaction-row-1',
+        'transaction-row-1', 'transaction-row-3', 'transaction-row-2',
       ]);
     });
   });
@@ -137,16 +137,18 @@ describe('TransactionHistoryTable', () => {
     vi.spyOn(client, 'apiFetch').mockResolvedValue({ transactions: TRANSACTIONS });
     renderTable();
     await screen.findByTestId('transaction-row-1');
-    // Default secondary is Date desc - AAPL group is [3 (Aug 1), 2 (Jul 10)].
-    let rows = screen.getAllByTestId(/^transaction-row-/);
-    expect(rows[0]).toHaveAttribute('data-testid', 'transaction-row-3');
-    expect(rows[1]).toHaveAttribute('data-testid', 'transaction-row-2');
+    // Put Ticker in charge so AAPL's two rows tie on the primary key. Secondary defaults to
+    // Value desc: BUY +$1000 (id2) before SELL -$360 (id3); MSFT (id1) leads by ticker desc.
+    await userEvent.selectOptions(screen.getByTestId('transaction-sort-primary-field'), 'symbol');
+    await waitFor(() => {
+      const ids = screen.getAllByTestId(/^transaction-row-/).map((r) => r.getAttribute('data-testid'));
+      expect(ids).toEqual(['transaction-row-1', 'transaction-row-2', 'transaction-row-3']);
+    });
 
     await userEvent.click(screen.getByTestId('transaction-sort-secondary-direction'));
     await waitFor(() => {
-      rows = screen.getAllByTestId(/^transaction-row-/);
-      expect(rows[0]).toHaveAttribute('data-testid', 'transaction-row-2');
-      expect(rows[1]).toHaveAttribute('data-testid', 'transaction-row-3');
+      const ids = screen.getAllByTestId(/^transaction-row-/).map((r) => r.getAttribute('data-testid'));
+      expect(ids).toEqual(['transaction-row-1', 'transaction-row-3', 'transaction-row-2']);
     });
   });
 });

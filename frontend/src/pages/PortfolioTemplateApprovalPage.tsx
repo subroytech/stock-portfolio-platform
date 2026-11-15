@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   useAllTemplates, useTemplateDetail, useSetTemplateStatus, useDeleteTemplate,
-  useBoundPortfolios, useDeleteBoundPortfolio,
+  useBoundPortfolios, useDeleteBoundPortfolio, useSoftDeleteBoundPortfolio,
   useUnattachedFlexPortfolios, useDeleteUnattachedFlexPortfolio, TARGET_FIELD_LABELS,
   type TemplateStatus,
 } from '../api/portfolioTemplates';
@@ -30,14 +30,28 @@ interface BoundPortfoliosModalProps {
 function BoundPortfoliosModal({ templateId, deleteTemplate, onDeleteTemplate, onClose }: BoundPortfoliosModalProps) {
   const { data: portfolios, isLoading } = useBoundPortfolios(templateId);
   const deleteBoundPortfolio = useDeleteBoundPortfolio(templateId);
-  const [confirmingPortfolioId, setConfirmingPortfolioId] = useState<string | null>(null);
+  const softDeleteBoundPortfolio = useSoftDeleteBoundPortfolio(templateId);
+  // The row showing its confirm step. 'soft' is for an Active portfolio, 'permanent' for a Soft-Delete one.
+  const [confirming, setConfirming] = useState<{ id: string; action: 'soft' | 'permanent' } | null>(null);
+  const actionError = deleteBoundPortfolio.isError ? deleteBoundPortfolio.error
+    : softDeleteBoundPortfolio.isError ? softDeleteBoundPortfolio.error
+    : null;
 
-  async function handleDeletePortfolio(id: string) {
+  async function handlePermanentDelete(id: string) {
     try {
       await deleteBoundPortfolio.mutateAsync(id);
-      setConfirmingPortfolioId(null);
+      setConfirming(null);
     } catch {
-      // surfaced below via deleteBoundPortfolio.isError
+      // surfaced below via actionError
+    }
+  }
+
+  async function handleSoftDelete(id: string) {
+    try {
+      await softDeleteBoundPortfolio.mutateAsync(id);
+      setConfirming(null);
+    } catch {
+      // surfaced below via actionError
     }
   }
 
@@ -59,7 +73,8 @@ function BoundPortfoliosModal({ templateId, deleteTemplate, onDeleteTemplate, on
         </div>
 
         <p className="mb-4 text-sm text-text-secondary">
-          This template can't be deleted while it's still bound to a portfolio. Delete the portfolio(s) below to free it up.
+          This template can't be deleted while a portfolio is still bound to it. Soft-delete any active portfolio below,
+          then permanently delete it, to free the template.
         </p>
 
         {isLoading && <p className="text-sm text-text-secondary">Loading…</p>}
@@ -71,30 +86,67 @@ function BoundPortfoliosModal({ templateId, deleteTemplate, onDeleteTemplate, on
                 <div>
                   <p className="text-sm font-medium text-text-primary">{p.name}</p>
                   <p className="text-xs text-text-muted">{p.ownerEmail}</p>
+                  <p className="text-xs text-text-secondary" data-testid={`bound-portfolio-status-${p.id}`}>{p.status}</p>
                 </div>
-                {confirmingPortfolioId !== p.id ? (
-                  <button
-                    type="button"
-                    onClick={() => setConfirmingPortfolioId(p.id)}
-                    data-testid={`bound-portfolio-delete-${p.id}`}
-                    className="rounded-btn border border-danger px-3 py-1.5 text-sm text-danger hover:bg-danger/10"
-                  >
-                    Delete
-                  </button>
-                ) : (
-                  <div className="flex items-center gap-2">
+                {confirming?.id !== p.id ? (
+                  p.status === 'Soft-Delete' ? (
                     <button
                       type="button"
-                      onClick={() => handleDeletePortfolio(p.id)}
-                      disabled={deleteBoundPortfolio.isPending}
-                      data-testid={`bound-portfolio-delete-confirm-${p.id}`}
-                      className="rounded-btn bg-danger px-3 py-1.5 text-sm text-white hover:opacity-90 disabled:opacity-60"
+                      onClick={() => setConfirming({ id: p.id, action: 'permanent' })}
+                      data-testid={`bound-portfolio-delete-${p.id}`}
+                      className="rounded-btn border border-danger px-3 py-1.5 text-sm text-danger hover:bg-danger/10"
                     >
-                      {deleteBoundPortfolio.isPending ? 'Deleting…' : 'Confirm Delete'}
+                      Delete
                     </button>
-                    <button type="button" onClick={() => setConfirmingPortfolioId(null)} className="text-sm text-text-secondary hover:underline">
-                      Cancel
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirming({ id: p.id, action: 'soft' })}
+                      data-testid={`bound-portfolio-soft-delete-${p.id}`}
+                      className="rounded-btn border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-primary"
+                    >
+                      Soft-Delete
                     </button>
+                  )
+                ) : confirming.action === 'permanent' ? (
+                  <div className="flex w-full flex-col gap-2">
+                    <p className="text-xs text-danger">
+                      All records pertaining to this portfolio will be permanently deleted and can't be recovered.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handlePermanentDelete(p.id)}
+                        disabled={deleteBoundPortfolio.isPending}
+                        data-testid={`bound-portfolio-delete-confirm-${p.id}`}
+                        className="rounded-btn bg-danger px-3 py-1.5 text-sm text-white hover:opacity-90 disabled:opacity-60"
+                      >
+                        {deleteBoundPortfolio.isPending ? 'Deleting…' : 'Confirm Delete'}
+                      </button>
+                      <button type="button" onClick={() => setConfirming(null)} className="text-sm text-text-secondary hover:underline">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex w-full flex-col gap-2">
+                    <p className="text-xs text-text-secondary">
+                      This hides the portfolio from its owner. It can then be permanently deleted from this pop-up.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleSoftDelete(p.id)}
+                        disabled={softDeleteBoundPortfolio.isPending}
+                        data-testid={`bound-portfolio-soft-delete-confirm-${p.id}`}
+                        className="rounded-btn border border-danger px-3 py-1.5 text-sm text-danger hover:bg-danger/10 disabled:opacity-60"
+                      >
+                        {softDeleteBoundPortfolio.isPending ? 'Soft-deleting…' : 'Confirm Soft-Delete'}
+                      </button>
+                      <button type="button" onClick={() => setConfirming(null)} className="text-sm text-text-secondary hover:underline">
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                 )}
               </li>
@@ -102,9 +154,9 @@ function BoundPortfoliosModal({ templateId, deleteTemplate, onDeleteTemplate, on
           </ul>
         )}
 
-        {deleteBoundPortfolio.isError && (
+        {actionError && (
           <p className="mb-4 text-sm text-danger">
-            {deleteBoundPortfolio.error instanceof ApiError ? deleteBoundPortfolio.error.message : 'Could not delete this portfolio.'}
+            {actionError instanceof ApiError ? actionError.message : 'Could not update this portfolio.'}
           </p>
         )}
 
@@ -262,7 +314,11 @@ export default function PortfolioTemplateApprovalPage() {
       if (expandedId === id) setExpandedId(null);
     } catch (err) {
       setConfirmingDeleteId(null);
-      if (err instanceof ApiError && err.status === 409) {
+      // Only TEMPLATE_IN_USE opens the pop-up. An Approved template is also refused with a 409, but
+      // for a different reason - that case shows the server's message (reject it first) instead.
+      const inUse = err instanceof ApiError && err.status === 409
+        && (err.body as { code?: string } | null)?.code === 'TEMPLATE_IN_USE';
+      if (inUse) {
         setBoundPortfoliosModalFor(id);
       } else {
         setActionErrorFor(id);

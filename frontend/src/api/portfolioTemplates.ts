@@ -135,6 +135,8 @@ export interface BoundPortfolio {
   name: string;
   ownerEmail: string;
   createdAt: string;
+  // Lifecycle status (2026-11-14). Decides what the pop-up offers: Soft-Delete -> permanent delete, Active -> soft delete first.
+  status: 'Active' | 'In-Active' | 'Soft-Delete';
 }
 
 export function useBoundPortfolios(templateId: string | null) {
@@ -142,6 +144,18 @@ export function useBoundPortfolios(templateId: string | null) {
     queryKey: ['portfolioTemplates', 'boundPortfolios', templateId],
     queryFn: () => apiFetch<{ portfolios: BoundPortfolio[] }>(`/portfolio-templates/${templateId}/bound-portfolios`).then((r) => r.portfolios),
     enabled: templateId !== null,
+  });
+}
+
+// Soft-deletes an Active portfolio bound to this template (the pop-up's first step for it). Its permanent
+// delete then becomes available via useDeleteBoundPortfolio.
+export function useSoftDeleteBoundPortfolio(templateId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (portfolioId: string) => apiFetch<{ success: true }>(`/portfolio-templates/${templateId}/bound-portfolios/${portfolioId}/soft-delete`, { method: 'POST' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['portfolioTemplates', 'boundPortfolios', templateId] });
+    },
   });
 }
 

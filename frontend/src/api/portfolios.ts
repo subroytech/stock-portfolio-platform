@@ -8,6 +8,10 @@ import { FLEX_QUOTA_STATUS_QUERY_KEY } from './flexQuota';
 // portfolio created through today's Legacy import, unchanged.
 export type FlexTemplateStatus = 'Flex' | 'Flex-Err' | null;
 
+// Lifecycle status (migration 072). Only 'Active' portfolios reach the owner's own list; the other
+// two are admin-visible only (Admin - Portfolio Admin - Manage Portfolio).
+export type PortfolioStatus = 'Active' | 'In-Active' | 'Soft-Delete';
+
 export interface PortfolioSummary {
   id: string;
   name: string;
@@ -16,6 +20,7 @@ export interface PortfolioSummary {
   updatedAt: string;
   uploadTemplateId: string | null;
   flexTemplateStatus: FlexTemplateStatus;
+  status: PortfolioStatus;
 }
 
 export interface PortfolioHolding {
@@ -49,6 +54,9 @@ export interface PortfolioDetail extends PortfolioSummary {
   totalCostBasis: number;
   totalGainLoss: number;
   totalPortfolioValue: number;
+  // Trailing history from the shared daily cache, loaded with the portfolio. Refresh Prices
+  // results (RefreshPricesResult.performanceHistory) override this only after an explicit click.
+  performanceHistory: Record<string, PerformanceBar[]>;
 }
 
 // Mirrors backend/src/services/portfolio.service.ts's RefreshedHolding/
@@ -163,6 +171,19 @@ export function useUpdatePortfolio() {
       body: JSON.stringify({ name: input.name }),
     }).then((r) => r.portfolio),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['portfolios'] }),
+  });
+}
+
+// The owner's Delete action (Lifecycle: Active -> Soft-Delete). Nothing is removed; the portfolio
+// simply leaves the owner's list. Same cache handling as useDeletePortfolio below.
+export function useSoftDeletePortfolio() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiFetch<{ success: true }>(`/portfolios/${id}/soft-delete`, { method: 'POST' }),
+    onSuccess: (_data, id) => {
+      queryClient.removeQueries({ queryKey: ['portfolios', id] });
+      queryClient.invalidateQueries({ queryKey: ['portfolios'], exact: true });
+    },
   });
 }
 

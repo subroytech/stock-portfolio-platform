@@ -3,8 +3,10 @@ import { memo, useRef } from 'react';
 import { Pie } from 'react-chartjs-2';
 import type { PortfolioHolding } from '../api/portfolios';
 import { formatAsOf, formatWholeCurrency } from '../lib/format';
+import { fmtSectorTotal, getTopSectors } from '../lib/sectorBars';
+import TopSectorBars from './TopSectorBars';
 
-export type AllocationMode = 'sector' | 'stock' | 'todayDollar';
+export type AllocationMode = 'sector' | 'stock' | 'todayDollar' | 'top6Sectors';
 
 interface AllocationChartProps {
   holdings: PortfolioHolding[];
@@ -58,6 +60,7 @@ export function AllocationModeToggle({ mode, onChange }: { mode: AllocationMode;
       <Pill label="Today's $" active={mode === 'todayDollar'} onClick={() => onChange('todayDollar')} />
       <Pill label="By Stock" active={mode === 'stock'} onClick={() => onChange('stock')} />
       <Pill label="By Sector" active={mode === 'sector'} onClick={() => onChange('sector')} />
+      <Pill label="Top-6 Sectors" active={mode === 'top6Sectors'} onClick={() => onChange('top6Sectors')} />
     </div>
   );
 }
@@ -235,6 +238,21 @@ function AllocationChart({ holdings, mode }: AllocationChartProps) {
         </div>
       </div>
     );
+  }
+
+  // Top-6 Sectors: one horizontal bar chart per top sector, each bar a stock's current value.
+  if (mode === 'top6Sectors') {
+    const charts = getTopSectors(holdings).map((g) => ({
+      sector: g.sector,
+      headerValue: { text: fmtSectorTotal(g.totalValue), tone: 'neutral' as const },
+      labels: g.holdings.map((h) => h.symbol),
+      series: [{
+        label: 'Value',
+        color: g.holdings.map((_, i) => PALETTE[i % PALETTE.length]),
+        data: g.holdings.map((h) => h.currentValue),
+      }],
+    }));
+    return <TopSectorBars key={`top6-${remountTick.current}`} charts={charts} format="dollar" />;
   }
 
   const grouped = new Map<string, number>();

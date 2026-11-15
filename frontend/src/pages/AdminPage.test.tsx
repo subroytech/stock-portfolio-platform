@@ -164,7 +164,7 @@ describe('AdminPage', () => {
     expect(screen.queryByRole('button', { name: 'Master Data' })).not.toBeInTheDocument();
   });
 
-  test('a session with portfolio_template:manage_status sees the "Portfolio Templates" tab and can switch to it', async () => {
+  test('a session with portfolio_template:manage_status sees the "Portfolio Admin" tab, opening it shows the Portfolio Template sub-tab', async () => {
     vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
       if (url === '/auth/me') return Promise.resolve({ id: '1', email: 'admin@b.com', roles: ['admin'], permissions: ['api_keys:manage_own', 'users:manage_roles', 'portfolio_template:manage_status'] });
       if (url === '/subscriptions') return Promise.resolve({ subscriptions: [] });
@@ -174,15 +174,16 @@ describe('AdminPage', () => {
     renderPage();
     await screen.findByText('FMP (Financial Modeling Prep)');
 
-    await userEvent.click(screen.getByRole('button', { name: 'Portfolio Templates' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Portfolio Admin' }));
+    expect(screen.getByRole('button', { name: 'Portfolio Template' })).toBeInTheDocument();
     expect(await screen.findByText('No portfolio templates have been created yet.')).toBeInTheDocument();
   });
 
-  test('a session without portfolio_template:manage_status does not see the "Portfolio Templates" tab', async () => {
-    mockAdminSession(); // default helper - no portfolio_template:manage_status
+  test('a session without portfolio_template:manage_status or portfolio_admin:manage does not see the "Portfolio Admin" tab', async () => {
+    mockAdminSession(); // default helper - neither permission
     renderPage();
     await screen.findByText('FMP (Financial Modeling Prep)');
-    expect(screen.queryByRole('button', { name: 'Portfolio Templates' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Portfolio Admin' })).not.toBeInTheDocument();
   });
 
   test('a session with config_properties:manage sees the "Config Properties" tab and can switch to it', async () => {

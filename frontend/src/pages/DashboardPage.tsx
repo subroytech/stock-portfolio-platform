@@ -120,9 +120,8 @@ export default function DashboardPage({ readOnly = false, portfolioFilter }: Das
                   extra height down into the chart itself (flex-1) instead of
                   leaving it as blank space below a short, fixed-height chart. */}
               <div className="flex flex-col rounded-card bg-bg-card p-4 shadow-card">
-                <h2 className="mb-3 shrink-0 text-sm font-semibold text-text-primary">Performance</h2>
                 <div className="min-h-0 flex-1">
-                  <PerformanceChart holdings={portfolio.holdings} refreshResult={refreshResult} />
+                  <PerformanceChart holdings={portfolio.holdings} refreshResult={refreshResult} cachedHistory={portfolio.performanceHistory} />
                 </div>
               </div>
             </div>

@@ -35,13 +35,13 @@ function makePortfolio(holdings: PortfolioHolding[]): PortfolioDetail {
     createdAt: '',
     updatedAt: '',
     uploadTemplateId: null,
-    flexTemplateStatus: null,
+    flexTemplateStatus: null, status: 'Active',
     cashAmount: 0,
     holdings,
     totalHoldingsValue,
     totalCostBasis,
     totalGainLoss: totalHoldingsValue - totalCostBasis,
-    totalPortfolioValue: totalHoldingsValue,
+    totalPortfolioValue: totalHoldingsValue, performanceHistory: {},
   };
 }
 

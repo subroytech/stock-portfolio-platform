@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent } from 'react';
-import { usePortfolios, usePortfolio, useCreatePortfolioFlex, useChangeFlexTemplate, useRefreshPrices } from '../api/portfolios';
+import { usePortfolios, usePortfolio, useCreatePortfolioFlex, useChangeFlexTemplate, useRefreshPrices, useSoftDeletePortfolio, useUpdatePortfolio } from '../api/portfolios';
 import type { RefreshPricesResult } from '../api/portfolios';
 import type { TemplateSummary } from '../api/portfolioTemplates';
 import { useFlexQuotaStatus, isAtOrOverLimit } from '../api/flexQuota';
@@ -16,6 +16,7 @@ import type { AllocationMode } from '../components/AllocationChart';
 import PerformanceChart from '../components/PerformanceChart';
 import HoldingsTable from '../components/HoldingsTable';
 import StockPreviewChart from '../components/StockPreviewChart';
+import SoftDeleteConfirm, { TrashIcon } from '../components/SoftDeleteConfirm';
 
 const EXCEL_EXTENSIONS = ['.xls', '.xlsx', '.xlsm'];
 
@@ -57,6 +58,35 @@ export default function FlexPortfolioPage() {
   const [reuploadFile, setReuploadFile] = useState<{ filename: string; content: string } | null>(null);
   const reuploadInputRef = useRef<HTMLInputElement>(null);
   const [changingTemplate, setChangingTemplate] = useState(false);
+
+  // Rename (pencil) and owner Delete (trash) on a Flex portfolio pill - the same lifecycle as the
+  // Legacy Dashboard's selector. Delete is a soft delete for every Flex portfolio, including one
+  // still in Flex-Err. The resolution banner's own Delete stays a hard delete (lifecycle abort).
+  const updatePortfolio = useUpdatePortfolio();
+  const softDeletePortfolio = useSoftDeletePortfolio();
+  const [editingFlexId, setEditingFlexId] = useState<string | null>(null);
+  const [editFlexName, setEditFlexName] = useState('');
+  const [confirmFlexDeleteId, setConfirmFlexDeleteId] = useState<string | null>(null);
+
+  async function handleFlexRename(e: FormEvent) {
+    e.preventDefault();
+    if (!editingFlexId || !editFlexName.trim()) return;
+    await updatePortfolio.mutateAsync({ id: editingFlexId, name: editFlexName.trim() });
+    setEditingFlexId(null);
+  }
+
+  async function handleFlexSoftDelete(id: string) {
+    await softDeletePortfolio.mutateAsync(id);
+    const remaining = flexPortfolios.filter((p) => p.id !== id);
+    setConfirmFlexDeleteId(null);
+    setEditingFlexId(null);
+    if (selectedId === id) setSelectedId(remaining[0]?.id ?? null);
+    setSessionMappingByPortfolio((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }
 
   function resetCreateFlow() {
     setCreateStep('closed');
@@ -165,19 +195,78 @@ export default function FlexPortfolioPage() {
           <div className="flex flex-wrap items-center gap-2">
             {portfoliosLoading && <p className="text-sm text-text-secondary">Loading portfolios…</p>}
             {flexPortfolios.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => setSelectedId(p.id)}
-                data-testid={`flex-portfolio-pill-${p.id}`}
-                className={`flex items-center gap-1 rounded-btn px-3 py-1.5 text-sm transition-colors ${
-                  p.id === selectedId ? 'bg-accent text-white' : 'border border-border text-text-secondary hover:bg-bg-primary'
-                }`}
-              >
-                {p.name}
-                {p.flexTemplateStatus === 'Flex-Err' && <span title="Needs attention" className="text-warning">⚠</span>}
-              </button>
+              editingFlexId === p.id ? (
+                <form key={p.id} onSubmit={handleFlexRename} className="flex items-center gap-1" data-testid={`flex-portfolio-edit-${p.id}`}>
+                  <input
+                    autoFocus
+                    value={editFlexName}
+                    onChange={(e) => setEditFlexName(e.target.value)}
+                    className="rounded-btn border border-border bg-bg-primary px-2 py-1.5 text-sm text-text-primary"
+                  />
+                  <button type="submit" disabled={updatePortfolio.isPending} className="rounded-btn bg-accent px-2 py-1.5 text-sm text-white hover:bg-accent-hover">
+                    Save
+                  </button>
+                  <button type="button" onClick={() => setEditingFlexId(null)} className="text-sm text-text-secondary hover:underline">
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmFlexDeleteId(p.id)}
+                    aria-label={`Delete ${p.name}`}
+                    title="Delete portfolio"
+                    data-testid={`delete-flex-portfolio-${p.id}`}
+                    className="rounded-btn border border-danger/40 px-2 py-1.5 text-danger hover:bg-danger/10"
+                  >
+                    <TrashIcon />
+                  </button>
+                  {updatePortfolio.isError && updatePortfolio.variables?.id === p.id && (
+                    <span className="text-xs text-danger">
+                      {updatePortfolio.error instanceof ApiError ? updatePortfolio.error.message : 'Could not rename.'}
+                    </span>
+                  )}
+                </form>
+              ) : (
+                <span
+                  key={p.id}
+                  className={`group flex items-center gap-1 rounded-btn px-1 text-sm transition-colors ${
+                    p.id === selectedId ? 'bg-accent text-white' : 'border border-border text-text-secondary hover:bg-bg-primary'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setSelectedId(p.id)}
+                    data-testid={`flex-portfolio-pill-${p.id}`}
+                    className="flex items-center gap-1 px-2 py-1.5"
+                  >
+                    {p.name}
+                    {p.flexTemplateStatus === 'Flex-Err' && <span title="Needs attention" className="text-warning">⚠</span>}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setEditingFlexId(p.id); setEditFlexName(p.name); }}
+                    aria-label={`Rename ${p.name}`}
+                    className={`px-1.5 py-1.5 opacity-60 hover:opacity-100 ${p.id === selectedId ? 'text-white' : 'text-text-secondary'}`}
+                  >
+                    ✎
+                  </button>
+                </span>
+              )
             ))}
+            {confirmFlexDeleteId && (() => {
+              const target = flexPortfolios.find((p) => p.id === confirmFlexDeleteId);
+              if (!target) return null;
+              return (
+                <SoftDeleteConfirm
+                  name={target.name}
+                  isPending={softDeletePortfolio.isPending}
+                  errorMessage={softDeletePortfolio.isError
+                    ? (softDeletePortfolio.error instanceof ApiError ? softDeletePortfolio.error.message : 'Could not delete the portfolio.')
+                    : null}
+                  onConfirm={() => handleFlexSoftDelete(target.id)}
+                  onCancel={() => setConfirmFlexDeleteId(null)}
+                />
+              );
+            })()}
             <button
               type="button"
               onClick={() => { setSelectedId(null); setCreateStep('picker'); }}
@@ -383,9 +472,8 @@ export default function FlexPortfolioPage() {
                 </div>
               </div>
               <div className="flex flex-col rounded-card bg-bg-card p-4 shadow-card">
-                <h2 className="mb-3 shrink-0 text-sm font-semibold text-text-primary">Performance</h2>
                 <div className="min-h-0 flex-1">
-                  <PerformanceChart holdings={portfolio.holdings} refreshResult={refreshResult} />
+                  <PerformanceChart holdings={portfolio.holdings} refreshResult={refreshResult} cachedHistory={portfolio.performanceHistory} />
                 </div>
               </div>
             </div>
