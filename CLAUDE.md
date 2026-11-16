@@ -2920,7 +2920,29 @@ Builds on the two uncommitted sections above. Verified 2026-11-15: backend Jest 
 - **Manage Portfolio** gains a **Portfolio Template** column (template name for Flex portfolios, "—" otherwise) and a matching single-select filter.
 - **Bound-portfolios pop-up:** an Active linked portfolio shows **Soft-Delete** first; only a Soft-Delete one gets a permanent **Delete**. The pop-up opens only for the `TEMPLATE_IN_USE` refusal code. Approved templates have no Delete button in the UI.
 - **Flex pills** now have the pencil (rename) and trash (soft delete) icons, through a shared `SoftDeleteConfirm` component also used by the Legacy selector.
+- **Portfolio list per template:** each Portfolio Template row has a ▸ expander showing the portfolios created from it (owner, name, status, created and updated dates, holdings, market value), using the bound-portfolios endpoint. Manage Portfolio gains the same Last Updated, Holdings, and Market Value columns.
 - **Docs updated:** `User Manual.md` (new "Portfolio Page — Allocation, Performance, and Lifecycle" section), `User Technical Doc/04-REST-API-Reference.md` (section 3a and the bound-portfolio changes), `Architecture.md` (new round summary), `backend/src/db/SCHEMA.md` (`status` column and partial index).
+
+## Round 2026-11-16 — Sectors 7-12 and Top-12 Summary Pills ⏳ Uncommitted
+
+Verified 2026-11-16: frontend Vitest 920/920, typecheck clean. No backend change.
+
+- **Shared helpers** (`lib/sectorBars.ts`): `rankSectors` (all sectors by value), `getTopSectors(holdings, count = 6)`, `getNextSectors` (sectors 7-12), `hasNextSectors` (true only with a seventh sector).
+- **Allocation:** new `next6Sectors` mode, shown as a "7-12 Sectors" button only when `showNextSectors` is set (Dashboard and Flex pass `hasNextSectors`). Same six-chart grid as Top-6.
+- **Performance:** view dropdown gains "7-12 Sectors" under the same condition; `buildTop6Charts` takes a `top6` / `next6` page.
+- **Summary pills:** Top Sector $ + / − use the top 12 sectors (`getTopSectors(holdings, 12)`).
+- **Analysis (Fidelity-Legacy and Fidelity-Subroy, identical data):** 11 sectors; sectors 7-11 hold 15.7% of value; sectors 13-18 do not exist, so no 13-18 view.
+- **Docs updated:** `User Manual.md` (Sectors 7-12 section).
+
+## Round 2026-11-16 (cont.) — Summary Pills, Number Formats, Expander, Manage Portfolio Columns ⏳ Uncommitted
+
+Verified 2026-11-16: frontend Vitest 920/920, typecheck clean (frontend and backend). Backend unchanged this round (1146 passing).
+
+- **Summary pills:** 12 in two groups of six. Allocation group: Total $, Holding $, Cash, Total Gain/Loss, Today's $, Today's % (labels bold). Performance group: Top Gainer, Top Loser, % Top Gainer, % Top Loser, Top Sector $ +, Top Sector $ − (the last two are two-line sector pills with a deep-teal name chip). Each group sits in one line above its card (`KpiCards group=allocation|performance`). Widths are flex weights: 5 for the widest pills, 4 (80%) for the rest, with a 7rem minimum. Top Sector pills use the top 12 sectors.
+- **Number formats:** `formatCurrency` now shows whole dollars. `formatPrice` (two decimals) is used for prices, average cost, and per-share values in Holdings, Transaction History, stock preview, candlestick O/H/L/C, and Momentum. Percentages show two decimals on the Holdings table, stock preview, and Performance and Top-6 tooltips. The "K" short form is unchanged (sector headings, chart axes, `fmtSectorTotal`).
+- **Portfolio Template expander:** a chevron button (rotates when open) beside each template name opens the portfolios created from it (owner, name, status, created, last updated, holdings, market value). It uses the bound-portfolios endpoint and loads on open.
+- **Manage Portfolio:** adds Last Updated, Holdings, and Market Value columns (`HOLDINGS_METRICS_SQL` in `portfolio.service.ts`). Dates on Manage Portfolio and Portfolio Template use `formatDateTime24` (24-hour, English month abbreviations so September shows as "Sep").
+- **Docs updated:** `User Manual.md` (Summary pills and number formats section, expander wording, 24-hour dates), `Architecture.md`, `User Technical Doc/03-Test-Details.md`, and this section.
 
 ## Next Up
 

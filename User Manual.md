@@ -652,15 +652,37 @@ curated write-up and diagram in the first place. The same admin page also has a 
 Templates** section — create/activate/deactivate the regex-based templates the second cascade
 layer above uses, each with a required example phrasing shown to end users via the "(i)" popover.
 
+## Summary pills and number formats (2026-11-16)
+
+### Summary pills
+- Twelve pills sit above the two cards, in two groups of six.
+- **Above Allocation:** Total $, Holding $, Cash, Total Gain/Loss, Today's $, % Today's.
+- **Above Performance:** Top Gainer, Top Loser, % Top Gainer, % Top Loser, Top Sector $ +, Top Sector $ −.
+- Each group is one line on a wide screen. On a narrow screen, each group scrolls sideways.
+- Labels are bold. Total Gain/Loss and the two Top Sector pills are the widest; the others are 80% of that width.
+- Top Gainer and Top Loser show a stock and its dollar change. The % pills show a stock and its percentage change, whatever the size of the holding.
+- **Top Sector $ + and $ −** consider the top 12 sectors. Each shows the sector name on a deep-teal chip, with its signed dollar change below.
+
+### Number formats
+- **Dollar values** show whole dollars, for example $251,489. Sector totals on the Allocation headings keep the short form, for example $42.7K.
+- **Prices, average cost, and quantities** keep two decimals, for example $64.54.
+- **Percentages** show two decimals, for example +1.14%.
+- **Dates** on Manage Portfolio and Portfolio Template use 24-hour time.
+
 ## Portfolio Page — Allocation, Performance, and Lifecycle (2026-11)
 
 ### Allocation card — "Top-6 Sectors"
 - Choose **Top-6 Sectors** next to "By Sector". It shows one horizontal bar chart per sector, for your six largest sectors by current value.
 - Each bar is one stock's current market value. Sector totals appear in the chart heading, for example "Technology ($42.7K)".
 
+### Sectors 7-12 (only when there are more than six sectors)
+- On the Allocation card, a **7-12 Sectors** button appears beside Top-6 Sectors. It shows the seventh to twelfth largest sectors, in the same layout.
+- In the Performance view dropdown, **7-12 Sectors** appears under the same condition. It uses the same window and Value / Percent buttons.
+- The summary pills **Top Sector $ +** and **Top Sector $ −** consider the top 12 sectors, not just the top 6.
+
 ### Performance card — one line of controls
 - The first line holds the title "Performance", the period buttons, the view dropdown on the right, and a scrolling note on the left when prices are cached.
-- **View dropdown:** Top-6 Sectors (the default), Outlier, or All.
+- **View dropdown:** Top-6 Sectors (the default), 7-12 Sectors (only when the portfolio has a seventh sector), Outlier, or All.
 - **Top-6 Sectors** shows six charts, one per sector, for the window you pick: **1D, 5D, 10D, 15D, 30D, 60D, 90D, or 120D** (trading days). 1D is selected by default.
   - Each bar is a stock's gain or loss for that window. Green is a gain, red is a loss.
   - The **Value ($) / Percent (%)** buttons switch the bars between dollars and percent. The sector heading shows the sector's total change, signed and coloured.
@@ -686,8 +708,14 @@ layer above uses, each with a required example phrasing shown to end users via t
 - **Filters** (single-select): User, Portfolio Type (Legacy or Flex), Portfolio Template, and Status.
 - **Default sort:** user, then type, then status, then name.
 - **Portfolio Template column:** shows the template name for each Flex portfolio. Legacy portfolios show "—".
+- **Last Updated, Holdings, and Market Value** columns show when the portfolio last changed, how many holdings it has, and their total market value.
+- Dates use 24-hour time, for example 15 Nov 2026, 14:30.
 - **Restore** (circular-arrow icon) appears only on Soft-Delete rows. It returns the portfolio to Active. If the owner has since created an active portfolio with the same name, the restore is refused with a message.
 - **Permanent delete** (trash icon) also appears only on Soft-Delete rows. It shows the warning "All records pertaining to this portfolio will be permanently deleted and can't be recovered." Confirming removes the portfolio and all its holdings, uploads, and history. This can't be undone.
+
+### Portfolios created from a template
+- On the Portfolio Template list, each template has a chevron (›) button beside its name. It turns down when open. Click it to see every portfolio created from that template, with owner, name, status, created and last-updated dates, number of holdings, and market value.
+- The list includes soft-deleted portfolios, since they still use the template.
 
 ### Deleting a template that still has portfolios attached
 - A template can't be deleted while any portfolio is still bound to it, including a soft-deleted one.

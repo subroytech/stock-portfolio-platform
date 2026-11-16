@@ -2721,3 +2721,19 @@ per-chart period/month controls). What's left, in rough priority order:
 **Template deletion and the bound-portfolios pop-up (2026-11-14).** A refused template delete returns 409 with a `code`. The pop-up opens only for `TEMPLATE_IN_USE`. The pop-up's own actions follow the lifecycle: an Active linked portfolio is soft-deleted first, and only a Soft-Delete one can be permanently deleted. A soft-deleted linked portfolio still blocks template deletion, because the link would otherwise be cleared and a restored portfolio would be left without its template.
 
 **Known gaps.** The Flex-Err resolution banner's Delete stays a permanent delete for abandoned creations, while the new trash icon on the Flex pills soft-deletes. The owner's trash icon was verified by unit tests only, not in the browser. Approved templates have no Delete button in the UI.
+
+## Summary Pills, Number Formats, Template Expander, and Sectors 7-12 ✅ Done (2026-11-15 → 2026-11-16, uncommitted at time of writing)
+
+**Summary pills (2026-11-15/16).** The twelve pills sit in two groups of six: Allocation's group above the Allocation card, Performance's group above the Performance card. Each group is one line on a wide screen and scrolls sideways on a narrow one. Labels are bold. Widths are flex weights (widest 5, the rest 4, i.e. 80%) with a 7rem minimum. The Top Sector $ + and $ − pills are two-line sector pills (name on a deep-teal chip, signed dollar change below) and use the top 12 sectors.
+
+**Number formats (2026-11-16).** `formatCurrency` shows whole dollars. `formatPrice` keeps two decimals for prices, average cost, and per-share values. Percentages show two decimals on the portfolio screens, the stock preview, and the Performance tooltips. The short "K" form is kept for sector headings, chart axes, and `fmtSectorTotal`. The Contrarian Comeback and Long-Term Analysis percentages still show one decimal; that is a known remaining difference.
+
+**Dates (2026-11-15).** Manage Portfolio and Portfolio Template use `formatDateTime24`: 24-hour time with fixed English month abbreviations, so September reads "Sep" in every locale.
+
+**Template expander (2026-11-15).** Each Portfolio Template row has a chevron button that opens the portfolios created from that template (owner, name, status, created, last updated, holdings, market value). It reuses the bound-portfolios endpoint and loads only when opened.
+
+**Manage Portfolio columns (2026-11-15).** Last Updated, Holdings, and Market Value, computed in SQL with correlated subqueries (`HOLDINGS_METRICS_SQL`), returned by both the admin list and the bound-portfolios endpoint.
+
+**Sectors 7-12 (2026-11-16).** `rankSectors`, `getTopSectors(holdings, count)`, `getNextSectors`, and `hasNextSectors` in `lib/sectorBars.ts`. The Allocation card and the Performance dropdown offer "7-12 Sectors" only when the portfolio has a seventh sector. Analysis of the Fidelity portfolios showed eleven sectors, so there is no value in a 13-18 view.
+
+**Known gaps.** The Contrarian Comeback and Long-Term Analysis percentages still show one decimal. The Performance view does not yet fall back to Top-6 automatically if a portfolio loses its seventh sector while 7-12 is selected.

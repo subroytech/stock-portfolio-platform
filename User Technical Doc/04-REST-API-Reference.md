@@ -259,7 +259,7 @@ Every portfolio has a `status`: `Active`, `In-Active` (reserved; nothing sets it
 
 | Method | Path | Purpose / notes |
 |---|---|---|
-| GET | `/portfolio-admin/portfolios` | Every portfolio across all users and statuses. Optional single-select query filters: `userId`, `portfolioType` (`Legacy`\|`Flex`), `status`. Default order: owner email, type (Legacy first), status, name. Each row includes `templateName` (null for Legacy and for Flex-Err portfolios). 400 on an invalid filter value. |
+| GET | `/portfolio-admin/portfolios` | Every portfolio across all users and statuses. Optional single-select query filters: `userId`, `portfolioType` (`Legacy`\|`Flex`), `status`. Default order: owner email, type (Legacy first), status, name. Each row includes `templateName` (null for Legacy and for Flex-Err portfolios), plus `updatedAt`, `holdingsCount`, and `marketValue` (the total market value of its holdings). 400 on an invalid filter value. |
 | POST | `/portfolio-admin/portfolios/:id/restore` | Only a `Soft-Delete` portfolio can be restored; it returns to `Active`. 409 if it isn't Soft-Delete, or if the owner has since created an Active portfolio with the same name. |
 | DELETE | `/portfolio-admin/portfolios/:id` | Permanent delete. Only a `Soft-Delete` portfolio is accepted (409 otherwise, and no row is touched). Child rows (holdings, cash, uploads, action history) are removed by the existing cascades. |
 
@@ -330,7 +330,7 @@ Every portfolio has a `status`: `Active`, `In-Active` (reserved; nothing sets it
 | Method | Path | Gate | Purpose / notes |
 |---|---|---|---|
 | DELETE | `/portfolio-templates/:id` | `portfolio_template:manage_status` | A refused delete now returns 409 with a `code`: `TEMPLATE_IN_USE` (any portfolio, including soft-deleted, is still bound) or `TEMPLATE_APPROVED` (Approved templates can't be deleted). The admin screen opens the bound-portfolios pop-up only for `TEMPLATE_IN_USE`. |
-| GET | `/portfolio-templates/:id/bound-portfolios` | `portfolio_template:manage_status` | Each entry now includes `status`. |
+| GET | `/portfolio-templates/:id/bound-portfolios` | `portfolio_template:manage_status` | Each entry now includes `status`, `updatedAt`, `holdingsCount`, and `marketValue`. Drives the portfolio list under each template row. |
 | DELETE | `/portfolio-templates/:id/bound-portfolios/:portfolioId` | `portfolio_template:manage_status` | Permanent delete. Only a `Soft-Delete` bound portfolio is accepted (409 for an Active one). |
 | POST | `/portfolio-templates/:id/bound-portfolios/:portfolioId/soft-delete` | `portfolio_template:manage_status` | New. Soft-deletes an Active portfolio bound to this template, so its permanent delete becomes available. 404 if no Active bound portfolio matches. |
 
