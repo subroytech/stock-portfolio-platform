@@ -122,7 +122,7 @@ describe('listManagedPortfolios (admin, single-select filters, default sort)', (
     mockQuery.mockResolvedValueOnce({ rows: [adminRow()] });
     await listManagedPortfolios({});
     const [sql, params] = mockQuery.mock.calls[0];
-    expect(sql).not.toMatch(/WHERE/);
+    expect(sql).not.toMatch(/p\.user_id = \$|p\.status = \$/);
     expect(sql).toMatch(/ORDER BY u\.email,\s*CASE WHEN p\.flex_template_status IS NULL THEN 0 ELSE 1 END,\s*p\.status,\s*p\.name/);
     expect(params).toEqual([]);
   });

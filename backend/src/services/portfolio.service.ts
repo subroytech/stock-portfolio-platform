@@ -412,7 +412,15 @@ export interface ManagedPortfolio {
   templateName: string | null;
   status: PortfolioStatus;
   createdAt: string;
+  updatedAt: string;
+  holdingsCount: number;
+  marketValue: number;
 }
+
+// Per-portfolio holdings count and total market value (2026-11-15). Correlated subqueries, so every
+// row gets its own numbers without a GROUP BY that would fight the rest of each query.
+const HOLDINGS_METRICS_SQL = `(SELECT count(*) FROM tx_holdings h WHERE h.portfolio_id = p.id) AS holdings_count,
+            (SELECT COALESCE(sum(h.current_value), 0) FROM tx_holdings h WHERE h.portfolio_id = p.id) AS market_value`;
 
 export interface ManagedPortfolioFilters {
   userId?: string;
@@ -440,10 +448,11 @@ export async function listManagedPortfolios(filters: ManagedPortfolioFilters): P
 
   const { rows } = await pool.query<{
     id: string; name: string; user_id: string; owner_email: string;
-    flex_template_status: string | null; status: PortfolioStatus; created_at: string; template_name: string | null;
+    flex_template_status: string | null; status: PortfolioStatus; created_at: string; updated_at: string;
+    template_name: string | null; holdings_count: string; market_value: string;
   }>(
-    `SELECT p.id, p.name, p.user_id, u.email AS owner_email, p.flex_template_status, p.status, p.created_at,
-            t.template_name
+    `SELECT p.id, p.name, p.user_id, u.email AS owner_email, p.flex_template_status, p.status, p.created_at, p.updated_at,
+            t.template_name, ${HOLDINGS_METRICS_SQL}
      FROM tx_portfolios p
      JOIN users u ON u.id = p.user_id
      LEFT JOIN m_portfolio_template_mapping_master t ON t.id = p.upload_template_id
@@ -463,6 +472,9 @@ export async function listManagedPortfolios(filters: ManagedPortfolioFilters): P
     templateName: r.template_name,
     status: r.status,
     createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    holdingsCount: Number(r.holdings_count),
+    marketValue: parseFloat(r.market_value),
   }));
 }
 
@@ -519,7 +531,10 @@ export interface BoundPortfolio {
   name: string;
   ownerEmail: string;
   createdAt: string;
+  updatedAt: string;
   status: PortfolioStatus;
+  holdingsCount: number;
+  marketValue: number;
 }
 
 // Admin Console's Portfolio Templates screen only - what's shown in the "bound portfolios"
@@ -528,15 +543,19 @@ export interface BoundPortfolio {
 // since that file is already imported BY this one (createPortfolioFlex/saveFlexTemplate) - the
 // reverse import would be circular.
 export async function listBoundPortfolios(templateId: string): Promise<BoundPortfolio[]> {
-  const { rows } = await pool.query<{ id: string; name: string; owner_email: string; created_at: string; status: PortfolioStatus }>(
-    `SELECT p.id, p.name, u.email AS owner_email, p.created_at, p.status
+  const { rows } = await pool.query<{
+    id: string; name: string; owner_email: string; created_at: string; updated_at: string; status: PortfolioStatus;
+    holdings_count: string; market_value: string;
+  }>(
+    `SELECT p.id, p.name, u.email AS owner_email, p.created_at, p.updated_at, p.status, ${HOLDINGS_METRICS_SQL}
      FROM tx_portfolios p JOIN users u ON u.id = p.user_id
      WHERE p.upload_template_id = $1
      ORDER BY p.created_at`,
     [templateId],
   );
   return rows.map((r) => ({
-    id: r.id, name: r.name, ownerEmail: r.owner_email, createdAt: r.created_at, status: r.status,
+    id: r.id, name: r.name, ownerEmail: r.owner_email, createdAt: r.created_at, updatedAt: r.updated_at,
+    status: r.status, holdingsCount: Number(r.holdings_count), marketValue: parseFloat(r.market_value),
   }));
 }
 

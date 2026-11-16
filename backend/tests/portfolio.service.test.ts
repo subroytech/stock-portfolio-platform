@@ -291,10 +291,13 @@ describe('deletePortfolio', () => {
 describe('listBoundPortfolios', () => {
   test('maps DB rows including the joined owner email', async () => {
     mockQuery.mockResolvedValue({
-      rows: [{ id: 'p1', name: 'Charles-Schwab', owner_email: 'a@b.com', created_at: 't1' }],
+      rows: [{ id: 'p1', name: 'Charles-Schwab', owner_email: 'a@b.com', created_at: 't1', updated_at: 't2', status: 'Active', holdings_count: '3', market_value: '1250.5' }],
     });
     const result = await listBoundPortfolios('template-1');
-    expect(result).toEqual([{ id: 'p1', name: 'Charles-Schwab', ownerEmail: 'a@b.com', createdAt: 't1' }]);
+    expect(result).toEqual([{
+      id: 'p1', name: 'Charles-Schwab', ownerEmail: 'a@b.com', createdAt: 't1', updatedAt: 't2',
+      status: 'Active', holdingsCount: 3, marketValue: 1250.5,
+    }]);
   });
 
   test('returns an empty array when nothing is bound', async () => {
