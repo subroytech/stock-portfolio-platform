@@ -4,8 +4,8 @@ import { Bar } from 'react-chartjs-2';
 import type { PortfolioHolding, RefreshPricesResult } from '../api/portfolios';
 import { applyOutlierFilter, calcCustomReturn, calcTabReturn, fmtMmDd, PERIOD_TABS } from '../lib/performanceMath';
 import type { PerformanceBar } from '../lib/performanceMath';
-import { formatAsOf } from '../lib/format';
-import { calcTrailingChange, fmtSignedDollarK, fmtSignedPercent, getTopSectors, isMarketOpenEastern, TRAILING_WINDOWS } from '../lib/sectorBars';
+import { formatAsOf, formatCurrency } from '../lib/format';
+import { calcTrailingChange, fmtSignedDollarK, fmtSignedPercent, getNextSectors, getTopSectors, hasNextSectors, isMarketOpenEastern, TRAILING_WINDOWS } from '../lib/sectorBars';
 import type { TrailingChange } from '../lib/sectorBars';
 import TopSectorBars from './TopSectorBars';
 import type { SectorBarChart } from './TopSectorBars';
@@ -45,9 +45,12 @@ function buildTop6Charts(
   history: RefreshPricesResult['performanceHistory'],
   format: 'dollar' | 'percent',
   days: number,
+  page: 'top6' | 'next6' = 'top6',
 ): SectorBarChart[] {
   const marketOpen = isMarketOpenEastern();
-  return getTopSectors(holdings).map((g) => {
+  // 'next6' is sectors 7-12 (2026-11-16); 'top6' is the largest six.
+  const sectors = page === 'next6' ? getNextSectors(holdings) : getTopSectors(holdings);
+  return sectors.map((g) => {
     const changes = g.holdings.map((h) => calcTrailingChange(h, history[h.symbol], days, marketOpen));
     const data = changes.map((c) => (c ? (format === 'dollar' ? c.dollar : c.percent) : null));
 
@@ -100,7 +103,9 @@ export default function PerformanceChart({ holdings, refreshResult, cachedHistor
   const [activeTab, setActiveTab] = useState<string>(history || !hasTodayData ? '1D' : 'TodayDollar');
   const [barMode, setBarMode] = useState<'outlier' | 'all'>('outlier');
   // Top-6 Sectors is the default view (2026-11-15); Outlier / All are reached via the view dropdown.
-  const [view, setView] = useState<'bars' | 'top6'>('top6');
+  // 'top6' and 'next6' (sectors 7-12, 2026-11-16) are the sector views; 'bars' is the Outlier / All view.
+  const [view, setView] = useState<'bars' | 'top6' | 'next6'>('top6');
+  const hasNext = hasNextSectors(holdings);
   const [valueFormat, setValueFormat] = useState<'dollar' | 'percent'>('dollar');
   const [windowDays, setWindowDays] = useState<number>(1);
   const [customDays, setCustomDays] = useState(30);
@@ -228,10 +233,10 @@ export default function PerformanceChart({ holdings, refreshResult, cachedHistor
           </div>
         )}
         <select
-          value={inBars ? barMode : 'top6'}
+          value={inBars ? barMode : view}
           onChange={(e) => {
             const choice = e.target.value;
-            if (choice === 'top6') setView('top6');
+            if (choice === 'top6' || choice === 'next6') setView(choice);
             else { setView('bars'); setBarMode(choice as 'outlier' | 'all'); }
           }}
           aria-label="Performance view"
@@ -239,6 +244,7 @@ export default function PerformanceChart({ holdings, refreshResult, cachedHistor
           className="ml-auto rounded-btn border border-border bg-bg-primary px-2 py-1 text-xs text-text-primary"
         >
           <option value="top6">Top-6 Sectors</option>
+          {hasNext && <option value="next6">7-12 Sectors</option>}
           <option value="outlier">Outlier</option>
           <option value="all">All</option>
         </select>
@@ -279,8 +285,8 @@ export default function PerformanceChart({ holdings, refreshResult, cachedHistor
             </div>
           ) : (
             <TopSectorBars
-              key={`top6-${valueFormat}-${windowDays}`}
-              charts={buildTop6Charts(holdings, history ?? {}, valueFormat, windowDays)}
+              key={`${view}-${valueFormat}-${windowDays}`}
+              charts={buildTop6Charts(holdings, history ?? {}, valueFormat, windowDays, view === 'next6' ? 'next6' : 'top6')}
               format={valueFormat}
             />
           )
@@ -309,7 +315,7 @@ export default function PerformanceChart({ holdings, refreshResult, cachedHistor
               maintainAspectRatio: false,
               plugins: {
                 legend: { display: false },
-                tooltip: { callbacks: { label: (ctx) => ` ${isDollar ? `$${(ctx.raw as number).toFixed(2)}` : `${(ctx.raw as number).toFixed(1)}%`}` } },
+                tooltip: { callbacks: { label: (ctx) => ` ${isDollar ? formatCurrency(ctx.raw as number) : `${(ctx.raw as number).toFixed(2)}%`}` } },
               },
               scales: {
                 y: { beginAtZero: true, ticks: { callback: (v) => (isDollar ? `$${v}` : `${v}%`) } },

@@ -127,8 +127,8 @@ describe('HoldingsTable', () => {
 
     test('defaults to the Major tab, showing allocations > 2.5% PLUS unknown (null) allocations, with a correct count and $ total', () => {
       render(<HoldingsTable holdings={sizedHoldings()} portfolioId="p1" />);
-      expect(screen.getByRole('button', { name: 'MAJOR ($3,000.00) in #2 Stocks' })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'MINOR ($3,000.00) in #2 Stocks' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'MAJOR ($3,000) in #2 Stocks' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'MINOR ($3,000) in #2 Stocks' })).toBeInTheDocument();
       expect(screen.getAllByText('BIG').length).toBeGreaterThan(0);
       expect(screen.getAllByText('UNKNOWN').length).toBeGreaterThan(0);
       expect(screen.queryByText('SMALL')).not.toBeInTheDocument();

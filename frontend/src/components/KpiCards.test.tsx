@@ -48,16 +48,16 @@ function makePortfolio(holdings: PortfolioHolding[]): PortfolioDetail {
 describe('KpiCards', () => {
   test('renders the 4 base KPI cards', () => {
     const portfolio = makePortfolio([makeHolding({})]);
-    render(<KpiCards portfolio={portfolio} />);
+    render(<><KpiCards portfolio={portfolio} group="allocation" /><KpiCards portfolio={portfolio} group="performance" /></>);
     expect(screen.getByTestId('kpi-total-value')).toBeInTheDocument();
     expect(screen.getByTestId('kpi-holdings-value')).toBeInTheDocument();
     expect(screen.getByTestId('kpi-cash')).toBeInTheDocument();
     expect(screen.getByTestId('kpi-total-gain-loss')).toBeInTheDocument();
   });
 
-  test('shows dash/None placeholders for the "today" pills when no holding has been refreshed yet - all 8 still render on one line', () => {
+  test('shows dash/None placeholders for the "today" pills when no holding has been refreshed yet - all 12 still render', () => {
     const portfolio = makePortfolio([makeHolding({ todayChangeDollar: null })]);
-    render(<KpiCards portfolio={portfolio} />);
+    render(<><KpiCards portfolio={portfolio} group="allocation" /><KpiCards portfolio={portfolio} group="performance" /></>);
     expect(within(screen.getByTestId('kpi-today-dollar')).getByText('—')).toBeInTheDocument();
     expect(within(screen.getByTestId('kpi-today-percent')).getByText('—')).toBeInTheDocument();
     expect(within(screen.getByTestId('kpi-top-gainer')).getByText('None')).toBeInTheDocument();
@@ -71,25 +71,25 @@ describe('KpiCards', () => {
       makeHolding({ id: 'h1', symbol: 'AAPL', currentValue: 1500, todayChangeDollar: 100 }),
       makeHolding({ id: 'h2', symbol: 'MSFT', currentValue: 2000, todayChangeDollar: -40 }),
     ]);
-    render(<KpiCards portfolio={portfolio} />);
-    expect(within(screen.getByTestId('kpi-today-dollar')).getByText('$60.00')).toBeInTheDocument();
+    render(<><KpiCards portfolio={portfolio} group="allocation" /><KpiCards portfolio={portfolio} group="performance" /></>);
+    expect(within(screen.getByTestId('kpi-today-dollar')).getByText('$60')).toBeInTheDocument();
   });
 
   test("Today's $ is colored green when positive, red when negative", () => {
     const positive = makePortfolio([makeHolding({ todayChangeDollar: 50, currentValue: 1000 })]);
-    const { unmount } = render(<KpiCards portfolio={positive} />);
+    const { unmount } = render(<><KpiCards portfolio={positive} group="allocation" /><KpiCards portfolio={positive} group="performance" /></>);
     expect(screen.getByTestId('kpi-today-dollar')).toHaveClass('text-success');
     unmount();
 
     const negative = makePortfolio([makeHolding({ todayChangeDollar: -50, currentValue: 1000 })]);
-    render(<KpiCards portfolio={negative} />);
+    render(<><KpiCards portfolio={negative} group="allocation" /><KpiCards portfolio={negative} group="performance" /></>);
     expect(screen.getByTestId('kpi-today-dollar')).toHaveClass('text-danger');
   });
 
   test("Today's % is today's $ relative to yesterday's value (currentValue minus today's own change)", () => {
     // currentValue 1100, todayChangeDollar 100 -> yesterday's value was 1000 -> +10%.
     const portfolio = makePortfolio([makeHolding({ currentValue: 1100, todayChangeDollar: 100 })]);
-    render(<KpiCards portfolio={portfolio} />);
+    render(<><KpiCards portfolio={portfolio} group="allocation" /><KpiCards portfolio={portfolio} group="performance" /></>);
     expect(within(screen.getByTestId('kpi-today-percent')).getByText('+10.00%')).toBeInTheDocument();
   });
 
@@ -98,7 +98,7 @@ describe('KpiCards', () => {
       makeHolding({ id: 'h1', currentValue: 1100, todayChangeDollar: 100 }), // yesterday: 1000
       makeHolding({ id: 'h2', symbol: 'MSFT', currentValue: 500, todayChangeDollar: null }), // yesterday: 500 (unchanged)
     ]);
-    render(<KpiCards portfolio={portfolio} />);
+    render(<><KpiCards portfolio={portfolio} group="allocation" /><KpiCards portfolio={portfolio} group="performance" /></>);
     // today $ = 100, yesterday total = 1000 + 500 = 1500 -> 6.67%
     expect(within(screen.getByTestId('kpi-today-percent')).getByText('+6.67%')).toBeInTheDocument();
   });
@@ -110,22 +110,22 @@ describe('KpiCards', () => {
       makeHolding({ id: 'h3', symbol: 'TSLA', todayChangeDollar: -30 }),
       makeHolding({ id: 'h4', symbol: 'NFLX', todayChangeDollar: -200 }),
     ]);
-    render(<KpiCards portfolio={portfolio} />);
+    render(<><KpiCards portfolio={portfolio} group="allocation" /><KpiCards portfolio={portfolio} group="performance" /></>);
     expect(within(screen.getByTestId('kpi-top-gainer')).getByText(/MSFT/)).toBeInTheDocument();
-    expect(within(screen.getByTestId('kpi-top-gainer')).getByText(/\$150\.00/)).toBeInTheDocument();
+    expect(within(screen.getByTestId('kpi-top-gainer')).getByText(/\$150\b/)).toBeInTheDocument();
     expect(within(screen.getByTestId('kpi-top-loser')).getByText(/NFLX/)).toBeInTheDocument();
-    expect(within(screen.getByTestId('kpi-top-loser')).getByText(/-\$200\.00/)).toBeInTheDocument();
+    expect(within(screen.getByTestId('kpi-top-loser')).getByText(/-\$200\b/)).toBeInTheDocument();
   });
 
   test('Top Gainer shows "None" when every refreshed holding is flat or down', () => {
     const portfolio = makePortfolio([makeHolding({ todayChangeDollar: -10 })]);
-    render(<KpiCards portfolio={portfolio} />);
+    render(<><KpiCards portfolio={portfolio} group="allocation" /><KpiCards portfolio={portfolio} group="performance" /></>);
     expect(within(screen.getByTestId('kpi-top-gainer')).getByText('None')).toBeInTheDocument();
   });
 
   test('Top Loser shows "None" when every refreshed holding is flat or up', () => {
     const portfolio = makePortfolio([makeHolding({ todayChangeDollar: 10 })]);
-    render(<KpiCards portfolio={portfolio} />);
+    render(<><KpiCards portfolio={portfolio} group="allocation" /><KpiCards portfolio={portfolio} group="performance" /></>);
     expect(within(screen.getByTestId('kpi-top-loser')).getByText('None')).toBeInTheDocument();
   });
 });

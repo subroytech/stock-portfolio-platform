@@ -3,7 +3,7 @@ import { useMomentumAnalysis } from '../api/momentum';
 import { useStrengthListCache } from '../api/contrarianFinder';
 import { ApiError } from '../api/client';
 import { calcKellySizing } from '../lib/kelly';
-import { formatCurrency, formatNumber, formatPercent } from '../lib/format';
+import { formatCurrency, formatNumber, formatPercent, formatPrice } from '../lib/format';
 import { useTickerHandoff } from '../lib/tickerHandoff';
 import StrengthListTable from '../components/StrengthListTable';
 import StockPreviewChart from '../components/StockPreviewChart';
@@ -94,7 +94,7 @@ export default function MomentumPage() {
               >
                 Long-Term Analysis
               </button>
-              <span className="ml-auto text-lg font-semibold text-text-primary">{formatCurrency(data.price)}</span>
+              <span className="ml-auto text-lg font-semibold text-text-primary">{formatPrice(data.price)}</span>
             </div>
 
             <div className="rounded-card bg-bg-card p-4 shadow-card">
@@ -128,22 +128,22 @@ export default function MomentumPage() {
                 <h2 className="mb-3 text-sm font-semibold text-text-primary">Indicators</h2>
                 <dl className="grid grid-cols-2 gap-y-1 text-sm text-text-secondary">
                   <div className="flex justify-between pr-2"><dt>RSI (14)</dt><dd className="text-text-primary">{data.rsi.toFixed(1)}</dd></div>
-                  <div className="flex justify-between pr-2"><dt>SMA 20</dt><dd className="text-text-primary">{formatCurrency(data.sma20)}</dd></div>
-                  <div className="flex justify-between pr-2"><dt>SMA 50</dt><dd className="text-text-primary">{formatCurrency(data.sma50)}</dd></div>
+                  <div className="flex justify-between pr-2"><dt>SMA 20</dt><dd className="text-text-primary">{formatPrice(data.sma20)}</dd></div>
+                  <div className="flex justify-between pr-2"><dt>SMA 50</dt><dd className="text-text-primary">{formatPrice(data.sma50)}</dd></div>
                   <div className="flex justify-between pr-2"><dt>MACD Hist</dt><dd className="text-text-primary">{data.macd.hist.toFixed(3)}</dd></div>
-                  <div className="flex justify-between pr-2"><dt>BB Upper</dt><dd className="text-text-primary">{formatCurrency(data.bb.upper)}</dd></div>
-                  <div className="flex justify-between pr-2"><dt>BB Lower</dt><dd className="text-text-primary">{formatCurrency(data.bb.lower)}</dd></div>
+                  <div className="flex justify-between pr-2"><dt>BB Upper</dt><dd className="text-text-primary">{formatPrice(data.bb.upper)}</dd></div>
+                  <div className="flex justify-between pr-2"><dt>BB Lower</dt><dd className="text-text-primary">{formatPrice(data.bb.lower)}</dd></div>
                   <div className="flex justify-between pr-2"><dt>Vol Ratio</dt><dd className="text-text-primary">{data.volRatio.toFixed(2)}x</dd></div>
-                  <div className="flex justify-between pr-2"><dt>Day Chg</dt><dd className="text-text-primary">{formatCurrency(data.dayChg)}</dd></div>
+                  <div className="flex justify-between pr-2"><dt>Day Chg</dt><dd className="text-text-primary">{formatPrice(data.dayChg)}</dd></div>
                 </dl>
               </div>
 
               <div className="rounded-card bg-bg-card p-4 shadow-card">
                 <h2 className="mb-3 text-sm font-semibold text-text-primary">Trade Setup</h2>
                 <dl className="grid grid-cols-2 gap-y-1 text-sm text-text-secondary">
-                  <div className="flex justify-between pr-2"><dt>Entry</dt><dd className="text-text-primary">{formatCurrency(data.entryLow)}–{formatCurrency(data.entryHigh)}</dd></div>
-                  <div className="flex justify-between pr-2"><dt>Stop Loss</dt><dd className="text-danger">{formatCurrency(data.stopLoss)}</dd></div>
-                  <div className="flex justify-between pr-2"><dt>Target</dt><dd className="text-success">{formatCurrency(data.target)}</dd></div>
+                  <div className="flex justify-between pr-2"><dt>Entry</dt><dd className="text-text-primary">{formatPrice(data.entryLow)}–{formatCurrency(data.entryHigh)}</dd></div>
+                  <div className="flex justify-between pr-2"><dt>Stop Loss</dt><dd className="text-danger">{formatPrice(data.stopLoss)}</dd></div>
+                  <div className="flex justify-between pr-2"><dt>Target</dt><dd className="text-success">{formatPrice(data.target)}</dd></div>
                   <div className="flex justify-between pr-2"><dt>R:R</dt><dd className="text-text-primary">{data.rr.toFixed(2)}</dd></div>
                 </dl>
 

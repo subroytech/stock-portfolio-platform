@@ -3,7 +3,7 @@ import { Line } from 'react-chartjs-2';
 import { useStockPreview } from '../api/stockPreview';
 import { ApiError } from '../api/client';
 import { buildChartSeries, computeReturns, type PeriodReturns } from '../lib/stockPreview';
-import { formatCurrency } from '../lib/format';
+import { formatPrice } from '../lib/format';
 
 interface StockPreviewBodyProps {
   symbol: string;
@@ -47,7 +47,7 @@ export default function StockPreviewBody({ symbol }: StockPreviewBodyProps) {
         <p className="text-lg font-semibold text-text-primary">{symbol}{quote?.name ? ` · ${quote.name}` : ''}</p>
         {quote && (
           <p className={`text-sm ${quote.changePercent >= 0 ? 'text-success' : 'text-danger'}`}>
-            {formatCurrency(quote.price)} ({quote.changePercent >= 0 ? '+' : ''}{quote.changePercent.toFixed(1)}%)
+            {formatPrice(quote.price)} ({quote.changePercent >= 0 ? '+' : ''}{quote.changePercent.toFixed(2)}%)
           </p>
         )}
       </div>
@@ -86,7 +86,7 @@ export default function StockPreviewBody({ symbol }: StockPreviewBodyProps) {
                   tooltip: {
                     callbacks: {
                       title: (items) => series.rawDates[items[0]?.dataIndex ?? 0] ?? '',
-                      label: (ctx) => ` Price: ${formatCurrency(Number(ctx.parsed.y))}`,
+                      label: (ctx) => ` Price: ${formatPrice(Number(ctx.parsed.y))}`,
                     },
                   },
                 },

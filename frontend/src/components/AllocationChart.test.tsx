@@ -117,3 +117,27 @@ describe('AllocationChart', () => {
     expect(screen.getByText('Other')).toBeInTheDocument();
   });
 });
+describe('7-12 Sectors option (2026-11-16)', () => {
+  function sectorHoldings(count: number): PortfolioHolding[] {
+    return Array.from({ length: count }, (_, i) => holding({
+      id: `h${i + 1}`, symbol: `S${i + 1}`, sector: `Sector ${String.fromCharCode(65 + i)}`, currentValue: (count - i) * 100,
+    }));
+  }
+
+  test('the 7-12 Sectors button appears only when showNextSectors is set', () => {
+    const { unmount } = render(<AllocationModeToggle mode="top6Sectors" onChange={() => {}} />);
+    expect(screen.queryByRole('button', { name: '7-12 Sectors' })).not.toBeInTheDocument();
+    unmount();
+
+    const onChange = vi.fn();
+    render(<AllocationModeToggle mode="top6Sectors" onChange={onChange} showNextSectors />);
+    expect(screen.getByRole('button', { name: '7-12 Sectors' })).toBeInTheDocument();
+  });
+
+  test('7-12 Sectors shows sectors 7 to 12, not the top six', () => {
+    render(<AllocationChart holdings={sectorHoldings(8)} mode="next6Sectors" />);
+    expect(screen.getByText(/^Sector G/)).toBeInTheDocument();
+    expect(screen.getByText(/^Sector H/)).toBeInTheDocument();
+    expect(screen.queryByText(/^Sector A/)).not.toBeInTheDocument();
+  });
+});

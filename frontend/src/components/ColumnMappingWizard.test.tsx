@@ -796,7 +796,7 @@ describe('ColumnMappingWizard', () => {
       await userEvent.click(screen.getByTestId('flex-inspect-data'));
       await screen.findByText('4. Preview (first 5 records)');
 
-      expect(screen.getByTestId('flex-preview-cash-amount')).toHaveTextContent('Cash detected: $500.00');
+      expect(screen.getByTestId('flex-preview-cash-amount')).toHaveTextContent('Cash detected: $500');
     });
   });
 

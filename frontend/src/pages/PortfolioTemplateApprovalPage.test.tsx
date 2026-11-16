@@ -429,7 +429,7 @@ describe('PortfolioTemplateApprovalPage', () => {
       renderPage();
 
       expect(await screen.findByText('Abandoned Mapping')).toBeInTheDocument();
-      expect(screen.getByText(/owner@b\.com.*3 holdings.*\$125\.50 cash/)).toBeInTheDocument();
+      expect(screen.getByText(/owner@b\.com.*3 holdings.*\$126 cash/)).toBeInTheDocument();
     });
 
     test('Delete requires confirmation, then calls DELETE /portfolio-templates/unattached-portfolios/:id', async () => {
@@ -486,4 +486,23 @@ describe('PortfolioTemplateApprovalPage', () => {
   });
 
 
+  test('the expander on a template row lists the portfolios created from it, with status, holdings, and value', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(client, 'apiFetch').mockImplementation((url: string) => {
+      if (url === '/portfolio-templates/admin/all') {
+        return Promise.resolve({ templates: [{ id: '1', templateName: 'Bound One', status: 'Pending Approval', createdBy: 'u1', createdAt: '2026-08-06T00:00:00Z', createdByEmail: 'u1@b.com' }] });
+      }
+      if (url === '/portfolio-templates/1/bound-portfolios') {
+        return Promise.resolve({ portfolios: [{ id: 'p1', name: 'Charles-Schwab', ownerEmail: 'owner@b.com', createdAt: '2026-08-07T00:00:00Z', updatedAt: '2026-09-01T00:00:00Z', status: 'Soft-Delete', holdingsCount: 4, marketValue: 12345.6 }] });
+      }
+      return Promise.resolve({});
+    });
+    renderPage();
+    await user.click(await screen.findByTestId('template-portfolios-toggle-1'));
+    const row = await screen.findByTestId('template-portfolio-row-p1');
+    expect(within(row).getByText('Soft-Delete')).toBeInTheDocument();
+    expect(within(row).getByText('4')).toBeInTheDocument();
+    expect(within(row).getByText(/12,346/)).toBeInTheDocument();
+  });
 });
+

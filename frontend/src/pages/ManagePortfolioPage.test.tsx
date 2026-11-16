@@ -6,9 +6,9 @@ import * as client from '../api/client';
 import ManagePortfolioPage from './ManagePortfolioPage';
 
 const PORTFOLIOS = [
-  { id: 'p1', name: 'Fidelity', ownerUserId: 'u1', ownerEmail: 'a@example.com', portfolioType: 'Legacy', status: 'Active', createdAt: 't1' },
-  { id: 'p2', name: 'Schwab', ownerUserId: 'u1', ownerEmail: 'a@example.com', portfolioType: 'Flex', status: 'Soft-Delete', createdAt: 't2' },
-  { id: 'p3', name: 'Empower', ownerUserId: 'u2', ownerEmail: 'b@example.com', portfolioType: 'Legacy', status: 'In-Active', createdAt: 't3' },
+  { id: 'p1', name: 'Fidelity', ownerUserId: 'u1', ownerEmail: 'a@example.com', portfolioType: 'Legacy', status: 'Active', createdAt: '2026-11-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', holdingsCount: 2, marketValue: 1000 },
+  { id: 'p2', name: 'Schwab', ownerUserId: 'u1', ownerEmail: 'a@example.com', portfolioType: 'Flex', status: 'Soft-Delete', createdAt: '2026-11-02T00:00:00Z', updatedAt: '2026-11-02T00:00:00Z', holdingsCount: 2, marketValue: 1000 },
+  { id: 'p3', name: 'Empower', ownerUserId: 'u2', ownerEmail: 'b@example.com', portfolioType: 'Legacy', status: 'In-Active', createdAt: '2026-11-03T00:00:00Z', updatedAt: '2026-11-03T00:00:00Z', holdingsCount: 2, marketValue: 1000 },
 ] as const;
 
 function renderPage() {
@@ -105,9 +105,9 @@ describe('ManagePortfolioPage', () => {
     const user = userEvent.setup();
     vi.spyOn(client, 'apiFetch').mockResolvedValue({
       portfolios: [
-        { id: 'p1', name: 'Fidelity', ownerUserId: 'u1', ownerEmail: 'a@example.com', portfolioType: 'Legacy', templateName: null, status: 'Active', createdAt: 't1' },
-        { id: 'p2', name: 'Schwab', ownerUserId: 'u1', ownerEmail: 'a@example.com', portfolioType: 'Flex', templateName: 'Charles-Schwab', status: 'Active', createdAt: 't2' },
-        { id: 'p3', name: 'Empower Flex', ownerUserId: 'u2', ownerEmail: 'b@example.com', portfolioType: 'Flex', templateName: 'Empower XLS', status: 'Active', createdAt: 't3' },
+        { id: 'p1', name: 'Fidelity', ownerUserId: 'u1', ownerEmail: 'a@example.com', portfolioType: 'Legacy', templateName: null, status: 'Active', createdAt: '2026-11-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', holdingsCount: 2, marketValue: 1000 },
+        { id: 'p2', name: 'Schwab', ownerUserId: 'u1', ownerEmail: 'a@example.com', portfolioType: 'Flex', templateName: 'Charles-Schwab', status: 'Active', createdAt: '2026-11-02T00:00:00Z', updatedAt: '2026-11-02T00:00:00Z', holdingsCount: 2, marketValue: 1000 },
+        { id: 'p3', name: 'Empower Flex', ownerUserId: 'u2', ownerEmail: 'b@example.com', portfolioType: 'Flex', templateName: 'Empower XLS', status: 'Active', createdAt: '2026-11-03T00:00:00Z', updatedAt: '2026-11-03T00:00:00Z', holdingsCount: 2, marketValue: 1000 },
       ],
     });
     renderPage();

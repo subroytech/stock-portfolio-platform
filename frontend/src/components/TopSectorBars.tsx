@@ -2,6 +2,7 @@ import '../lib/chartSetup';
 import type { ChartOptions } from 'chart.js';
 import { Bar } from 'react-chartjs-2';
 import { fmtDollarTick } from '../lib/sectorBars';
+import { formatCurrency } from '../lib/format';
 
 export interface SectorBarSeries {
   label: string;
@@ -43,9 +44,7 @@ function buildOptions(format: 'dollar' | 'percent'): ChartOptions<'bar'> {
         callbacks: {
           label: (ctx) => {
             const raw = Number(ctx.raw);
-            const formatted = format === 'dollar'
-              ? `${raw < 0 ? '-' : ''}$${Math.abs(raw).toFixed(2)}`
-              : `${raw.toFixed(2)}%`;
+            const formatted = format === 'dollar' ? formatCurrency(raw) : `${raw.toFixed(2)}%`;
             return ` ${ctx.dataset.label ? `${ctx.dataset.label}: ` : ''}${formatted}`;
           },
         },

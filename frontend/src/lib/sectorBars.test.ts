@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { PortfolioHolding } from '../api/portfolios';
 import type { PerformanceBar } from './performanceMath';
 import {
-  calcTrailingChange, fmtDollarTick, fmtSectorTotal, fmtSignedDollarK, fmtSignedPercent, getTopSectors, isMarketOpenEastern,
+  calcTrailingChange, fmtDollarTick, fmtSectorTotal, fmtSignedDollarK, fmtSignedPercent, getNextSectors, getTopSectors, hasNextSectors, isMarketOpenEastern,
 } from './sectorBars';
 
 function holding(overrides: Partial<PortfolioHolding> & { symbol: string }): PortfolioHolding {
@@ -137,5 +137,29 @@ describe('calcTrailingChange startValue', () => {
     const hist: PerformanceBar[] = [{ date: 'd0', close: 110 }, { date: 'd1', close: 100 }];
     const change = calcTrailingChange(holding({ symbol: 'X', quantity: 10, currentPrice: 999 }), hist, 1, false);
     expect(change?.startValue).toBe(1000);
+  });
+});
+describe('sector pages: top 6, 7-12, and top 12 (2026-11-16)', () => {
+  // Builds `count` single-holding sectors, largest first: sector 1 is worth the most.
+  function sectorHoldings(count: number): PortfolioHolding[] {
+    return Array.from({ length: count }, (_, i) => holding({
+      id: `h${i + 1}`, symbol: `S${i + 1}`, sector: `Sector ${i + 1}`, currentValue: (count - i) * 100,
+    }));
+  }
+
+  it('getTopSectors returns the first six, getNextSectors the seventh through twelfth', () => {
+    const holdings = sectorHoldings(10);
+    expect(getTopSectors(holdings).map((g) => g.sector)).toEqual(['Sector 1', 'Sector 2', 'Sector 3', 'Sector 4', 'Sector 5', 'Sector 6']);
+    expect(getNextSectors(holdings).map((g) => g.sector)).toEqual(['Sector 7', 'Sector 8', 'Sector 9', 'Sector 10']);
+  });
+
+  it('getTopSectors can return the top 12 for the summary pills', () => {
+    expect(getTopSectors(sectorHoldings(15), 12)).toHaveLength(12);
+  });
+
+  it('hasNextSectors is true only when there is a seventh sector', () => {
+    expect(hasNextSectors(sectorHoldings(6))).toBe(false);
+    expect(hasNextSectors(sectorHoldings(7))).toBe(true);
+    expect(getNextSectors(sectorHoldings(6))).toEqual([]);
   });
 });

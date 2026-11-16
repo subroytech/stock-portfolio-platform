@@ -6,7 +6,7 @@ import {
   type TemplateStatus,
 } from '../api/portfolioTemplates';
 import { ApiError } from '../api/client';
-import { formatCurrency, formatAsOf } from '../lib/format';
+import { formatCurrency, formatDateTime24 } from '../lib/format';
 
 const STATUS_STYLES: Record<string, string> = {
   'Pending Approval': 'bg-warning/10 text-warning',
@@ -15,6 +15,47 @@ const STATUS_STYLES: Record<string, string> = {
 };
 
 const ALL_STATUSES: TemplateStatus[] = ['Pending Approval', 'Approved', 'Rejected'];
+
+// Expander panel under a template row (2026-11-15): every portfolio created from this template, across
+// all statuses, with what an admin needs to judge them. Loaded only when the row is expanded.
+function TemplatePortfolioList({ templateId }: { templateId: string }) {
+  const { data: portfolios, isLoading, isError } = useBoundPortfolios(templateId);
+  if (isLoading) return <p className="text-xs text-text-secondary">Loading portfolios…</p>;
+  if (isError) return <p className="text-xs text-danger">Couldn&rsquo;t load the portfolios for this template.</p>;
+  if (!portfolios || portfolios.length === 0) {
+    return <p className="text-xs text-text-secondary">No portfolios have been created from this template yet.</p>;
+  }
+  return (
+    <div className="overflow-x-auto rounded-btn border border-border">
+      <table className="w-full text-xs" data-testid={`template-portfolios-${templateId}`}>
+        <thead>
+          <tr className="border-b border-border text-left text-text-secondary">
+            <th className="px-2 py-1">Owner</th>
+            <th className="px-2 py-1">Portfolio</th>
+            <th className="px-2 py-1">Status</th>
+            <th className="px-2 py-1">Created</th>
+            <th className="px-2 py-1">Last Updated</th>
+            <th className="px-2 py-1 text-right">Holdings</th>
+            <th className="px-2 py-1 text-right">Market Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {portfolios.map((p) => (
+            <tr key={p.id} data-testid={`template-portfolio-row-${p.id}`} className="border-b border-border last:border-0 text-text-primary">
+              <td className="px-2 py-1">{p.ownerEmail}</td>
+              <td className="px-2 py-1 font-medium">{p.name}</td>
+              <td className="px-2 py-1">{p.status}</td>
+              <td className="px-2 py-1 whitespace-nowrap">{formatDateTime24(p.createdAt)}</td>
+              <td className="px-2 py-1 whitespace-nowrap">{formatDateTime24(p.updatedAt)}</td>
+              <td className="px-2 py-1 text-right">{p.holdingsCount}</td>
+              <td className="px-2 py-1 text-right whitespace-nowrap">{formatCurrency(p.marketValue)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 interface BoundPortfoliosModalProps {
   templateId: string;
@@ -273,6 +314,8 @@ function UnattachedFlexPortfoliosSection() {
 export default function PortfolioTemplateApprovalPage() {
   const { data: templates, isLoading } = useAllTemplates();
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Separate from expandedId (the mapping detail): which template row has its portfolio list open (2026-11-15).
+  const [portfoliosOpenId, setPortfoliosOpenId] = useState<string | null>(null);
   const { data: detail, isLoading: detailLoading } = useTemplateDetail(expandedId);
   const setStatus = useSetTemplateStatus();
   const deleteTemplate = useDeleteTemplate();
@@ -371,6 +414,30 @@ export default function PortfolioTemplateApprovalPage() {
               <div>
                 <button
                   type="button"
+                  onClick={() => setPortfoliosOpenId(portfoliosOpenId === t.id ? null : t.id)}
+                  aria-expanded={portfoliosOpenId === t.id}
+                  aria-label="Show portfolios created from this template"
+                  title="Show portfolios created from this template"
+                  data-testid={`template-portfolios-toggle-${t.id}`}
+                  className="mr-2 rounded-btn border border-border bg-bg-card px-2 py-0.5 text-lg font-semibold leading-none text-accent hover:bg-bg-primary"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="18"
+                    height="18"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                    className={`transition-transform duration-150 ${portfoliosOpenId === t.id ? 'rotate-90' : ''}`}
+                  >
+                    <path d="M9 6l6 6-6 6" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
                   onClick={() => setExpandedId(expanded ? null : t.id)}
                   data-testid={`template-row-${t.id}`}
                   className="font-medium text-text-primary hover:underline"
@@ -379,7 +446,7 @@ export default function PortfolioTemplateApprovalPage() {
                 </button>
                 <span className={`ml-2 rounded-btn px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[t.status] ?? ''}`}>{t.status}</span>
                 <p className="mt-0.5 text-xs text-text-secondary">
-                  Created by {t.createdByEmail ?? 'unknown'} · {formatAsOf(t.createdAt)}
+                  Created by {t.createdByEmail ?? 'unknown'} · {formatDateTime24(t.createdAt)}
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -440,6 +507,13 @@ export default function PortfolioTemplateApprovalPage() {
                   || (deleteTemplate.error instanceof ApiError && deleteTemplate.error.message)
                   || 'Could not update this template.'}
               </p>
+            )}
+
+            {portfoliosOpenId === t.id && (
+              <div className="mt-3 border-t border-border pt-3">
+                <h3 className="mb-2 text-sm font-semibold text-text-primary">Portfolios created from this template</h3>
+                <TemplatePortfolioList templateId={t.id} />
+              </div>
             )}
 
             {expanded && (

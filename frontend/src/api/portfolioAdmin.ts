@@ -16,6 +16,9 @@ export interface ManagedPortfolio {
   templateName: string | null;
   status: PortfolioStatus;
   createdAt: string;
+  updatedAt: string;
+  holdingsCount: number;
+  marketValue: number;
 }
 
 export const MANAGED_PORTFOLIOS_QUERY_KEY = ['portfolio-admin', 'portfolios'] as const;

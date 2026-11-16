@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { PortfolioHolding } from '../api/portfolios';
-import { formatCurrency, formatNumber, formatPercent, gainLossColorClass } from '../lib/format';
+import { formatCurrency, formatNumber, formatPercent, formatPrice, gainLossColorClass } from '../lib/format';
 import TransactionHistoryTable from './TransactionHistoryTable';
 
 interface HoldingsTableProps {
@@ -159,9 +159,9 @@ export default function HoldingsTable({ holdings, portfolioId, onSymbolClick }: 
             </div>
             <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-text-secondary">
               <div className="flex justify-between"><dt>Sector</dt><dd>{h.sector ?? '—'}</dd></div>
-              <div className="flex justify-between"><dt>Avg cost</dt><dd>{formatCurrency(h.purchasePrice)}</dd></div>
-              <div className="flex justify-between"><dt>Price</dt><dd>{formatCurrency(h.currentPrice)}</dd></div>
-              <div className="flex justify-between"><dt>Alloc</dt><dd>{h.allocationPct != null ? `${h.allocationPct.toFixed(1)}%` : '—'}</dd></div>
+              <div className="flex justify-between"><dt>Avg cost</dt><dd>{formatPrice(h.purchasePrice)}</dd></div>
+              <div className="flex justify-between"><dt>Price</dt><dd>{formatPrice(h.currentPrice)}</dd></div>
+              <div className="flex justify-between"><dt>Alloc</dt><dd>{h.allocationPct != null ? `${h.allocationPct.toFixed(2)}%` : '—'}</dd></div>
             </dl>
           </div>
         ))}
@@ -195,12 +195,12 @@ export default function HoldingsTable({ holdings, portfolioId, onSymbolClick }: 
                 <td className="whitespace-nowrap px-3 py-2 text-text-secondary">{h.name ?? '—'}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-text-secondary">{h.sector ?? '—'}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-right">{formatNumber(h.quantity)}</td>
-                <td className="whitespace-nowrap px-3 py-2 text-right">{formatCurrency(h.purchasePrice)}</td>
-                <td className="whitespace-nowrap px-3 py-2 text-right">{formatCurrency(h.currentPrice)}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-right">{formatPrice(h.purchasePrice)}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-right">{formatPrice(h.currentPrice)}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-right">{formatCurrency(h.currentValue)}</td>
                 <td className={`whitespace-nowrap px-3 py-2 text-right ${gainLossColorClass(h.gainLoss)}`}>{formatCurrency(h.gainLoss)}</td>
                 <td className={`whitespace-nowrap px-3 py-2 text-right ${gainLossColorClass(h.returnPct)}`}>{formatPercent(h.returnPct)}</td>
-                <td className="whitespace-nowrap px-3 py-2 text-right">{h.allocationPct != null ? `${h.allocationPct.toFixed(1)}%` : '—'}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-right">{h.allocationPct != null ? `${h.allocationPct.toFixed(2)}%` : '—'}</td>
               </tr>
             ))}
           </tbody>

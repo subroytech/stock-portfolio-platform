@@ -15,10 +15,10 @@ export interface SectorGroup {
   totalValue: number;
 }
 
-// Ranks sectors by total current value and keeps the largest `count`. A holding with no sector
-// falls back to its own symbol, matching the existing "By Sector" pie in AllocationChart.
-// Holdings inside each sector are sorted by value, largest first.
-export function getTopSectors(holdings: PortfolioHolding[], count = TOP_SECTOR_COUNT): SectorGroup[] {
+// Every sector, ranked by total current value (largest first). A holding with no sector falls back to
+// its own symbol, matching the existing "By Sector" pie in AllocationChart. Holdings inside each sector
+// are sorted by value, largest first.
+export function rankSectors(holdings: PortfolioHolding[]): SectorGroup[] {
   const groups = new Map<string, PortfolioHolding[]>();
   for (const h of holdings) {
     const key = h.sector || h.symbol;
@@ -32,8 +32,22 @@ export function getTopSectors(holdings: PortfolioHolding[], count = TOP_SECTOR_C
       holdings: [...hs].sort((a, b) => b.currentValue - a.currentValue),
       totalValue: hs.reduce((sum, h) => sum + h.currentValue, 0),
     }))
-    .sort((a, b) => b.totalValue - a.totalValue)
-    .slice(0, count);
+    .sort((a, b) => b.totalValue - a.totalValue);
+}
+
+// The largest `count` sectors (default 6). Used by the Top-6 views and by the summary pills (top 12).
+export function getTopSectors(holdings: PortfolioHolding[], count = TOP_SECTOR_COUNT): SectorGroup[] {
+  return rankSectors(holdings).slice(0, count);
+}
+
+// Sectors 7-12 (2026-11-16): the second page of six. Empty when the portfolio has six or fewer sectors.
+export function getNextSectors(holdings: PortfolioHolding[]): SectorGroup[] {
+  return rankSectors(holdings).slice(TOP_SECTOR_COUNT, TOP_SECTOR_COUNT * 2);
+}
+
+// The "7-12 Sectors" option is offered only when there's a seventh sector to show.
+export function hasNextSectors(holdings: PortfolioHolding[]): boolean {
+  return rankSectors(holdings).length > TOP_SECTOR_COUNT;
 }
 
 // US regular session: Mon-Fri, 9:30am-4:00pm America/New_York. No holiday calendar, same as the

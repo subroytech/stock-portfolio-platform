@@ -137,6 +137,9 @@ export interface BoundPortfolio {
   createdAt: string;
   // Lifecycle status (2026-11-14). Decides what the pop-up offers: Soft-Delete -> permanent delete, Active -> soft delete first.
   status: 'Active' | 'In-Active' | 'Soft-Delete';
+  updatedAt: string;
+  holdingsCount: number;
+  marketValue: number;
 }
 
 export function useBoundPortfolios(templateId: string | null) {

@@ -8,6 +8,7 @@ import UploadImportDialog from '../components/UploadImportDialog';
 import KpiCards from '../components/KpiCards';
 import AllocationChart, { AllocationModeToggle } from '../components/AllocationChart';
 import type { AllocationMode } from '../components/AllocationChart';
+import { hasNextSectors } from '../lib/sectorBars';
 import PerformanceChart from '../components/PerformanceChart';
 import HoldingsTable from '../components/HoldingsTable';
 import StockPreviewChart from '../components/StockPreviewChart';
@@ -99,29 +100,29 @@ export default function DashboardPage({ readOnly = false, portfolioFilter }: Das
 
         {selectedId && portfolio && (
           <>
-            <KpiCards portfolio={portfolio} />
-
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <div className="rounded-card bg-bg-card p-4 shadow-card">
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                  <h2 className="text-sm font-semibold text-text-primary">Allocation</h2>
-                  <AllocationModeToggle mode={allocationMode} onChange={setAllocationMode} />
-                </div>
-                {/* Fixed, not min - this is the reference height every mode
-                    (Sector/Stock/Today's $) fills via AllocationChart's
-                    PieBox, so the card's vertical size stays constant when
-                    switching modes instead of jumping around. */}
-                <div className="h-96">
-                  <AllocationChart holdings={portfolio.holdings} mode={allocationMode} />
+              {/* Left column: the six Allocation pills in one line, above the Allocation card. */}
+              <div className="flex min-w-0 flex-col gap-2">
+                <KpiCards portfolio={portfolio} group="allocation" />
+                <div className="rounded-card bg-bg-card p-4 shadow-card">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <h2 className="text-sm font-semibold text-text-primary">Allocation</h2>
+                    <AllocationModeToggle mode={allocationMode} onChange={setAllocationMode} showNextSectors={hasNextSectors(portfolio.holdings)} />
+                  </div>
+                  {/* Fixed height - every Allocation mode fills it, so the card never jumps when switching. */}
+                  <div className="h-96">
+                    <AllocationChart holdings={portfolio.holdings} mode={allocationMode} />
+                  </div>
                 </div>
               </div>
-              {/* flex column so the Performance card - stretched by the grid
-                  row to match Allocation's fixed h-96 above - passes that
-                  extra height down into the chart itself (flex-1) instead of
-                  leaving it as blank space below a short, fixed-height chart. */}
-              <div className="flex flex-col rounded-card bg-bg-card p-4 shadow-card">
-                <div className="min-h-0 flex-1">
-                  <PerformanceChart holdings={portfolio.holdings} refreshResult={refreshResult} cachedHistory={portfolio.performanceHistory} />
+              {/* Right column: the six Performance pills above the Performance card. The card fills the column
+                  height, which the grid row sets to match the Allocation column. */}
+              <div className="flex min-w-0 flex-col gap-2">
+                <KpiCards portfolio={portfolio} group="performance" />
+                <div className="flex flex-1 flex-col rounded-card bg-bg-card p-4 shadow-card">
+                  <div className="min-h-0 flex-1">
+                    <PerformanceChart holdings={portfolio.holdings} refreshResult={refreshResult} cachedHistory={portfolio.performanceHistory} />
+                  </div>
                 </div>
               </div>
             </div>

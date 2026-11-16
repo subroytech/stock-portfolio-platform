@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { usePortfolioTransactions } from '../api/portfolios';
 import type { TransactionHistoryEntry } from '../api/portfolios';
-import { formatCurrency, formatNumber, formatDateOnly } from '../lib/format';
+import { formatCurrency, formatNumber, formatDateOnly, formatPrice } from '../lib/format';
 
 interface TransactionHistoryTableProps {
   portfolioId: string;
@@ -148,7 +148,7 @@ export default function TransactionHistoryTable({ portfolioId }: TransactionHist
             </div>
             {t.name && <p className="text-xs text-text-muted">{t.name}</p>}
             <div className="mt-2 flex items-baseline justify-between text-sm text-text-secondary">
-              <span>{formatNumber(t.quantityDelta)} sh @ {formatCurrency(t.price)}</span>
+              <span>{formatNumber(t.quantityDelta)} sh @ {formatPrice(t.price)}</span>
               <span className="font-medium text-text-primary">{formatCurrency(signedValue(t))}</span>
             </div>
             <p className="mt-1 text-xs text-text-muted">{formatDateOnly(t.actionDateTime)}</p>
@@ -178,7 +178,7 @@ export default function TransactionHistoryTable({ portfolioId }: TransactionHist
                 <td className="max-w-[180px] truncate px-3 py-2 text-text-secondary" title={t.name ?? undefined}>{t.name ?? '—'}</td>
                 <td className={`whitespace-nowrap px-3 py-2 font-medium ${t.actionType === 'BUY' ? 'text-success' : 'text-danger'}`}>{t.actionType}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-right">{formatNumber(t.quantityDelta)}</td>
-                <td className="whitespace-nowrap px-3 py-2 text-right">{formatCurrency(t.price)}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-right">{formatPrice(t.price)}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-right">{formatCurrency(signedValue(t))}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-right text-text-secondary">{formatDateOnly(t.actionDateTime)}</td>
               </tr>

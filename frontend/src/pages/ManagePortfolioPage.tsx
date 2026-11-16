@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { ApiError } from '../api/client';
+import { formatCurrency, formatDateTime24 } from '../lib/format';
 import {
   useManagedPortfolios, usePermanentlyDeletePortfolio, useRestorePortfolio,
   type ManagedPortfolio, type ManagedPortfolioType,
@@ -148,13 +149,16 @@ export default function ManagePortfolioPage() {
               <th className="px-3 py-2">Portfolio Template</th>
               <th className="px-3 py-2">Portfolio Name</th>
               <th className="px-3 py-2">Status</th>
+              <th className="px-3 py-2">Last Updated</th>
+              <th className="px-3 py-2 text-right">Holdings</th>
+              <th className="px-3 py-2 text-right">Market Value</th>
               <th className="px-3 py-2 text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-3 py-4 text-center text-text-secondary">No portfolios match these filters.</td>
+                <td colSpan={9} className="px-3 py-4 text-center text-text-secondary">No portfolios match these filters.</td>
               </tr>
             )}
             {rows.map((p) => (
@@ -164,6 +168,9 @@ export default function ManagePortfolioPage() {
                 <td className="px-3 py-2">{p.templateName ?? '—'}</td>
                 <td className="px-3 py-2 font-medium">{p.name}</td>
                 <td className="px-3 py-2">{p.status}</td>
+                <td className="px-3 py-2 whitespace-nowrap">{formatDateTime24(p.updatedAt)}</td>
+                <td className="px-3 py-2 text-right">{p.holdingsCount}</td>
+                <td className="px-3 py-2 text-right whitespace-nowrap">{formatCurrency(p.marketValue)}</td>
                 <td className="px-3 py-2">
                   {p.status === 'Soft-Delete' && (
                     <div className="flex justify-end gap-1">

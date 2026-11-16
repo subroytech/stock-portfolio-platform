@@ -62,14 +62,14 @@ describe('TransactionHistoryTable', () => {
     vi.spyOn(client, 'apiFetch').mockResolvedValue({ transactions: [TRANSACTIONS[1]] }); // AAPL BUY, 10 @ $100
     renderTable();
     const row = await screen.findByTestId('transaction-row-2');
-    expect(within(row).getByText('$1,000.00')).toBeInTheDocument();
+    expect(within(row).getByText('$1,000')).toBeInTheDocument();
   });
 
   test('Value is negative for SELL', async () => {
     vi.spyOn(client, 'apiFetch').mockResolvedValue({ transactions: [TRANSACTIONS[0]] }); // MSFT SELL, 2 @ $200
     renderTable();
     const row = await screen.findByTestId('transaction-row-1');
-    expect(within(row).getByText('-$400.00')).toBeInTheDocument();
+    expect(within(row).getByText('-$400')).toBeInTheDocument();
   });
 
   test('renders the ticker Name column', async () => {

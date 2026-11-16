@@ -3,10 +3,10 @@ import { memo, useRef } from 'react';
 import { Pie } from 'react-chartjs-2';
 import type { PortfolioHolding } from '../api/portfolios';
 import { formatAsOf, formatWholeCurrency } from '../lib/format';
-import { fmtSectorTotal, getTopSectors } from '../lib/sectorBars';
+import { fmtSectorTotal, getNextSectors, getTopSectors } from '../lib/sectorBars';
 import TopSectorBars from './TopSectorBars';
 
-export type AllocationMode = 'sector' | 'stock' | 'todayDollar' | 'top6Sectors';
+export type AllocationMode = 'sector' | 'stock' | 'todayDollar' | 'top6Sectors' | 'next6Sectors';
 
 interface AllocationChartProps {
   holdings: PortfolioHolding[];
@@ -54,13 +54,21 @@ function Pill({ label, active, onClick }: { label: string; active: boolean; onCl
 // (alongside the heading) rather than inside AllocationChart itself, so the
 // toggle and the heading share one line instead of the toggle eating a row
 // of vertical space above the chart.
-export function AllocationModeToggle({ mode, onChange }: { mode: AllocationMode; onChange: (mode: AllocationMode) => void }) {
+export function AllocationModeToggle({ mode, onChange, showNextSectors = false }: {
+  mode: AllocationMode;
+  onChange: (mode: AllocationMode) => void;
+  // True only when the portfolio has a seventh sector (2026-11-16) - the 7-12 option is hidden otherwise.
+  showNextSectors?: boolean;
+}) {
   return (
     <div className="flex flex-wrap gap-1">
       <Pill label="Today's $" active={mode === 'todayDollar'} onClick={() => onChange('todayDollar')} />
       <Pill label="By Stock" active={mode === 'stock'} onClick={() => onChange('stock')} />
       <Pill label="By Sector" active={mode === 'sector'} onClick={() => onChange('sector')} />
       <Pill label="Top-6 Sectors" active={mode === 'top6Sectors'} onClick={() => onChange('top6Sectors')} />
+      {showNextSectors && (
+        <Pill label="7-12 Sectors" active={mode === 'next6Sectors'} onClick={() => onChange('next6Sectors')} />
+      )}
     </div>
   );
 }
@@ -240,9 +248,13 @@ function AllocationChart({ holdings, mode }: AllocationChartProps) {
     );
   }
 
-  // Top-6 Sectors: one horizontal bar chart per top sector, each bar a stock's current value.
-  if (mode === 'top6Sectors') {
-    const charts = getTopSectors(holdings).map((g) => ({
+  // Top-6 Sectors, and 7-12 Sectors (2026-11-16): one horizontal bar chart per sector, each bar a stock's current value.
+  if (mode === 'top6Sectors' || mode === 'next6Sectors') {
+    const sectors = mode === 'next6Sectors' ? getNextSectors(holdings) : getTopSectors(holdings);
+    if (sectors.length === 0) {
+      return <p className="text-sm text-text-secondary">This portfolio has no sectors 7-12.</p>;
+    }
+    const charts = sectors.map((g) => ({
       sector: g.sector,
       headerValue: { text: fmtSectorTotal(g.totalValue), tone: 'neutral' as const },
       labels: g.holdings.map((h) => h.symbol),
@@ -252,7 +264,7 @@ function AllocationChart({ holdings, mode }: AllocationChartProps) {
         data: g.holdings.map((h) => h.currentValue),
       }],
     }));
-    return <TopSectorBars key={`top6-${remountTick.current}`} charts={charts} format="dollar" />;
+    return <TopSectorBars key={`${mode}-${remountTick.current}`} charts={charts} format="dollar" />;
   }
 
   const grouped = new Map<string, number>();

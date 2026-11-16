@@ -1,5 +1,11 @@
+// Dollar values are shown as whole dollars (2026-11-15). Prices, average cost and quantities use formatPrice.
 export function formatCurrency(value: number): string {
-  return value.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+  return value.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0, minimumFractionDigits: 0 });
+}
+
+// Per-share prices and average cost - kept to two decimal places.
+export function formatPrice(value: number): string {
+  return value.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 export function formatPercent(value: number): string {
@@ -26,6 +32,19 @@ export function formatWholeCurrency(value: number): string {
 
 // Shared by DashboardPage's staleness banner and both charts' Today's-$
 // "as of" captions - all three read the same DB-persisted priceUpdatedAt.
+// 24-hour (military) date and time, e.g. "15 Nov 2026, 14:30". Used by the Manage Portfolio and Portfolio
+// Template screens (2026-11-15) so every timestamp there reads the same way.
+export function formatDateTime24(isoTimestamp: string): string {
+  const date = new Date(isoTimestamp);
+  if (Number.isNaN(date.getTime())) return '—';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    day: '2-digit', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date);
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${part('day')} ${MONTHS[Number(part('month')) - 1]} ${part('year')}, ${part('hour')}:${part('minute')}`;
+}
+
 export function formatAsOf(isoTimestamp: string): string {
   return new Date(isoTimestamp).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
 }

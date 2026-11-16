@@ -7,7 +7,7 @@ import {
   CANDLESTICK_INTERVALS, type CandlestickInterval, type CandlestickIndicators,
 } from '../api/candlestick';
 import { useSession } from '../api/auth';
-import { formatAsOf, formatCurrency } from '../lib/format';
+import { formatAsOf, formatPrice } from '../lib/format';
 import {
   HORIZON_INDICATORS, HORIZON_TITLES, INDICATOR_LABELS, INTERVAL_HORIZON, type IndicatorKey,
 } from '../lib/candlestickIndicators';
@@ -922,7 +922,7 @@ function PatternPanel({ bars, visiblePatterns, priceChartRef, layoutTick }: {
       {visibleMatches.map((match) => {
         const bar = chronological[match.index];
         const left = priceChartRef.current?.scales?.x?.getPixelForValue(match.index) ?? 0;
-        const detail = `O ${formatCurrency(bar.open)} · H ${formatCurrency(bar.high)} · L ${formatCurrency(bar.low)} · C ${formatCurrency(bar.close)}`;
+        const detail = `O ${formatPrice(bar.open)} · H ${formatPrice(bar.high)} · L ${formatPrice(bar.low)} · C ${formatPrice(bar.close)}`;
         const top = DOJI_FAMILY_PATTERN_KEYS.includes(match.pattern) ? '25%' : '75%';
         return (
           <Fragment key={`${match.index}-${match.pattern}`}>
@@ -1004,7 +1004,7 @@ function MultiCandlePatternPanel({ bars, visiblePatterns, priceChartRef, layoutT
         const bar = chronological[match.index];
         const key = `${match.index}-${match.pattern}`;
         const left = priceChartRef.current?.scales?.x?.getPixelForValue(match.index) ?? 0;
-        const detail = `O ${formatCurrency(bar.open)} · H ${formatCurrency(bar.high)} · L ${formatCurrency(bar.low)} · C ${formatCurrency(bar.close)}`;
+        const detail = `O ${formatPrice(bar.open)} · H ${formatPrice(bar.high)} · L ${formatPrice(bar.low)} · C ${formatPrice(bar.close)}`;
         return (
           <Fragment key={key}>
             {hoveredKey === key && (
