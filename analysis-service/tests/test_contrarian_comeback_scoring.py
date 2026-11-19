@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from app.models.contrarian_comeback import (
@@ -519,7 +521,11 @@ def test_cash_runway_tier_boundaries():
 # ─── analyze_insiders / analyze_grades — recent rows (Phase 2) ─────────────────
 
 def test_analyze_insiders_recent_only_includes_last_90_days_capped_at_5():
-    recent_date = "2026-07-01"
+    # Computed relative to "now" (10 days ago), not a hardcoded calendar date - a fixed date
+    # like "2026-07-01" is only "recent" (within analyze_insiders' own real 90-day cutoff) for
+    # as long as the test happens to run close to when it was written, and silently starts
+    # failing once real time moves past that 90-day window.
+    recent_date = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%d")
     stale_date = "2020-01-01"
     trades = [InsiderTrade(transactionDate=recent_date, transactionType="Sale", securitiesTransacted=1, price=1) for _ in range(6)]
     trades.append(InsiderTrade(transactionDate=stale_date, transactionType="Sale", securitiesTransacted=1, price=1))
@@ -529,7 +535,7 @@ def test_analyze_insiders_recent_only_includes_last_90_days_capped_at_5():
 
 
 def test_analyze_grades_recent_only_includes_last_90_days_capped_at_5():
-    recent_date = "2026-07-01"
+    recent_date = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%d")
     stale_date = "2020-01-01"
     grades = [GradeRecord(date=recent_date, gradingCompany=f"Firm{i}", newGrade="Buy", action="upgrade") for i in range(6)]
     grades.append(GradeRecord(date=stale_date, gradingCompany="OldFirm", newGrade="Buy", action="upgrade"))

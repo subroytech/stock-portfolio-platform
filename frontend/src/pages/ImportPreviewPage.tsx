@@ -10,8 +10,9 @@ interface LocationState {
   preview: ImportPreviewResult;
 }
 
-// Maps the as-parsed preview shape (no id/allocationPct/priceUpdatedAt — those
-// only exist once a real import writes to tx_holdings) into what
+// Maps the as-parsed preview shape (no id/allocationPct/priceUpdatedAt/
+// todayChangeDollar/todayChangePercent — those only exist once a real import
+// writes to tx_holdings) into what
 // HoldingsTable expects, so the preview reuses the same responsive
 // card/table component instead of a second, duplicate table.
 function toPreviewHoldings(preview: ImportPreviewResult): PortfolioHolding[] {
@@ -31,6 +32,8 @@ function toPreviewHoldings(preview: ImportPreviewResult): PortfolioHolding[] {
     returnPct: h.returnPct,
     allocationPct: total > 0 ? (h.currentValue / total) * 100 : null,
     priceUpdatedAt: null,
+    todayChangeDollar: null,
+    todayChangePercent: null,
   }));
 }
 
@@ -118,7 +121,7 @@ export default function ImportPreviewPage() {
           </div>
         )}
 
-        <HoldingsTable holdings={holdings} />
+        <HoldingsTable holdings={holdings} portfolioId={portfolioId} />
       </main>
     </div>
   );

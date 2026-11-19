@@ -1,5 +1,6 @@
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from './client';
+import { RATE_LIMIT_STATUS_QUERY_KEY } from './rateLimitStatus';
 
 // Mirrors analysis-service/app/models/long_term.py's LongTermAnalysisResponse
 // field-for-field — no shared-schema codegen in this repo, keep in sync by
@@ -112,8 +113,13 @@ export interface LongTermAnalysisResult {
 // triggered on-demand by a ticker lookup, not something to auto-refetch/
 // cache by symbol.
 export function useLongTermAnalysis() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (symbol: string) =>
       apiFetch<LongTermAnalysisResult>(`/analysis/long-term/${encodeURIComponent(symbol)}`),
+    // Long-Term Analysis counts against the combined rate limit (and is one of the most
+    // expensive single calls against it) - refresh the header indicator right after this
+    // settles rather than waiting for its own poll interval.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: RATE_LIMIT_STATUS_QUERY_KEY }),
   });
 }
