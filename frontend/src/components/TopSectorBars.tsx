@@ -22,6 +22,14 @@ export interface SectorBarChart {
 
 const TONE_CLASS = { gain: 'text-success', loss: 'text-danger', neutral: 'text-text-secondary' } as const;
 
+// Dollar headings (2026-11-16): an amount in thousands ("+$12.3K") is bold and larger; a whole-dollar
+// amount ("+$45") is regular weight and smaller. Anything else, such as a percentage, renders unchanged.
+function renderHeaderAmount(text: string) {
+  if (!/^[+\-−]?\$/.test(text)) return text;
+  if (text.endsWith('K')) return <span className="text-xs font-bold">{text}</span>;
+  return <span className="text-[9px] font-normal">{text}</span>;
+}
+
 // Caps bar thickness so a sector with one ticker doesn't render as one fat bar. Grouped
 // (multi-series) charts get thinner bars so their series still fit side by side.
 const MAX_BAR_THICKNESS_SINGLE = 22;
@@ -77,7 +85,7 @@ export default function TopSectorBars({ charts, format }: TopSectorBarsProps) {
             {c.sector}
             {c.headerValue && (
               <span className={`ml-1 ${TONE_CLASS[c.headerValue.tone]}`} data-testid="sector-header-value">
-                ({c.headerValue.text})
+                ({renderHeaderAmount(c.headerValue.text)})
               </span>
             )}
           </p>

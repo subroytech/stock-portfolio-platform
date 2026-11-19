@@ -104,9 +104,13 @@ export function fmtSectorTotal(v: number): string {
   return `${v < 0 ? '-' : ''}$${(Math.abs(v) / 1000).toFixed(1)}K`;
 }
 
-// Signed sector change for the Performance header: +12345 -> "+$12.3K", -4500 -> "-$4.5K".
+// Signed sector change for the Performance header: +12345 -> "+$12.3K", -4500 -> "-$4.5K". An amount too
+// small to show in thousands (it would read "0.0K") is shown as whole dollars instead, e.g. "+$45" (2026-11-16).
 export function fmtSignedDollarK(v: number): string {
-  return `${v >= 0 ? '+' : '-'}$${(Math.abs(v) / 1000).toFixed(1)}K`;
+  const sign = v >= 0 ? '+' : '-';
+  const thousands = (Math.abs(v) / 1000).toFixed(1);
+  if (thousands === '0.0') return `${sign}$${Math.round(Math.abs(v)).toLocaleString('en-US')}`;
+  return `${sign}$${thousands}K`;
 }
 
 // Signed sector percent change: 1.234 -> "+1.23%", -0.5 -> "-0.50%".

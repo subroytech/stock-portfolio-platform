@@ -124,7 +124,9 @@ describe('sector header formatters', () => {
   it('fmtSignedDollarK always carries a sign', () => {
     expect(fmtSignedDollarK(12345)).toBe('+$12.3K');
     expect(fmtSignedDollarK(-4500)).toBe('-$4.5K');
-    expect(fmtSignedDollarK(0)).toBe('+$0.0K');
+    expect(fmtSignedDollarK(0)).toBe('+$0');
+    expect(fmtSignedDollarK(45)).toBe('+$45');
+    expect(fmtSignedDollarK(-45)).toBe('-$45');
   });
   it('fmtSignedPercent always carries a sign, two decimals', () => {
     expect(fmtSignedPercent(1.234)).toBe('+1.23%');
