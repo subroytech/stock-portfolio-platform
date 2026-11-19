@@ -69,7 +69,8 @@ jobs:
 
   e2e:
     needs: backend
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to Ubuntu 26.04, which Playwright 1.58.2 can't install browser deps on.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: e2e
