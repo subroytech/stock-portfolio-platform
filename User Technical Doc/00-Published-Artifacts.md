@@ -32,4 +32,4 @@ and again 2026-10-25 (closing a 5-commit gap in `Architecture.md`/`User Manual.m
 that had accumulated 2026-10-07 through 10-12 — Candlestick Q&A's deterministic-first answer
 cascade, question templates, and admin-switchable LLM provider. The API Call Ledger's own content
 was reconfirmed, not changed — that work touched only Anthropic/OpenAI costs, outside its
-FMP/Finnhub-only scope).*
+FMP/Finnhub-only scope), and again 2026-11-18. That refresh brought the other four pages current with the repo as of 2026-11-16: the Platform Field Guide's Testing section (1146 backend / 920 frontend tests) and a note on the AI SDK's CommonJS-compatible pins; the Access & Roles Reference's portfolio lifecycle and `portfolio_admin:manage` permission; the Database Atlas's migrations 071–074 (`tx_portfolios.status`, the partial unique index on active names, the `USER_HELD` universe row, and the live sector join from `m_tickers`); and six new "Done" stages in the Rebuild Roadmap for November's work. The API Call Ledger was reconfirmed, not changed: the November changes don't alter the call formulas it documents.*
