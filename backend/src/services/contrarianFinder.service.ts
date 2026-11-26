@@ -26,12 +26,14 @@
 
 import env from '../config/env';
 import { pool } from '../db/pool';
-import { fmpGet, HistoricalBar } from './marketData.service';
+import { fmpGet, HistoricalBar, getProfiles } from './marketData.service';
 import { mwSMA, mwRSI, mwBB } from './momentum.service';
+import { getConfigInt } from './configProperty.service';
+import * as analysisService from './analysisService';
 
 export const CF_ETF_LIST: string[] = ['XLK', 'XLV', 'XLF', 'XLY', 'XLI', 'XLC', 'XLP', 'XLE', 'XLB', 'XLU', 'XLRE'];
 export const CF_BATCH = 125;
-export const CF_MAX = 450;
+export const CF_MAX = 600;
 export const CF_MAX_BATCHES = 3;
 export const CF_STRENGTH_LOOKBACK = 60; // bars needed for SMA50/RSI14 strength screen
 
@@ -89,8 +91,253 @@ export async function assembleUniverse(): Promise<UniverseEntry[]> {
     if (universe.length >= CF_MAX) break;
     (await fetchConstituents(etf)).forEach((s) => add(s, 4, etf));
   }
+  // Tier 5: symbols synced in from user portfolio holdings (syncHeldSymbolsToUniverse below) -
+  // last, so the curated sources always fill the universe first.
+  if (universe.length < CF_MAX) {
+    (await fetchConstituents('USER_HELD')).forEach((s) => add(s, 5, 'USER_HELD'));
+  }
 
   return universe;
+}
+
+export interface UniverseIndexInfo {
+  id: string;
+  description: string;
+}
+
+export interface UniverseStockRow {
+  symbol: string;
+  name: string | null;
+  sector: string | null;
+  marketCap: number | null;
+  indices: string[];
+}
+
+export interface UniverseTable {
+  indices: UniverseIndexInfo[];
+  stocks: UniverseStockRow[];
+}
+
+// Fixed display order (not DB row order, which Postgres/CockroachDB doesn't
+// guarantee) - matches the seed script's INDEX_DESCRIPTIONS ordering.
+const UNIVERSE_INDEX_ORDER = ['DJ30', 'NDX100', 'SP500', ...CF_ETF_LIST, 'USER_HELD'];
+
+// A reference table for the Contrarian Finder page's "Stock Universe" section
+// - distinct from assembleUniverse() above, which stays capped/dedup'd/single
+// -tier for the actual scan orchestration. This one shows EVERY index a stock
+// belongs to (many stocks are in more than one - e.g. AAPL is in DJ30, S&P
+// 500, and XLK), which assembleUniverse()'s "first index it matched" tier
+// can't represent.
+export async function getUniverseTable(): Promise<UniverseTable> {
+  const { rows: indexRows } = await pool.query<{ index_id: string; index_description: string }>(
+    'SELECT index_id, index_description FROM m_index_master',
+  );
+  const indices = UNIVERSE_INDEX_ORDER
+    .map((id) => indexRows.find((r) => r.index_id === id))
+    .filter((r): r is { index_id: string; index_description: string } => !!r)
+    .map((r) => ({ id: r.index_id, description: r.index_description }));
+
+  const { rows } = await pool.query<{ symbol: string; name: string | null; sector: string | null; market_cap: string | null; index_ids: string[] }>(`
+    SELECT ic.symbol, t.name, t.sector, t.market_cap, array_agg(ic.index_id ORDER BY ic.index_id) AS index_ids
+    FROM m_index_constituent ic
+    LEFT JOIN m_tickers t ON t.symbol = ic.symbol
+    GROUP BY ic.symbol, t.name, t.sector, t.market_cap
+  `);
+
+  const stocks = rows
+    .map((r) => ({
+      symbol: r.symbol, name: r.name, sector: r.sector,
+      marketCap: r.market_cap != null ? Number(r.market_cap) : null, // NUMERIC comes back as a string from pg
+      indices: r.index_ids,
+    }))
+    .sort((a, b) => b.indices.length - a.indices.length || a.symbol.localeCompare(b.symbol));
+
+  return { indices, stocks };
+}
+
+export interface TickerRefreshResult {
+  updated: number;
+  skipped: number;
+}
+
+// Shared by two consumers: "Run Scan (+ Mkt Cap)" (mode 'all' - piggybacks on
+// a real scan's own batch, refreshing every symbol in it regardless of
+// current state) and the Admin Console's Master Data "Delta Update" (mode
+// 'missing' - a lighter, standalone action that only touches gaps). Uses
+// getProfiles() (FMP /profile) as a single consistent source for all three
+// fields, rather than mixing in the scan's own /quote-sourced name/marketCap
+// - "+ Mkt Cap" is deliberately a heavier variant with its own progress bar,
+// so the extra FMP calls this costs are an accepted tradeoff, not an oversight.
+export async function refreshTickerDataBatch(
+  stocks: UniverseEntry[], apiKey: string, mode: 'missing' | 'all',
+): Promise<TickerRefreshResult> {
+  const symbols = stocks.map((s) => s.symbol);
+  let targetSymbols = symbols;
+
+  if (mode === 'missing') {
+    // LEFT JOIN (via unnest), not just "WHERE some column IS NULL" - a symbol
+    // with NO m_tickers row at all must also count as missing (exactly what
+    // portfolio-import's bare-insert path and brand-new universe symbols
+    // produce), not just an existing row with a null field.
+    const { rows } = await pool.query<{ symbol: string }>(
+      `SELECT s.symbol FROM unnest($1::text[]) AS s(symbol)
+       LEFT JOIN m_tickers t ON t.symbol = s.symbol
+       WHERE t.symbol IS NULL OR t.name IS NULL OR t.sector IS NULL OR t.market_cap IS NULL`,
+      [symbols],
+    );
+    targetSymbols = rows.map((r) => r.symbol);
+  }
+
+  if (targetSymbols.length === 0) return { updated: 0, skipped: symbols.length };
+
+  const profiles = await getProfiles(targetSymbols, apiKey);
+  const entries = Object.entries(profiles).filter(([, p]) => p.name || p.sector || p.marketCap != null);
+
+  if (entries.length > 0) {
+    // is_etf always gets the fresh value, not COALESCE-guarded like the other three columns -
+    // FMP always returns a definite true/false whenever it returns a profile at all, so
+    // there's never a "missing field, keep the old value" case to protect against here.
+    //
+    // For an ETF, FMP's own `sector` is the ISSUER's SEC classification (every ARK/iShares/
+    // Fidelity/etc. ETF comes back "Financial Services" regardless of what the fund actually
+    // tracks - confirmed live 2026-11-11, all 22 ETFs synced so far shared that one exact
+    // value) - `industry` (e.g. "Asset Management - Cryptocurrency" for IBIT) is FMP's own
+    // more specific field and is what's actually meaningful to store as this ETF's "sector".
+    // Stocks are untouched - they keep writing their real sector field exactly as before.
+    const values = entries.map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`).join(', ');
+    const params = entries.flatMap(([symbol, p]) => [
+      symbol, p.name || null, (p.isEtf && p.industry) ? p.industry : (p.sector || null), p.marketCap, p.isEtf,
+    ]);
+    await pool.query(
+      `INSERT INTO m_tickers (symbol, name, sector, market_cap, is_etf) VALUES ${values}
+       ON CONFLICT (symbol) DO UPDATE SET
+         name = COALESCE(excluded.name, m_tickers.name),
+         sector = COALESCE(excluded.sector, m_tickers.sector),
+         market_cap = COALESCE(excluded.market_cap, m_tickers.market_cap),
+         is_etf = excluded.is_etf,
+         updated_at = now()`,
+      params,
+    );
+  }
+
+  return { updated: entries.length, skipped: symbols.length - entries.length };
+}
+
+export interface HeldSymbolSyncCandidate {
+  symbol: string;
+  alreadyInUniverse: boolean;
+}
+
+// Distinct tx_holdings symbols needing attention: either not yet in m_index_constituent under
+// any index_id, or m_tickers has no usable row yet. The literal string 'Unknown' is treated as
+// equivalent to NULL - parser.service.ts writes that exact sentinel into both
+// tx_holdings.sector and m_tickers.sector when it has no real data, so a plain IS NULL check
+// (what refreshTickerDataBatch's 'missing' mode uses) would never re-attempt a symbol that
+// already has a stale 'Unknown' row sitting in m_tickers (e.g. an ETF held in a portfolio but
+// never scanned or ticker-refreshed before).
+export async function getHeldSymbolSyncCandidates(): Promise<HeldSymbolSyncCandidate[]> {
+  const { rows } = await pool.query<{ symbol: string; already_in_universe: boolean }>(`
+    SELECT h.symbol,
+           EXISTS (SELECT 1 FROM m_index_constituent ic WHERE ic.symbol = h.symbol) AS already_in_universe
+    FROM (SELECT DISTINCT symbol FROM tx_holdings) h
+    LEFT JOIN m_tickers t ON t.symbol = h.symbol
+    WHERE NOT EXISTS (SELECT 1 FROM m_index_constituent ic WHERE ic.symbol = h.symbol)
+       OR t.symbol IS NULL OR t.name IS NULL
+       OR t.sector IS NULL OR t.sector = 'Unknown'
+       OR t.market_cap IS NULL
+    ORDER BY h.symbol
+  `);
+  return rows.map((r) => ({ symbol: r.symbol, alreadyInUniverse: r.already_in_universe }));
+}
+
+export interface SyncHeldSymbolsResult {
+  added: string[];             // newly inserted into m_index_constituent under USER_HELD
+  alreadyInUniverse: string[]; // enriched only - already present in some index
+  excludedAsEtf: string[];     // enriched in m_tickers, but FMP confirms isEtf - not added
+  excludedAsCrypto: string[]; // identified as crypto before any FMP call was spent on them
+  validationFailed: string[]; // FMP returned nothing usable at all - the live validation gate
+  capExceeded: string[];      // validated and stock-eligible, but CF_MAX was already full
+}
+
+const EMPTY_SYNC_RESULT: SyncHeldSymbolsResult = {
+  added: [], alreadyInUniverse: [], excludedAsEtf: [], excludedAsCrypto: [], validationFailed: [], capExceeded: [],
+};
+
+// Admin Console "Master Data" action: pulls tx_holdings symbols the scan universe doesn't know
+// about yet into m_index_constituent under the USER_HELD index, after validating each one live
+// via FMP - never a hardcoded exclusion list, so a symbol that's genuinely a real, currently-
+// tradeable stock gets added regardless of what any past snapshot assumed, and a symbol that
+// isn't (private, delisted, or simply unrecognized by FMP) is excluded automatically by the
+// same check. ETFs and crypto are identified and excluded from the SCAN UNIVERSE specifically
+// (per explicit direction) - they still get their m_tickers row enriched either way, so
+// Portfolio's own sector display benefits regardless of which bucket a symbol lands in.
+export async function syncHeldSymbolsToUniverse(apiKey: string): Promise<SyncHeldSymbolsResult> {
+  const candidates = await getHeldSymbolSyncCandidates();
+  if (candidates.length === 0) return EMPTY_SYNC_RESULT;
+
+  // Crypto pre-filter, cheap and done before spending any FMP call: a symbol already resolved
+  // to sector='Crypto' at import time (parser.service.ts's own crypto detection) doesn't need
+  // a live profile lookup to know it's not a stock. This is a convenience fast-path, not the
+  // sole gate - anything it misses still falls through to validationFailed below, since FMP's
+  // equity /profile endpoint has no concept of a bare crypto symbol like BTC/ETH to begin with.
+  const symbols = candidates.map((c) => c.symbol);
+  const { rows: cryptoRows } = await pool.query<{ symbol: string }>(
+    `SELECT DISTINCT symbol FROM tx_holdings WHERE symbol = ANY($1) AND sector = 'Crypto'`,
+    [symbols],
+  );
+  const cryptoSet = new Set(cryptoRows.map((r) => r.symbol));
+  const excludedAsCrypto = candidates.filter((c) => cryptoSet.has(c.symbol)).map((c) => c.symbol);
+  const needsFmpCheck = candidates.filter((c) => !cryptoSet.has(c.symbol));
+
+  if (needsFmpCheck.length === 0) return { ...EMPTY_SYNC_RESULT, excludedAsCrypto };
+
+  // UniverseEntry's tier/source are never read inside refreshTickerDataBatch (it only does
+  // stocks.map(s => s.symbol)) - stubbing them is harmless, no new overload needed.
+  const stubs: UniverseEntry[] = needsFmpCheck.map((c) => ({ symbol: c.symbol, tier: 0, source: 'USER_HELD' }));
+
+  // mode 'all', NOT 'missing': getHeldSymbolSyncCandidates() above already did its own
+  // ('Unknown'-aware) target selection. Calling 'missing' mode here would re-run its weaker,
+  // IS-NULL-only filter and let a stale 'Unknown' row slip through unenriched a second time.
+  await refreshTickerDataBatch(stubs, apiKey, 'all');
+
+  const checkSymbols = needsFmpCheck.map((c) => c.symbol);
+  const { rows: enrichedRows } = await pool.query<{ symbol: string; is_etf: boolean }>(
+    `SELECT symbol, is_etf FROM m_tickers
+     WHERE symbol = ANY($1) AND sector IS DISTINCT FROM 'Unknown'
+       AND (name IS NOT NULL OR sector IS NOT NULL OR market_cap IS NOT NULL)`,
+    [checkSymbols],
+  );
+  const enrichedMap = new Map(enrichedRows.map((r) => [r.symbol, r.is_etf]));
+
+  const validationFailed = needsFmpCheck.filter((c) => !enrichedMap.has(c.symbol)).map((c) => c.symbol);
+  const enriched = needsFmpCheck.filter((c) => enrichedMap.has(c.symbol));
+  const excludedAsEtf = enriched.filter((c) => enrichedMap.get(c.symbol) === true).map((c) => c.symbol);
+  const stockCandidates = enriched.filter((c) => enrichedMap.get(c.symbol) !== true);
+  const alreadyInUniverse = stockCandidates.filter((c) => c.alreadyInUniverse).map((c) => c.symbol);
+  const eligibleForAdd = stockCandidates.filter((c) => !c.alreadyInUniverse).map((c) => c.symbol);
+
+  // DISTINCT, not a bare count(*) - CF_MAX caps assembleUniverse()'s own DEDUPED symbol count
+  // (add()'s `universe.length >= CF_MAX` check), but m_index_constituent itself is a join table
+  // with one row per (index_id, symbol) pair - the same stock held under DJ30+SP500+XLK is 3
+  // raw rows but 1 real universe slot. Confirmed live 2026-11-06: 738 raw rows vs. 458 distinct
+  // symbols - a bare count(*) would have reported zero headroom (738 > 600) even though ~142
+  // real slots remained, misclassifying every eligible candidate as capExceeded.
+  const { rows: countRows } = await pool.query<{ count: string }>('SELECT count(DISTINCT symbol) FROM m_index_constituent');
+  const headroom = Math.max(0, CF_MAX - Number(countRows[0].count));
+  const toAdd = eligibleForAdd.slice(0, headroom);
+  const capExceeded = eligibleForAdd.slice(headroom);
+
+  let added: string[] = [];
+  if (toAdd.length > 0) {
+    const values = toAdd.map((_, i) => `('USER_HELD', $${i + 1})`).join(', ');
+    await pool.query(
+      `INSERT INTO m_index_constituent (index_id, symbol) VALUES ${values} ON CONFLICT (index_id, symbol) DO NOTHING`,
+      toAdd,
+    );
+    added = toAdd;
+  }
+
+  return { added, alreadyInUniverse, excludedAsEtf, excludedAsCrypto, validationFailed, capExceeded };
 }
 
 export interface ScanQuality {
@@ -234,4 +481,292 @@ export function filterCandidates(results: ScanResult[], threshold: number): Scan
   return results
     .filter((r) => !r.filterFail && !r.noData && r.changePct !== undefined && r.changePct <= -threshold)
     .sort((a, b) => (a.changePct as number) - (b.changePct as number));
+}
+
+// ── Python-extraction path (2026-07-29) ─────────────────────────────────────
+// scanStock()/scanBatch() above stay untouched as the rollback path (same
+// precedent as momentum.service.ts's assembleMomentumAnalysis). These new
+// functions split scanStock's fetch (stays here, Node owns all FMP calls)
+// from its scoring (moved to analysis-service/app/scoring/contrarian_finder.py,
+// which reuses the already-ported mw_sma/mw_rsi/mw_bb from momentum.py).
+
+export interface RawQuoteData {
+  price: number | null;
+  marketCap: number | null;
+  name: string | null;
+  sector: string | null;
+  volume: number | null;
+  avgVolume: number | null;
+}
+
+export interface RawHistoricalBar {
+  date: string | null;
+  close: number | null;
+  low: number | null;
+}
+
+export interface RawStockData {
+  symbol: string;
+  quote: RawQuoteData | null;
+  historicalBars: RawHistoricalBar[];
+}
+
+// The FMP-fetch half of today's scanStock() (its two fmpGet calls), with no
+// scoring - just normalizes the raw response into RawStockData. Bars are
+// NOT filtered/dropped here even when close/low fail to parse (kept as
+// null) - the scoring step needs the same array length/order as today's
+// scanStock for its index-based changePct lookups (hist[0], hist[scanDays]).
+export async function fetchStockData(sym: string, key: string, scanDays = 7): Promise<RawStockData> {
+  const limit = Math.max(scanDays + 2, CF_STRENGTH_LOOKBACK);
+  const [qr, hr] = await Promise.allSettled([
+    fmpGet<any>(`${env.fmpBaseUrl}/quote?symbol=${sym}&apikey=${key}`),
+    fmpGet<any>(`${env.fmpBaseUrl}/historical-price-eod/full?symbol=${sym}&limit=${limit}&apikey=${key}`),
+  ]);
+
+  const q = (qr.status === 'fulfilled' && qr.value) ? (Array.isArray(qr.value) ? qr.value[0] : qr.value) : null;
+  const histRaw: HistoricalBar[] = (hr.status === 'fulfilled' && hr.value) ? (Array.isArray(hr.value) ? hr.value : (hr.value?.historical || [])) : [];
+
+  const quote: RawQuoteData | null = q ? {
+    price: q.price ?? null,
+    marketCap: q.marketCap ?? null,
+    name: q.name || null,
+    sector: q.sector || null,
+    volume: q.volume ?? null,
+    avgVolume: q.avgVolume ?? null,
+  } : null;
+
+  const parseOrNull = (v: unknown): number | null => {
+    const n = parseFloat(String(v));
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const historicalBars: RawHistoricalBar[] = histRaw.map((h) => ({
+    date: h.date != null ? String(h.date) : null,
+    close: parseOrNull(h.close),
+    low: parseOrNull(h.low),
+  }));
+
+  return { symbol: sym, quote, historicalBars };
+}
+
+// Replaces today's scanBatch() as what the controller actually calls: fetches
+// the sector map (DB, unchanged) and every stock's raw data (FMP, unchanged)
+// in parallel, sends the whole batch's raw data to analysis-service in ONE
+// call, then overlays the sector-map fallback onto Python's results - same
+// `sectorMap[symbol] || result.sector` logic as today, just applied after the
+// Python round-trip instead of after scanStock.
+export async function assembleScanBatch(stocks: UniverseEntry[], key: string, quality: ScanQuality, scanDays?: number): Promise<ScanResult[]> {
+  const sectorMap = await fetchSectorMap(stocks.map((s) => s.symbol));
+
+  // fetchStockData never rejects (same contract as today's scanStock - a
+  // failed FMP call just becomes a null quote/empty history, scored by
+  // Python as a natural filterFail rather than surfaced as an error here),
+  // so a plain Promise.all is enough - no allSettled/error-partitioning needed.
+  const rawData = await Promise.all(stocks.map((stock) => fetchStockData(stock.symbol, key, scanDays)));
+
+  const scored = rawData.length > 0
+    ? await analysisService.computeContrarianFinderScanBatch({ stocks: rawData, quality, scanDays: scanDays ?? 7 })
+    : [];
+
+  const bySymbol = new Map(scored.map((r) => [r.symbol, r]));
+
+  // Defensive, not speculative: this guards against analysis-service
+  // returning fewer rows than requested (e.g. a symbol dropped mid-batch),
+  // not against a failure mode fetchStockData can actually produce.
+  return stocks.map((stock) => {
+    const result = bySymbol.get(stock.symbol);
+    if (!result) return { symbol: stock.symbol, filterFail: true, error: true };
+    result.source = stock.source;
+    result.sector = sectorMap[stock.symbol] || result.sector;
+    return result;
+  });
+}
+
+export interface LastScanRecord {
+  completedAt: string;
+  universeSize: number;
+  scanned: number;
+  params: unknown;
+  results: unknown;
+}
+
+export type ContrarianRunTier = 'admin' | 'user';
+
+// Admin/admin-master runs keep a rolling history, capped here rather than
+// via CockroachDB's row-level TTL (added 2026-08-05) - a count-based cap,
+// not a time-based one, since scan cadence isn't predictable enough for a
+// TTL window to reliably mean "last 60 runs."
+//
+// Config Properties framework (2026-08-24) - this limit is now admin-configurable via
+// m_config_property (key: contrarian_finder_admin_history_retention_count, seeded to 60 in
+// migration 027) instead of a hardcoded constant. ADMIN_HISTORY_LIMIT_FALLBACK is a defensive
+// last resort only: getConfigInt never throws, but if the config row is ever missing or
+// unparseable it logs a warning and falls back to this literal, rather than letting the prune
+// query below run with undefined/NaN/0 - this is a business-critical cap, not something that
+// should silently no-op (unbounded growth) or wipe the whole history.
+const ADMIN_HISTORY_RETENTION_KEY = 'contrarian_finder_admin_history_retention_count';
+const ADMIN_HISTORY_LIMIT_FALLBACK = 60;
+
+// Persists the last completed scan server-side (2026-08-04) so it's shared
+// across every user, not just the browser that ran it - see api/
+// contrarianFinder.ts's sessionStorage-only persistence, which this
+// complements rather than replaces (the runner's own browser still shows
+// results instantly from its local cache; this is the fallback for anyone
+// else). Called once, at the end of a successfully completed scan - never
+// for a partial/abandoned one. params/results are opaque JSONB from this
+// service's perspective (the frontend's RunParams/ScanResult[] shapes are
+// the source of truth); no validation beyond what the DB itself enforces.
+//
+// Tiered retention (2026-08-05, the user's own call after noticing every
+// run - regardless of who ran it - was accumulating forever): callers with
+// contrarian_finder:scan_history (admin/admin-master, resolved by the
+// controller) append to a shared history log, pruned back to the most
+// recent ADMIN_HISTORY_LIMIT rows after every insert. Every other
+// contrarian_finder:scan-permitted caller (user-contra-withKey/wokey)
+// instead gets exactly one row of their own - a transactional delete+insert
+// upsert keyed on (started_by, run_tier = 'user'), same "my last scan"
+// mental model the user described, distinct from the admin tier's shared
+// history. GET /contrarian-finder/last-scan is deliberately unaffected by
+// any of this - still just the single most recent row across both tiers.
+// Returns the new row's id (2026-09-19) - doubles as the "start a run" step for incremental
+// per-batch persistence (see appendRunProgress below): scanBatch() calls this on batchIndex 0
+// and threads the returned id back through the frontend's batch loop so every later batch
+// updates this same row instead of each batch creating its own.
+export async function saveLastScan(
+  userId: string,
+  runTier: ContrarianRunTier,
+  data: { universeSize: number; scanned: number; params: unknown; results: unknown },
+): Promise<string> {
+  const values = [userId, data.universeSize, data.scanned, JSON.stringify(data.params), JSON.stringify(data.results)];
+
+  if (runTier === 'user') {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `DELETE FROM tx_shared_contrarian_run WHERE started_by = $1 AND run_tier = 'user'`,
+        [userId],
+      );
+      const { rows } = await client.query<{ id: string }>(
+        `INSERT INTO tx_shared_contrarian_run (started_by, run_tier, universe_size, scanned, params, results)
+         VALUES ($1, 'user', $2, $3, $4, $5) RETURNING id`,
+        values,
+      );
+      await client.query('COMMIT');
+      return rows[0].id;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => { /* best-effort */ });
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  const historyLimit = await getConfigInt(ADMIN_HISTORY_RETENTION_KEY, ADMIN_HISTORY_LIMIT_FALLBACK);
+
+  const { rows } = await pool.query<{ id: string }>(
+    `INSERT INTO tx_shared_contrarian_run (started_by, run_tier, universe_size, scanned, params, results)
+     VALUES ($1, 'admin', $2, $3, $4, $5) RETURNING id`,
+    values,
+  );
+  await pool.query(
+    `DELETE FROM tx_shared_contrarian_run
+     WHERE run_tier = 'admin' AND id NOT IN (
+       SELECT id FROM tx_shared_contrarian_run WHERE run_tier = 'admin' ORDER BY completed_at DESC LIMIT $1
+     )`,
+    [historyLimit],
+  );
+  return rows[0].id;
+}
+
+// Appends one batch's contribution to an already-started run (see saveLastScan above) - a
+// single atomic UPDATE, JSONB array concatenation (||) rather than a separate read-then-write,
+// so a batch's real cost is durable the instant its own request completes, regardless of what
+// happens to the browser a moment later. Never creates a row - callers must already hold an id
+// from saveLastScan's own return value.
+export async function appendRunProgress(id: string, data: { scanned: number; results: unknown[] }): Promise<void> {
+  await pool.query(
+    `UPDATE tx_shared_contrarian_run
+     SET scanned = scanned + $2, results = results || $3::jsonb, completed_at = now()
+     WHERE id = $1`,
+    [id, data.scanned, JSON.stringify(data.results)],
+  );
+}
+
+// Every row is a completed run (save-once-at-the-end means nothing else gets
+// written) - "the last scan" is just the most recent row, no status filter
+// needed. started_by is intentionally not selected/returned here - stored
+// for a possible future audit trail, not yet exposed to viewers.
+export async function getLastScan(): Promise<LastScanRecord | null> {
+  const { rows } = await pool.query<{
+    completed_at: string; universe_size: string; scanned: string; params: unknown; results: unknown;
+  }>(
+    `SELECT completed_at, universe_size, scanned, params, results
+     FROM tx_shared_contrarian_run ORDER BY completed_at DESC LIMIT 1`,
+  );
+  if (!rows[0]) return null;
+  const r = rows[0];
+  // INT8 columns come back as strings from pg - see marketData/roles services
+  // for the same precedent.
+  return {
+    completedAt: r.completed_at,
+    universeSize: Number(r.universe_size),
+    scanned: Number(r.scanned),
+    params: r.params,
+    results: r.results,
+  };
+}
+
+export interface RunHistoryListItem {
+  id: string;
+  completedAt: string;
+  universeSize: number;
+  scanned: number;
+  params: unknown;
+}
+
+// Run History (2026-08-31, gated by contrarian_finder:view_history - see
+// requirePermission on the routes below). Tier-agnostic, same "viewing
+// ignores tier" philosophy getLastScan() already established - run_tier is a
+// retention/storage concept only, never a viewing one. `results` (the
+// ~150KB-per-row JSONB blob) is deliberately excluded here to keep this
+// list call cheap; fetched only per-row, on demand, via getRunById below. No
+// pagination - a deliberate MVP simplification worth revisiting if retention
+// caps grow much larger than today's numbers.
+export async function listRunHistory(): Promise<RunHistoryListItem[]> {
+  const { rows } = await pool.query<{
+    id: string; completed_at: string; universe_size: string; scanned: string; params: unknown;
+  }>(
+    `SELECT id, completed_at, universe_size, scanned, params
+     FROM tx_shared_contrarian_run ORDER BY completed_at DESC`,
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    completedAt: r.completed_at,
+    universeSize: Number(r.universe_size),
+    scanned: Number(r.scanned),
+    params: r.params,
+  }));
+}
+
+// The full record (including `results`) for one archived run, keyed by id
+// instead of getLastScan()'s "most recent" - same shape either way so the
+// frontend can render both through identical components.
+export async function getRunById(id: string): Promise<LastScanRecord | null> {
+  const { rows } = await pool.query<{
+    completed_at: string; universe_size: string; scanned: string; params: unknown; results: unknown;
+  }>(
+    `SELECT completed_at, universe_size, scanned, params, results
+     FROM tx_shared_contrarian_run WHERE id = $1`,
+    [id],
+  );
+  if (!rows[0]) return null;
+  const r = rows[0];
+  return {
+    completedAt: r.completed_at,
+    universeSize: Number(r.universe_size),
+    scanned: Number(r.scanned),
+    params: r.params,
+    results: r.results,
+  };
 }

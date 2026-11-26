@@ -5,7 +5,7 @@ description = "Python analysis microservice (health-check scaffolding)"
 package-mode = false
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = "^3.14"
 fastapi = "^0.115"
 uvicorn = {extras = ["standard"], version = "^0.32"}
 

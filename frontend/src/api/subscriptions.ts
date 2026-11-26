@@ -36,3 +36,16 @@ export function useDeleteSubscription() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['subscriptions'] }),
   });
 }
+
+// "Get Allowed Models" (2026-10-08) - tests whatever key is currently typed/pasted by default,
+// or (useSavedKey: true) the caller's own already-saved key, decrypted server-side and never
+// returned here - either way, this never needs to invalidate or touch the subscriptions cache
+// above, since it's a read against the provider's own API, not this app's stored data.
+export function useListAllowedModels() {
+  return useMutation({
+    mutationFn: (input: { provider: string; apiKey?: string; useSavedKey?: boolean }) => apiFetch<{ models: string[] }>(`/subscriptions/${input.provider}/models`, {
+      method: 'POST',
+      body: JSON.stringify({ apiKey: input.apiKey, useSavedKey: input.useSavedKey }),
+    }).then((r) => r.models),
+  });
+}

@@ -1,9 +1,14 @@
 import { Request, Response, NextFunction } from 'express';
 import * as userSubscriptionService from '../services/userSubscription.service';
+import * as llmProviderModels from '../services/llmProviderModels.service';
 
 // Application-level allowlist, not a DB constraint — adding a new provider
 // later is a one-line change here, no migration needed.
-const ALLOWED_PROVIDERS = ['fmp', 'finnhub'];
+const ALLOWED_PROVIDERS = ['fmp', 'finnhub', 'anthropic', 'openai'];
+
+// "Get Allowed Models" only makes sense for providers with a model catalog of their own - FMP/
+// Finnhub are data providers, not LLM providers, and have no equivalent concept.
+const MODEL_LISTING_PROVIDERS: llmProviderModels.LlmProvider[] = ['anthropic', 'openai'];
 
 // Every route this controller serves sits behind requireAuth (see app.ts), so
 // req.user is always populated by the time a handler runs.
@@ -51,6 +56,50 @@ export async function upsert(req: Request, res: Response, next: NextFunction): P
     });
     res.json({ subscription });
   } catch (err) {
+    next(err);
+  }
+}
+
+// Tests either the key currently being typed/pasted (the default), or - when `useSavedKey:
+// true` is explicitly passed - the caller's own already-saved key, decrypted server-side and
+// never returned to the client (only the resulting model list is). Deliberately an explicit
+// flag rather than "empty apiKey means use the saved one" - an accidental fallback here would
+// silently test the wrong key. Uses getOwnDecryptedKey(), not getDecryptedKey() - this must
+// never silently fall through to the Admin-Master Fallback key, since a user clicking "check MY
+// saved key" should see results for the key they themselves configured, not an admin's key they
+// may not even know exists. apiKey (when present) is accepted in the body, never a query
+// string/URL, same as upsert() above, so it's never written to a server log.
+export async function listModels(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const provider = getProviderParam(req);
+  if (!MODEL_LISTING_PROVIDERS.includes(provider as llmProviderModels.LlmProvider)) {
+    res.status(400).json({ error: `Listing models is only supported for: ${MODEL_LISTING_PROVIDERS.join(', ')}.` });
+    return;
+  }
+
+  let apiKey: string;
+  if (req.body?.useSavedKey === true) {
+    const saved = await userSubscriptionService.getOwnDecryptedKey(getUserId(req), provider);
+    if (!saved) {
+      res.status(400).json({ error: `No ${provider} key is saved yet - add one first, or paste one above to test it directly.` });
+      return;
+    }
+    apiKey = saved;
+  } else {
+    apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+    if (!apiKey) {
+      res.status(400).json({ error: 'An API key is required.' });
+      return;
+    }
+  }
+
+  try {
+    const models = await llmProviderModels.listModelsForProvider(provider as llmProviderModels.LlmProvider, apiKey);
+    res.json({ models });
+  } catch (err) {
+    if (err instanceof llmProviderModels.ProviderModelListError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     next(err);
   }
 }

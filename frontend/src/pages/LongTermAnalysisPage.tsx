@@ -1,9 +1,12 @@
 import { useState, type FormEvent } from 'react';
-import { useLongTermAnalysis, type ConvictionResult } from '../api/longTermAnalysis';
+import { useLongTermAnalysis, type ConvictionResult, type LongTermAnalysisResult } from '../api/longTermAnalysis';
 import { ApiError } from '../api/client';
 import { formatCurrency } from '../lib/format';
 import { useIncomingTicker } from '../lib/tickerHandoff';
+import { useTickerHistory } from '../lib/tickerHistory';
 import StockPreviewChart from '../components/StockPreviewChart';
+import CandlestickPopup from '../components/CandlestickPopup';
+import TickerSubTabs from '../components/TickerSubTabs';
 
 const RATING_STYLES: Record<string, string> = {
   bullish: 'bg-success/10 text-success',
@@ -57,24 +60,53 @@ function ConvictionCard({ horizon, result, maxScore }: ConvictionCardProps) {
 export default function LongTermAnalysisPage() {
   const [ticker, setTicker] = useState('');
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
+  const [candlestickSymbol, setCandlestickSymbol] = useState<string | null>(null);
+  const [pendingSymbol, setPendingSymbol] = useState<string | null>(null);
   const analysis = useLongTermAnalysis();
+  const history = useTickerHistory<LongTermAnalysisResult>({ storageKey: 'longTermAnalysis:history' });
+
+  // Case 2 - switching to an already-cached sub-tab. Also clears any stale
+  // error from a previous failed lookup (that mutation is otherwise never
+  // re-run, so its isError would keep showing over the newly-selected tab).
+  function selectExisting(symbol: string) {
+    analysis.reset();
+    history.select(symbol);
+  }
+
+  function runTicker(symbol: string) {
+    const upper = symbol.trim().toUpperCase();
+    if (!upper) return;
+    if (history.has(upper)) { selectExisting(upper); return; } // Case 2
+    setPendingSymbol(upper);
+    analysis.mutate(upper, {
+      onSuccess: (result) => { history.insert(upper, result); setPendingSymbol(null); }, // Case 1
+      onError: () => setPendingSymbol(null), // Case 3 - history untouched, error shown below
+    });
+  }
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!ticker.trim()) return;
-    analysis.mutate(ticker.trim().toUpperCase());
+    runTicker(ticker);
   }
 
   useIncomingTicker('long-term-analysis', (symbol) => {
     setTicker(symbol);
-    analysis.mutate(symbol);
+    runTicker(symbol);
   });
 
-  const data = analysis.data;
+  const data = history.active;
 
   return (
     <>
       <main className="flex flex-col gap-6 p-4 sm:p-6">
+        <TickerSubTabs
+          symbols={history.entries.map((e) => e.symbol)}
+          activeSymbol={history.activeSymbol}
+          pendingSymbol={pendingSymbol}
+          onSelect={selectExisting}
+          onClose={history.close}
+        />
+
         {/* Ticker entry + MT/LT conviction — kept in one card so the
             conviction summary fills the space next to the form instead of
             sitting empty until the reader scrolls all the way down. */}
@@ -114,7 +146,9 @@ export default function LongTermAnalysisPage() {
 
         {analysis.isError && (
           <p className="text-sm text-danger">
-            {analysis.error instanceof ApiError ? analysis.error.message : 'Analysis failed.'}
+            {analysis.error instanceof ApiError
+              ? (analysis.error.status === 404 ? 'Invalid Stock ticker' : analysis.error.message)
+              : 'Analysis failed.'}
           </p>
         )}
 
@@ -136,6 +170,13 @@ export default function LongTermAnalysisPage() {
                     <span className="ml-2 text-sm text-text-secondary">
                       {data.companyName ?? ''}{data.exchange ? ` · ${data.exchange}` : ''}
                     </span>
+                    <button
+                      type="button"
+                      onClick={() => setCandlestickSymbol(data.symbol)}
+                      className="ml-2 text-xs font-medium text-accent hover:underline"
+                    >
+                      Candlestick chart →
+                    </button>
                     <p className="mt-1 text-xs text-text-muted">
                       {na(data.sector)} · {na(data.industry)}
                     </p>
@@ -368,6 +409,9 @@ export default function LongTermAnalysisPage() {
       </main>
 
       {previewSymbol && <StockPreviewChart symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />}
+      {candlestickSymbol && (
+        <CandlestickPopup symbol={candlestickSymbol} initialInterval="1day" onClose={() => setCandlestickSymbol(null)} />
+      )}
     </>
   );
 }

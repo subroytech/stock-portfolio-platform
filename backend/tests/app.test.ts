@@ -45,8 +45,19 @@ describe('app routing (no DB, no real FMP key required)', () => {
   });
 
   test('POST /contrarian-finder/scan-batch returns 503 when the caller has no FMP key on file', async () => {
+    // scan-batch is admin-only (requirePermission) - give this caller the
+    // permission so the request reaches the (separately unmocked, real)
+    // userSubscription.getDecryptedKey() call this test actually exercises.
+    mockQuery.mockImplementation((sql: string) => (
+      sql.includes('users_roles') ? Promise.resolve({ rows: [{ '?column?': 1 }] }) : Promise.resolve({ rows: [] })
+    ));
     const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
     expect(res.status).toBe(503);
+  });
+
+  test('POST /contrarian-finder/scan-batch returns 403 for a non-admin caller', async () => {
+    const res = await request(app).post('/contrarian-finder/scan-batch').set('Cookie', authCookie).send({ batchIndex: 0 });
+    expect(res.status).toBe(403);
   });
 
   test('unknown route returns 404', async () => {
