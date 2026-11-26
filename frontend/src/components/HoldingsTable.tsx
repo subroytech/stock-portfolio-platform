@@ -23,7 +23,17 @@ type SizeTab = 'major' | 'minor' | 'history';
 // import showed 0 holdings in the default tab until the user thought to
 // click Refresh Prices first - hiding-by-default is the worse failure mode
 // for a brand-new import than showing-by-default.
+//
+// A holding is also MAJOR on absolute size alone: current value >= $5,000 qualifies it
+// regardless of its allocation weight (2026-11-25) - in a large portfolio 2.5% can be a
+// far bigger dollar amount than a user thinks of as "minor". Everything that doesn't
+// qualify under either rule is MINOR. (Null allocation still wins as MAJOR, as above.)
 const MAJOR_THRESHOLD_PCT = 2.5;
+const MAJOR_THRESHOLD_VALUE = 5000;
+
+function isMajorHolding(h: { allocationPct: number | null; currentValue: number }): boolean {
+  return h.allocationPct == null || h.allocationPct > MAJOR_THRESHOLD_PCT || h.currentValue >= MAJOR_THRESHOLD_VALUE;
+}
 
 const COLUMNS: { key: SortKey; label: string; align?: 'right' }[] = [
   { key: 'symbol', label: 'Symbol' },
@@ -54,11 +64,11 @@ export default function HoldingsTable({ holdings, portfolioId, onSymbolClick }: 
   const [sizeTab, setSizeTab] = useState<SizeTab>('major');
 
   const majorHoldings = useMemo(
-    () => holdings.filter((h) => h.allocationPct == null || h.allocationPct > MAJOR_THRESHOLD_PCT),
+    () => holdings.filter(isMajorHolding),
     [holdings],
   );
   const minorHoldings = useMemo(
-    () => holdings.filter((h) => h.allocationPct != null && h.allocationPct <= MAJOR_THRESHOLD_PCT),
+    () => holdings.filter((h) => !isMajorHolding(h)),
     [holdings],
   );
   const visibleHoldings = sizeTab === 'minor' ? minorHoldings : majorHoldings;
@@ -136,7 +146,7 @@ export default function HoldingsTable({ holdings, portfolioId, onSymbolClick }: 
       <>
       {visibleHoldings.length === 0 && (
         <p className="text-sm text-text-secondary">
-          {sizeTab === 'major' ? 'No holdings above the 2.5% allocation threshold.' : 'No holdings at or below the 2.5% allocation threshold.'}
+          {sizeTab === 'major' ? 'No holdings above 2.5% allocation or worth $5,000 or more.' : 'No holdings at or below 2.5% allocation and worth under $5,000.'}
         </p>
       )}
 

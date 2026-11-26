@@ -168,8 +168,33 @@ describe('HoldingsTable', () => {
       expect(screen.queryByText(/No holdings/)).not.toBeInTheDocument();
 
       await userEvent.click(screen.getByRole('button', { name: /^MINOR/ }));
-      expect(screen.getByText(/No holdings at or below the 2.5% allocation threshold/)).toBeInTheDocument();
+      expect(screen.getByText(/No holdings at or below 2.5% allocation and worth under \$5,000/)).toBeInTheDocument();
       expect(screen.queryByRole('table')).not.toBeInTheDocument();
+    });
+
+    // 2026-11-25: a holding worth >= $5,000 is Major on size alone, even at a small weight.
+    test('a holding worth >= $5,000 is Major even when its allocation is <= 2.5%; just under $5,000 stays Minor', async () => {
+      const holdings = [
+        { ...holding, id: 'h1', symbol: 'BIGBUCKS', allocationPct: 1, currentValue: 5000 }, // exactly $5,000 - Major
+        { ...holding, id: 'h2', symbol: 'JUSTUNDER', allocationPct: 1, currentValue: 4999.99 }, // under - Minor
+        { ...holding, id: 'h3', symbol: 'HEAVY', allocationPct: 2.5, currentValue: 8000 }, // exactly 2.5% but big - Major
+      ];
+      render(<HoldingsTable holdings={holdings} portfolioId="p1" />);
+      expect(screen.getByRole('button', { name: /^MAJOR.*#2 Stocks/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^MINOR.*#1 Stocks/ })).toBeInTheDocument();
+      expect(screen.getAllByText('BIGBUCKS').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('HEAVY').length).toBeGreaterThan(0);
+      expect(screen.queryByText('JUSTUNDER')).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', { name: /^MINOR/ }));
+      expect(screen.getAllByText('JUSTUNDER').length).toBeGreaterThan(0);
+      expect(screen.queryByText('BIGBUCKS')).not.toBeInTheDocument();
+    });
+
+    test('a null-allocation holding stays Major even when worth far less than $5,000', () => {
+      render(<HoldingsTable holdings={[{ ...holding, id: 'h1', symbol: 'TINY', allocationPct: null, currentValue: 10 }]} portfolioId="p1" />);
+      expect(screen.getByRole('button', { name: /^MAJOR.*#1 Stocks/ })).toBeInTheDocument();
+      expect(screen.getByTestId('holdings-row-TINY')).toBeInTheDocument();
     });
   });
 
